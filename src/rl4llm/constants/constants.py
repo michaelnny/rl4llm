@@ -1,0 +1,1 @@
+DEFAULT_FAILED_RESPONSE="I'm unable to provide a response at this moment."

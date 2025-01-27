@@ -1,0 +1,21 @@
+datasets==3.2.*
+openai==1.59.*
+mpi4py==4.*
+deepspeed==0.16.*
+pydantic==2.10.*
+numpy==2.2.*
+pandas==2.2.*
+PyYAML==6.0.2
+setuptools==75.5.0
+tiktoken==0.8.0
+torch==2.5.*
+tqdm==4.67.1
+transformers==4.48.*
+tensorboard==2.18.*
+accelerate==1.2.*
+flash-attn==2.7.*
+bitsandbytes==0.45.*
+
+# tests
+pytest
+pytest-cov

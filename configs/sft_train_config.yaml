@@ -1,0 +1,80 @@
+# SFT config
+job:
+  name: "sft_run_qwen2.5-3b" # Identifier for the training job
+  seed: 117 # Seed for reproducibility
+  artifacts_path: "./runs" # Artifacts Configuration
+
+model:
+  pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
+  load_in_4bit: false
+  activation_checkpoint: true
+  initialize_value_weights: true
+
+deepspeed:
+  # memory_breakdown: true  # for debugging
+  steps_per_print: 10000 # disable default logging
+  train_micro_batch_size_per_gpu: 4
+  gradient_accumulation_steps: 16
+  gradient_clipping: 0.0
+  fp16:
+    enabled: false
+  bf16:
+    enabled: true
+  optimizer:
+    type: Adam
+    params:
+      lr: 1.0e-5 # this is just a place holder as it will be controlled by the scheduler
+      betas: [0.9, 0.999]
+      eps: 1.0e-8
+      weight_decay: 0.0
+  scheduler:
+    type: "WarmupDecayLR"
+    params:
+      warmup_num_steps: 50
+      total_num_steps: 2000
+      warmup_min_lr: [1.0e-7, 1.0e-7, 1.0e-7] # for params groups in order: ["policy nodecay", "policy", "value head"]
+      warmup_max_lr: [1.0e-5, 1.0e-5, 1.0e-5] # for params groups in order: ["policy nodecay", "policy", "value head"]
+  zero_optimization:
+    stage: 2
+    contiguous_gradients: true
+    overlap_comm: true
+    allgather_partitions: true
+    reduce_scatter: true
+    offload_optimizer:
+      device: cpu
+      pin_memory: false
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: true
+    contiguous_memory_optimization: true
+    number_checkpoints: null
+    synchronize_checkpoint_boundary: false
+    profile: false
+
+training_config:
+  num_epochs: 2
+  min_gamma: 0.999 # for compute dynamic discount
+  max_gamma: 0.9998 # for compute dynamic discount
+  max_expected_length: 10000
+  value_loss_coef: 0.1
+  ckpt_enabled: true
+  ckpt_interval: 100 # every N updates
+  ckpt_keep_last_n: 3
+datasets:
+  - name: "MATH"
+    path: "./data/sft_stage/math_hard_2k_r1_episodes_fixed.jsonl.gz"
+  # - name: 'GSM'
+  #   path: "./data/sft_stage/gsm_.jsonl"
+
+prompt_templates:
+  - state_id: reasoning
+    user_prompt: |
+      {question}
+  - state_id: final_answer
+    user_prompt: |
+      Present your final answer.
+
+logging:
+  level: "INFO"
+  intervals:
+    learner: 1 # log training step stats

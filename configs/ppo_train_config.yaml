@@ -1,0 +1,128 @@
+# RL PPO config
+job:
+  name: "PPO_Qwen2.5_Math_7B_Instruct" 
+  seed: 117 
+  artifacts_path: "./runs" 
+
+model:
+  pretrained_model: "Qwen/Qwen2.5-Math-7B-Instruct"
+  load_in_4bit: false
+  activation_checkpoint: true
+  initialize_value_weights: true
+
+deepspeed:
+  # memory_breakdown: true  # for debugging
+  steps_per_print: 10000 # disable default logging
+  train_micro_batch_size_per_gpu: 8
+  train_batch_size: 128
+  gradient_clipping: 1.0
+  fp16:
+    enabled: false
+  bf16:
+    enabled: true
+  optimizer:
+    type: Adam
+    params:
+      lr: 1.0e-5 # this is just a place holder as it will be controlled by the scheduler
+      betas: [0.9, 0.999]
+      eps: 1.0e-8
+      weight_decay: 0.0
+  scheduler:
+    type: "WarmupDecayLR"
+    params:
+      warmup_num_steps: 50
+      total_num_steps: 10000
+      warmup_min_lr: [1.0e-7, 1.0e-7, 1.0e-6] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
+      warmup_max_lr: [5.0e-7, 5.0e-7, 5.0e-6] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
+  zero_optimization:
+    stage: 2
+    contiguous_gradients: true
+    overlap_comm: true
+    allgather_partitions: true
+    reduce_scatter: true
+    offload_optimizer:
+      device: cpu
+      pin_memory: false
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: true
+    contiguous_memory_optimization: true
+    number_checkpoints: null
+    synchronize_checkpoint_boundary: false
+    profile: false
+
+datasets: # List of tasks/datasets to load
+  # - "gsm"
+  - "math"
+
+environment:
+  num_envs: 16
+  min_reward: 0.0
+  max_reward: 1.0
+  mid_step_score: 0.5 # not implemented, as this only used in multi-step MDP, which is not working with PPO yet
+  shuffle: true
+  state_config: # define state transition for MDP
+    - state_id: reasoning
+      system_prompt: |
+        A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
+        The assistant first thinks about the reasoning process in the mind and then provides the user
+        with the answer. Please put your final answer (e.g. numerical value or expression) within \\boxed{}.
+      user_prompt: |
+        {question}
+      is_start: true
+      should_grade: true
+      transitions:
+        - state_id: end_terminal
+          terminal: true
+          prob: 1.0
+
+training_config:
+  rollout_iterations: 10000
+  num_epochs: 4
+  rollout_episodes: 1024
+  min_gamma: 0.999 # for compute dynamic discount
+  max_gamma: 0.9998 # for compute dynamic discount
+  max_expected_length: 10000
+  policy_clip_eps: 0.2 # PPO policy clip parameter
+  value_clip_eps: 0.2 # PPO value clip parameter
+  gamma: 1.0 # default discount factor
+  gae_lambda: 0.95
+  normalize_rewards: true
+  normalize_advantages: true
+  value_loss_coef: 0.1
+  policy_grad_clip: 0.0
+  kl_coef: 0.01
+  ckpt_enabled: true
+  ckpt_interval: 320 # every N updates, ~ 10 rollouts
+  ckpt_keep_last_n: 3
+
+actor:
+  exploration:
+    init_epsilon: 0.9
+    min_epsilon: 0.1
+    decay_steps: 100000
+    max_explore_steps: 50
+  decoding:
+    max_new_tokens: 1024 # 2048
+    temperature: 0.7
+    top_p: 1.0
+    # top_k: 500
+    do_sample: true
+
+evaluator:
+  enabled: true # Toggle to enable/disable evaluation
+  interval: 10 # Perform evaluation every N iterations
+  rollout_episodes: 500 # Maximum number of samples to test
+  decoding:
+    max_new_tokens: 4096 # 2048
+    temperature: 0.0
+    top_p: 1.0
+    # top_k: 500
+    do_sample: false
+
+logging:
+  level: "INFO"
+  intervals:
+    actor: 10 # log episode stats
+    evaluator: 10 # log episode stats
+    learner: 5 # log training step stats
