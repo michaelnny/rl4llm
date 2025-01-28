@@ -66,25 +66,20 @@ class PPOTrainer(BaseTrainer):
 
     def _setup_reference_model(self):
         """Setup reference model for PPO training."""
+
+        assert 'reference_deepspeed' in self.config
+
         ref_model = AutoModelForCausalLM.from_pretrained(**self.model_kwargs)
         self.disable_dropout(ref_model)
         self.freeze_model(ref_model)
         self.ref_policy_model = ref_model
 
-        eval_ds_config = {
-            "stage": self.config['deepspeed']['zero_optimization'].get('stage', 2),
-            "stage3_param_persistence_threshold": "auto",
-            "offload_param": {
-                "device": "none",
-                "pin_memory": True,
-            },
-            "train_micro_batch_size_per_gpu": self.batch_size_per_gpu,
-        }
+        ref_ds_config = self.config['reference_deepspeed']
 
         self.ref_policy_engine, _, _, _ = deepspeed.initialize(
             model=self.ref_policy_model,
             model_parameters=None,
-            config=eval_ds_config,
+            config=ref_ds_config,
         )
 
         self.ref_policy_model = self.ref_policy_engine.module
@@ -254,8 +249,10 @@ class PPOTrainer(BaseTrainer):
 
         # PPO Clipped Policy Loss
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clip_adv = torch.clamp(ratio, 1.0 - config.policy_clip_eps, 1.0 + config.policy_clip_eps) * advantages.detach()
-        pg_losses = torch.min(clip_adv * advantages.detach(), clip_adv)
+        surr1 = ratio * advantages.detach()
+        surr2 = ratio.clamp(1 - config.policy_clip_eps, 1 + config.policy_clip_eps) * advantages.detach()
+        pg_losses = -torch.min(surr1, surr2)
+
         clipped = ratio.gt(1 + config.policy_clip_eps) | ratio.lt(1 - config.policy_clip_eps)
         pg_clipfrac = torch.as_tensor(clipped, dtype=ratio.dtype)
         approxkl = (pi_logprobs - behavior_logprobs).detach()
@@ -270,24 +267,21 @@ class PPOTrainer(BaseTrainer):
 
         # Apply mask and mean over seq_length dimension
         pg_losses = masked_mean(pg_losses, loss_masks, dim=1)  # [batch_size]
-        entropies = masked_mean(entropies, loss_masks, dim=1)  # [batch_size]
         value_losses = masked_mean(value_losses, loss_masks, dim=1)  # [batch_size]
-        advantages = masked_mean(advantages, loss_masks, dim=1)  # [batch_size]
-        returns = masked_mean(returns, loss_masks, dim=1)  # [batch_size]
-        pred_values = masked_mean(pred_values, loss_masks, dim=1)  # [batch_size]
-        old_values = masked_mean(old_values, loss_masks, dim=1)  # [batch_size]
+        entropies = masked_mean(entropies, loss_masks, dim=1)  # [batch_size]
         value_error = masked_mean(value_error, loss_masks, dim=1)  # [batch_size]
         approxkl = masked_mean(approxkl, loss_masks, dim=1)  # [batch_size]
         pg_clipfrac = masked_mean(pg_clipfrac, loss_masks, dim=1)  # [batch_size]
         vf_clipfrac = masked_mean(vf_clipfrac, loss_masks, dim=1)  # [batch_size]
 
         rewards = masked_sum(rewards, loss_masks, dim=1)  # [batch_size]
+        returns = masked_sum(returns, loss_masks, dim=1)  # [batch_size]
         kl = masked_sum(kl, loss_masks, dim=1)  # [batch_size]
         kl_score = masked_sum(kl_score, loss_masks, dim=1)  # [batch_size]
 
         # Combined Loss
-        total_losses = -pg_losses + config.value_loss_coef * value_losses  # [batch_size]
-        total_loss = total_losses.mean()  # needs to be a scalar
+        total_losses = pg_losses + config.value_loss_coef * value_losses  # [batch_size]
+        loss = total_losses.mean()  # needs to be a scalar
 
         # All stats have shape [batch_size]
         stats = {
@@ -307,7 +301,7 @@ class PPOTrainer(BaseTrainer):
 
         del batch, loss_masks, rewards, returns, advantages
 
-        return total_loss, stats
+        return loss, stats
 
     def _compute_returns_and_advantages(
         self, rewards: torch.Tensor, values: torch.Tensor, masks: torch.Tensor

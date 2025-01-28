@@ -26,14 +26,18 @@ class ValueHead(nn.Module):
     def __init__(self, hidden_dim: int, num_units: int):
         super().__init__()
         self.linear1 = nn.Linear(hidden_dim, num_units)
-        self.activation = nn.Tanh()
-        self.linear2 = nn.Linear(num_units, 1)
+        self.activation1 = nn.Tanh()
+        self.linear2 = nn.Linear(num_units, num_units)
+        self.activation2 = nn.Tanh()
+        self.linear3 = nn.Linear(num_units, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Compute value for the given state"""
         x = self.linear1(x)
-        x = self.activation(x)
-        out = self.linear2(x)
+        x = self.activation1(x)
+        x = self.linear2(x)
+        x = self.activation2(x)
+        out = self.linear3(x)
         return out.squeeze(-1)  # [batch_size, seq_len]
 
 

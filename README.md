@@ -50,4 +50,17 @@ PYTHONPATH=src deepspeed --num_gpus=1 src/rl4llm/scripts/run_train_ppo.py --conf
 PYTHONPATH=src deepspeed --num_gpus=1 src/rl4llm/scripts/run_train_ppo.py --config-file ./configs/ppo_train_config.yaml
 
 
+
+
+
+pkill -f "src/rl4llm/scripts/run_train_ppo.py"
+
+```
+
+
+To monitoring the job, open tensorboard
+```bash
+
+tensorboard --logdir ./runs --samples_per_plugin=text=1000
+
 ```

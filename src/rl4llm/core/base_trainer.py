@@ -151,6 +151,8 @@ class BaseTrainer(ABC):
 
     def _setup_environment(self) -> None:
         """Set up basic training environment."""
+        assert 'deepspeed' in self.config
+
         deepspeed.init_distributed()
         self.local_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
@@ -356,6 +358,7 @@ class BaseTrainer(ABC):
         Returns:
             float: Adjusted discount rate.
         """
+        assert episode_length > 0, "Episode length must be greater than 0"
         cfg = self.train_cfg
         normalized_length = min(episode_length / cfg.max_expected_length, 1.0)
         # Apply nonlinear scaling to emphasize longer episodes

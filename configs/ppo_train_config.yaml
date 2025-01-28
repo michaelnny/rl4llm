@@ -1,8 +1,8 @@
 # RL PPO config
 job:
-  name: "PPO_Qwen2.5_Math_7B_Instruct" 
-  seed: 117 
-  artifacts_path: "./runs" 
+  name: "PPO_Qwen2.5_Math_7B_Instruct"
+  seed: 117
+  artifacts_path: "./runs"
 
 model:
   pretrained_model: "Qwen/Qwen2.5-Math-7B-Instruct"
@@ -16,6 +16,8 @@ deepspeed:
   train_micro_batch_size_per_gpu: 8
   train_batch_size: 128
   gradient_clipping: 1.0
+  prescale_gradients: false
+  wall_clock_breakdown: false
   fp16:
     enabled: false
   bf16:
@@ -31,18 +33,30 @@ deepspeed:
     type: "WarmupDecayLR"
     params:
       warmup_num_steps: 50
-      total_num_steps: 10000
+      total_num_steps: 50000
       warmup_min_lr: [1.0e-7, 1.0e-7, 1.0e-6] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
-      warmup_max_lr: [5.0e-7, 5.0e-7, 5.0e-6] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
+      warmup_max_lr: [5.0e-7, 5.0e-7, 1.0e-5] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
   zero_optimization:
     stage: 2
     contiguous_gradients: true
-    overlap_comm: true
     allgather_partitions: true
     reduce_scatter: true
+    overlap_comm: true
+    stage3_max_live_parameters: auto
+    stage3_max_reuse_distance: auto
+    stage3_param_persistence_threshold: auto
+    stage3_prefetch_bucket_size: auto
+    reduce_bucket_size: auto
+    memory_efficient_linear: false
+    # ZeRO++
+    zero_hpz_partition_size: 8
+    zero_quantized_weights: false
+    zero_quantized_gradients: false
+    offload_param:
+      device: none
     offload_optimizer:
       device: cpu
-      pin_memory: false
+      pin_memory: true
   activation_checkpointing:
     partition_activations: true
     cpu_checkpointing: true
@@ -50,6 +64,33 @@ deepspeed:
     number_checkpoints: null
     synchronize_checkpoint_boundary: false
     profile: false
+  hybrid_engine: # for inference + training typically for RL
+    enabled: true
+    max_out_tokens: 4096
+    inference_tp_size: 1
+    release_inference_cache: true
+    pin_parameters: true
+    tp_gather_partition_size: 8
+
+reference_deepspeed:
+  steps_per_print: 10000 # disable default logging
+  train_micro_batch_size_per_gpu: 8
+  train_batch_size: 128
+  gradient_clipping: 1.0
+  prescale_gradients: false
+  wall_clock_breakdown: false
+  fp16:
+    enabled: false
+  bf16:
+    enabled: true
+  zero_optimization:
+    stage: 0 # 0 or 3
+    contiguous_gradients: true
+    allgather_partitions: true
+    reduce_scatter: true
+    overlap_comm: true
+    offload_param:
+      device: cpu
 
 datasets: # List of tasks/datasets to load
   # - "gsm"
@@ -89,7 +130,7 @@ training_config:
   gae_lambda: 0.95
   normalize_rewards: true
   normalize_advantages: true
-  value_loss_coef: 0.1
+  value_loss_coef: 1.0
   policy_grad_clip: 0.0
   kl_coef: 0.01
   ckpt_enabled: true
@@ -103,8 +144,8 @@ actor:
     decay_steps: 100000
     max_explore_steps: 50
   decoding:
-    max_new_tokens: 1024 # 2048
-    temperature: 0.7
+    max_new_tokens: 2048
+    temperature: 0.6
     top_p: 1.0
     # top_k: 500
     do_sample: true
@@ -114,7 +155,7 @@ evaluator:
   interval: 10 # Perform evaluation every N iterations
   rollout_episodes: 500 # Maximum number of samples to test
   decoding:
-    max_new_tokens: 4096 # 2048
+    max_new_tokens: 2048
     temperature: 0.0
     top_p: 1.0
     # top_k: 500
