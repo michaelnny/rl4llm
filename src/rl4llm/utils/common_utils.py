@@ -1,20 +1,145 @@
+import glob
 import gzip
 import json
 import logging
+import math
+from datetime import datetime
 import os
 import random
+import shutil
 import time
 from collections import defaultdict
 from difflib import SequenceMatcher
 from threading import Lock
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
 import yaml
 
 
+from rl4llm.utils.tracker import TrainingTracker
+
 logger = logging.getLogger()
+
+
+class DummyLogger:
+    def __init__(self):
+        pass
+
+    def info(self, msg, *args, **kwargs):
+        pass
+
+    def warning(self, msg, *args, **kwargs):
+        pass
+
+    def error(self, msg, *args, **kwargs):
+        pass
+
+    def debug(self, msg, *args, **kwargs):
+        pass
+
+    def exception(self, msg, *args, **kwargs):
+        pass
+
+    def log(self, msg, *args, **kwargs):
+        pass
+
+
+def setup_tracker_and_logger(config: Dict, rank: int, log_level: int = logging.INFO) -> Tuple[TrainingTracker, logging.Logger]:
+
+    if rank != 0:
+        return None, DummyLogger()
+
+    assert config.get('job').get('name')
+    assert config.get('job').get('artifacts_path')
+
+    job_name = config.get('job').get('name')
+    artifacts_path = config.get('job').get('artifacts_path')
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    workdir = f"{job_name}_{timestamp}"
+
+    base_dir = os.path.join(artifacts_path, workdir)
+    output_paths = {
+        'base_dir': base_dir,
+        'checkpoints': os.path.join(base_dir, 'checkpoints'),
+        'samples': os.path.join(base_dir, 'samples'),
+        'tensorboard': os.path.join(base_dir, 'tb_logs'),
+        'log_file': os.path.join(base_dir, 'run.log'),
+        'config_file': os.path.join(base_dir, 'config.yaml'),
+    }
+
+    # Create directories
+    for path in output_paths.values():
+        if isinstance(path, str) and not path.endswith(('.log', '.yaml')):
+            os.makedirs(path, exist_ok=True)
+
+    save_yaml_config_file(config, output_paths['config_file'])
+
+    # Create a root logger
+    logger = logging.getLogger()
+    logger.setLevel(log_level)
+
+    # Create a console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(log_level)
+
+    # Create a formatter and set it for the console handler
+    formatter = logging.Formatter(
+        fmt='%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+    )
+    ch.setFormatter(formatter)
+
+    # Add the handler to the logger
+    logger.addHandler(ch)
+
+    # Hide default INFO log from httpx._client.py
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+
+    # If a log file is provided, add a file handler
+    log_file = output_paths['log_file']
+    if log_file:
+        fh = logging.FileHandler(log_file)
+        fh.setLevel(log_level)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+
+    tracker = TrainingTracker(
+        output_paths=output_paths,
+        # tb_log_dir=output_paths['tensorboard'],
+        # samples_dir=output_paths['samples'],
+        log_intervals=config.get('logging', {}).get('intervals', None),
+    )
+
+    logger.info(f"Artifacts will be saved in: {base_dir}")
+
+    return tracker, logger
+
+
+def get_checkpoint_folders(ckpt_path: str) -> list[str]:
+    """Get all checkpoint folders sorted by modification time (newest first)."""
+    if not os.path.exists(ckpt_path):
+        return []
+
+    # Get all subdirectories in the checkpoint path
+    folders = glob.glob(os.path.join(ckpt_path, 'checkpoint_*'))
+    # Sort by modification time, newest first
+    folders.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    return folders
+
+
+def cleanup_old_checkpoints(ckpt_path: str, keep_n: int):
+    """Remove all but the N most recent checkpoint folders."""
+    folders = get_checkpoint_folders(ckpt_path)
+
+    # Keep 'final' checkpoint and N most recent checkpoints
+    for folder in folders[keep_n:]:
+        try:
+            shutil.rmtree(folder)
+        except OSError as e:
+            print(f"Error removing checkpoint {folder}: {e}")
 
 
 def set_seed(seed: int = 157):
@@ -157,8 +282,6 @@ def merge_jsonl_files(input_files: List[str], output_file: str):
         loaded_data.extend(load_from_jsonl_file(input_file))
 
     save_to_jsonl_file(loaded_data, output_file)
-
-
 
 
 def get_runtime_device():

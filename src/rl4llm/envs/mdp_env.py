@@ -151,11 +151,9 @@ class MDPEnv:
         min_reward: float = 0.0,
         max_reward: float = 1.0,
         mid_step_score: float = 0.5,
-        min_action_size: int = 20,
         seed: int = 42,
     ):
         assert min_reward < max_reward, "min_reward must be less than max_reward"
-        assert min_action_size >= 10, "min_action_size must be at least 10"
         assert 0 <= mid_step_score < max_reward, "invalid mid_step_score"
         assert state_config, "state_config cannot be empty"
         assert len(stop_tokens) >= 1 and all([isinstance(d, str) and " " not in d for d in stop_tokens]), "invalid stop_tokens"
@@ -175,7 +173,6 @@ class MDPEnv:
         self.max_reward = max_reward
         self.min_reward = min_reward
         self.mid_step_score = mid_step_score
-        self.min_action_size = min_action_size
 
         # Initialize state management
         self.state_graph = StateGraph.from_metadata(state_config)
@@ -290,10 +287,6 @@ class MDPEnv:
 
         return external_state
 
-    def _is_short_action(self, action: EnvAction) -> bool:
-        """Check if action is too short."""
-        return len(action.text.strip().split()) < int(self.min_action_size * 0.7)
-
     def _clean_action(self, action: EnvAction) -> EnvAction:
         action_text = action.text
         for tk in self.stop_tokens:
@@ -355,8 +348,9 @@ class MDPEnv:
         self.curr_episode.short_answer = short_answer
         self.curr_episode.graded_reward = reward
         for t in self.curr_episode.transitions:
-            # Assign reward based on graded_reward condition
-            t.reward = self.min_reward if reward == self.min_reward else self.mid_step_score
+            # Assign middle-step reward based on graded_reward condition
+            if not t.is_done and t.reward == 0:
+                t.reward = self.min_reward if reward == self.min_reward else self.mid_step_score
 
         self.done = True
         self.curr_state = None

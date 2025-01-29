@@ -1,332 +1,239 @@
-"""RL actor to collect samples"""
+"""Actor class for generating samples using the deepspeed inference engine."""
 
 import logging
-import random
-import time
+from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import deepspeed
 import numpy as np
 import torch
+import torch.distributed as dist
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
-from rl4llm.utils import TrainingTracker
+from rl4llm.core.base_agent import BaseAgent
 from rl4llm.envs import VectorEnvWrapper
-from rl4llm.generations import LLMGenerator, OpenAIGenerator
-from rl4llm.constants import DEFAULT_FAILED_RESPONSE
+from rl4llm.types import DecodingConfig, EnvAction, EnvState, Episode, TokenUsage
+from rl4llm.utils import TrainingTracker
 
 
-from rl4llm.types import DecodingConfig, EnvAction, EnvState, Episode, ExplorationConfig
-from rl4llm.utils import clean_up_gpu_memory, is_texts_similar
-
-logger = logging.getLogger()
-
-
-class EgreedyActor:
-    """Epsilon-greedy actor for generating responses with language model."""
+class Actor(BaseAgent):
+    """Implements the actor for generating samples using the deepspeed inference engine."""
 
     def __init__(
         self,
-        generator: Union[LLMGenerator, OpenAIGenerator],
-        decoding_config: DecodingConfig,
-        exploration_config: Optional[ExplorationConfig] = None,
+        config: Dict[str, Any],
+        local_rank: int,
+        dtype: Optional[torch.dtype] = torch.bfloat16,
         tracker: Optional[TrainingTracker] = None,
-        for_evaluator: Optional[bool] = False,
+        logger: Optional[logging.Logger] = None,
     ):
-        """Initialize the actor."""
-        assert isinstance(decoding_config, DecodingConfig), 'Invalid decoding configuration'
+        super().__init__(config, local_rank, dtype, tracker, logger)
+        self.cpu_model: PreTrainedModel = self._load_model()  # Load model on CPU initially
+        self.inference_engine: deepspeed.InferenceEngine = self._create_inference_engine()
 
-        self.generator = generator
-        self.decoding_config = decoding_config
-        self.exploration_config = exploration_config
-        self.is_oai_generator = isinstance(generator, OpenAIGenerator)
+    def _load_model(self) -> PreTrainedModel:
+        """Loads the causal LM for actor inference."""
+        return AutoModelForCausalLM.from_pretrained(self.model_name, torch_dtype=self.dtype).to('cpu')
 
-        self.tracker = tracker
-        # self.repetition_detector = RepetitionDetector(ngram_repeat_threshold=8, sentence_repeat_threshold=3)
+    def _create_inference_engine(self) -> deepspeed.InferenceEngine:
+        """Creates DeepSpeed inference engine and moves model to device."""
+        engine = self._create_deepspeed_inference_engine(self.cpu_model)
+        return engine.to(self.device)
 
-        self.for_evaluator = for_evaluator
-        self.role_name = 'Evaluator' if for_evaluator else 'Actor'
-        self._reset_counters()
+    def sync_model_weights(self, model_state_dict: Dict) -> None:
+        """Sync the model weights with the learner model."""
+        self.cpu_model.load_state_dict(model_state_dict, strict=False)
+        if hasattr(self, 'inference_engine') and self.inference_engine is not None:
+            del self.inference_engine
+            torch.cuda.empty_cache()
+        self.inference_engine = self._create_inference_engine()
+    
+    def offload_for_training(self) -> None:
+        """Offload model to CPU for training."""
+        self.cpu_model = self.cpu_model.to('cpu')
+        del self.inference_engine
+        torch.cuda.empty_cache()
 
-    def _reset_counters(self) -> None:
-        """Reset internal counters"""
-        self.step_count = 0
-        self.episode_count = 0
-        self.iter_count = 0
-
-    def get_epsilon(self) -> float:
-        """Compute current epsilon value based on episode count."""
-        if self.for_evaluator or self.is_oai_generator:
-            return 0.0
-        if not self.exploration_config or not isinstance(self.exploration_config, ExplorationConfig):
-            return 0.0
-        if self.exploration_config.decay_steps <= 0:
-            return self.epsilon
-
-        decay_rate = (
-            self.exploration_config.init_epsilon - self.exploration_config.min_epsilon
-        ) / self.exploration_config.decay_steps
-        self.epsilon = max(
-            self.exploration_config.min_epsilon, self.exploration_config.init_epsilon - decay_rate * self.episode_count
-        )
-        return self.epsilon
-
-    def _should_do_exploring_start(self) -> bool:
-        """Determine if exploration should be performed."""
-        if self.for_evaluator or self.is_oai_generator:
-            return False
-        return np.random.rand() < self.get_epsilon()
-
-    def act(self, states: List[EnvState]) -> List[EnvAction]:
+    @torch.inference_mode()
+    def act(self, batch_states: List[EnvState], decoding: DecodingConfig) -> List[EnvAction]:
         """Generate responses for given states, handling None states."""
-        # Filter out None states
-        valid_states = [s for s in states if s is not None]
-
+        valid_states = [s for s in batch_states if s is not None]
         if not valid_states:
-            return [None] * len(states)
+            return [None] * len(batch_states)
 
-        exploring_steps = (
-            random.randint(1, self.exploration_config.max_explore_steps) if self._should_do_exploring_start() else 0
-        )
+        batch_messages = [[{'role': t.role, 'content': t.content} for t in states] for states in valid_states]
+        message_prompt = self.tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
 
-        rollouts = self.generator.generate_actions_for_rl(
-            batch_states=valid_states,
-            max_new_tokens=self.decoding_config.max_new_tokens,
-            temperature=self.decoding_config.temperature,
-            top_p=self.decoding_config.top_p,
-            top_k=self.decoding_config.top_k,
-            exploring_steps=exploring_steps,
-        )
+        inputs = self.tokenizer(
+            message_prompt,
+            return_tensors='pt',
+            truncation=True,
+            padding=True,
+            padding_side='left',
+            max_length=self.tokenizer.model_max_length,
+        ).to(self.device)
 
-        # Map the actions back to the original state positions
+        generation_kwargs = {
+            'input_ids': inputs.input_ids,
+            'attention_mask': inputs.attention_mask,
+            'eos_token_id': self.eos_token_id,
+            'pad_token_id': self.pad_token_id,
+            'use_cache': True,
+            'output_scores': True,
+            'output_logits': True,
+            'return_dict_in_generate': True,
+            'return_legacy_cache': False,
+            'max_new_tokens': decoding.max_new_tokens,
+            'temperature': decoding.temperature if decoding.temperature is not None else 1.0,
+            'top_p': decoding.top_p if decoding.top_p is not None else None,
+            'top_k': decoding.top_k if decoding.top_k is not None else None,
+            'do_sample': decoding.do_sample,
+        }
+
+        outputs = self.inference_engine.generate(**generation_kwargs)
+
+        generated_sequences = outputs.sequences
+        prompt_length = inputs.input_ids.size(1)
+        batch_completion_ids = generated_sequences[:, prompt_length:]
+        prompt_tokens_count = (inputs.input_ids != self.pad_token_id).sum(dim=1).cpu().tolist()
+        completion_tokens_count = (batch_completion_ids != self.pad_token_id).sum(dim=1).cpu().tolist()
+        completion_texts = self.tokenizer.batch_decode(batch_completion_ids, skip_special_tokens=True)
+
         actions = []
-        rollout_idx = 0
-        for state in states:
-            if state is not None:
-                actions.append(self._process_rollouts([rollouts[rollout_idx]])[0])
-                rollout_idx += 1
-            else:
-                actions.append(None)
+        for i in range(generated_sequences.size(0)):
+            actions.append(
+                EnvAction(
+                    text=completion_texts[i],
+                    temperature=generation_kwargs['temperature'],
+                    usage=TokenUsage(
+                        prompt_tokens=prompt_tokens_count[i],
+                        completion_tokens=completion_tokens_count[i],
+                        total_tokens=prompt_tokens_count[i] + completion_tokens_count[i],
+                    ),
+                )
+            )
 
-        self.step_count += len(valid_states)
-        return actions
+        full_actions = [None] * len(batch_states)  # Distribute actions, handling None states
+        action_idx = 0
+        for i in range(len(batch_states)):
+            if batch_states[i] is not None:
+                full_actions[i] = actions[action_idx]
+                action_idx += 1
+        return full_actions
 
     def generate_samples(
         self,
         vector_env: VectorEnvWrapper,
+        decoding: DecodingConfig,
         max_episodes: int,
-        correct_answer_rate: float = 0.0,
-        strict_duplicate: bool = False,
+        for_evaluator: Optional[bool] = False,
     ) -> Tuple[List[Episode], Dict]:
-        """Generate samples ensuring minimum correct answer rate."""
-        assert 0.0 <= correct_answer_rate <= 1.0, 'correct_answer_rate must be between 0 and 1'
-        clean_up_gpu_memory()
-
+        """Generates samples using the inference engine."""
+        torch.cuda.empty_cache()
         stats_tracker = self._init_stats_tracker()
         collected_episodes = []
-        question_cache = {}
-
         states = vector_env.reset()
 
-        with tqdm(total=max_episodes, desc=f'{self.role_name} generating episodes', unit='episode') as pbar:
+        with tqdm(total=max_episodes, desc=f'Generating episodes', unit='episode') as pbar:
             while len(collected_episodes) < max_episodes:
-                # Identify active environments and their states
                 active_env_indices = [i for i, state in enumerate(states) if state is not None]
                 active_states = [states[i] for i in active_env_indices]
 
-                # Generate actions only for active environments
-                actions = [None] * vector_env.num_envs  # Initialize with None
+                actions = [None] * vector_env.num_envs  # Generate actions only for active environments
                 if active_states:
-                    active_actions = self.act(active_states)
+                    active_actions = self.act(active_states, decoding)
                     for i, action in zip(active_env_indices, active_actions):
                         actions[i] = action
 
-                # Take step in all environments (None actions for finished ones)
                 new_states = vector_env.step(actions)
 
-                # Process completed episodes and reset finished environments
-                for i in range(vector_env.num_envs):
-                    if states[i] is not None and vector_env.is_done(i):  # Check if was active and is now done
+                for i in range(vector_env.num_envs):  # Process completed episodes and reset
+                    if states[i] is not None and vector_env.is_done(i):
                         episode = vector_env.get_episode(i)
-                        processed = self._process_batch_episodes(
-                            [episode],
-                            question_cache,
-                            collected_episodes,
-                            correct_answer_rate,
-                            vector_env.max_reward,
-                            stats_tracker,
-                            strict_duplicate,
-                        )
-
-                        if processed:
-                            collected_episodes.extend(processed)
-                            pbar.update(1)
-
-                        # Reset the environment and update the state
+                        processed_episodes = self._process_batch_episodes([episode], stats_tracker, for_evaluator)
+                        if processed_episodes:
+                            collected_episodes.extend(processed_episodes)
+                            if len(collected_episodes) % 10 == 0:
+                                pbar.update(10)
                         new_states[i] = vector_env.reset_one(i)
 
                 states = new_states
-
-                # Save samples periodically
-                if self.tracker and len(collected_episodes) and len(collected_episodes) % 50 == 0:
-                    self.tracker.flush()
+                if self.tracker and len(collected_episodes) and len(collected_episodes) % 100 == 0:
+                    Thread(target=self.tracker.flush).start()
 
         iter_stats = self._compute_iteration_stats(
             stats_tracker, collected_episodes, vector_env.max_reward, pbar.format_dict.get('elapsed', 0)
         )
-
-        self._log_iteration_results(iter_stats)
+        self._log_iteration_stats(iter_stats, for_evaluator)
         return collected_episodes, iter_stats
 
     def _init_stats_tracker(self) -> Dict:
-        """Initialize statistics tracking dictionary"""
-        return {'total': 0, 'correct': 0, 'bad': 0, 'duplicate': 0}
+        """Initialize statistics tracking dictionary."""
+        return {'total': 0, 'correct': 0, 'bad': 0, 'duplicate': 0, 'skipped': 0}
 
-    def _process_batch_episodes(
-        self,
-        batch_episodes: List[Episode],
-        question_cache: Dict[str, List[Episode]],
-        collected_episodes: List[Episode],
-        correct_answer_rate: float,
-        max_reward: float,
-        stats_tracker: Dict,
-        strict_duplicate: bool,
-    ) -> List[Episode]:
-        """Process and filter batch episodes"""
+    def _process_batch_episodes(self, batch_episodes: List[Episode], stats_tracker: Dict, for_evaluator: bool) -> List[Episode]:
+        """Process and filter batch episodes."""
         current_batch_size = len(batch_episodes)
         stats_tracker['total'] += current_batch_size
 
-        if not self.for_evaluator:
-            filtered_episodes = self._filter_out_bad_samples(batch_episodes)
-            # Calculate bad count based on current batch only
+        if not for_evaluator:
+            filtered_episodes = [sample for sample in batch_episodes if self._is_valid_sample(sample)]  # Filter bad samples
             bad_count = current_batch_size - len(filtered_episodes)
-            stats_tracker['bad'] += bad_count
+            stats_tracker['skipped'] += bad_count
             batch_episodes = filtered_episodes
 
         processed_episodes = []
         for episode in batch_episodes:
-            if self._is_duplicate_episode(episode, question_cache, strict_duplicate):
-                stats_tracker['duplicate'] += 1
-                continue
-
-            if self._should_collect_episode(episode, collected_episodes, correct_answer_rate, max_reward):
-                processed_episodes.append(episode)
-                self._update_question_cache(episode, question_cache)
-                self.episode_count += 1
-                self._log_episode(episode)
-
+            processed_episodes.append(episode)
+            self._log_episode(episode, for_evaluator)
         return processed_episodes
 
-    def _process_rollouts(
-        self,
-        actions: List[EnvAction],
-    ) -> List[EnvAction]:
-        """Process and validate rollout actions"""
-
-        for action in actions:
-            if not action.text:
-                action.text = DEFAULT_FAILED_RESPONSE
-
-        return actions
-
-    def _filter_out_bad_samples(self, samples: List[Episode]) -> List[Episode]:
-        """Filter out invalid or low-quality samples"""
-        return [sample for sample in samples if self._is_valid_sample(sample)]
-
     def _is_valid_sample(self, sample: Episode) -> bool:
-        """Check if a sample meets quality criteria"""
-        if sample.count_completion_tokens() < 50:
-            logger.debug('Skip too short episode')
+        """Check if a sample meets quality criteria."""
+        if sample.count_completion_tokens() < 100:
+            self.logger.debug('Skip too short episode')
             return False
-
-        # could be 'dummy' response
-        if any(
-            [
-                True
-                for t in sample.transitions
-                if len(t.action.text) < 50 or DEFAULT_FAILED_RESPONSE.lower() in t.action.text.lower()
-            ]
-        ):
-            logger.debug('Skip too short transition')
+        if any([True for t in sample.transitions if len(t.action.text) < 50]):
+            self.logger.debug('Skip too short transition')
             return False
-
-        # for t in sample.transitions:
-        #     has_repetition, results = self.repetition_detector.analyze_text(t.action.text, n=0)  # n=0 don't check n-grams
-        #     if has_repetition:
-        #         logger.debug(f"Skip repetition episode {results}")
-        #         return False
-
         return True
 
-    def _is_duplicate_episode(self, episode: Episode, question_cache: Dict[str, List[Episode]], strict_duplicate: bool) -> bool:
-        """Check if episode is a duplicate"""
-        if episode.question not in question_cache:
-            return False
-
-        if strict_duplicate and episode.question in question_cache:
-            return True
-
-        # only compare answers
-        return any(
-            is_texts_similar(episode.transitions[-1].action.text, prev_ep.transitions[-1].action.text, 0.9)
-            for prev_ep in question_cache[episode.question]
-        )
-
-    def _update_question_cache(self, episode: Episode, question_cache: Dict[str, List[Episode]]) -> None:
-        """Update question cache with new episode"""
-        if episode.question not in question_cache:
-            question_cache[episode.question] = []
-        question_cache[episode.question].append(episode)
-
-    def _should_collect_episode(
-        self, episode: Episode, collected_episodes: List[Episode], correct_answer_rate: float, max_reward: float
-    ) -> bool:
-        """Determine if episode should be collected"""
-        is_correct = episode.graded_reward == max_reward
-
-        # If correct_answer_rate is 1.0, only collect correct samples
-        if correct_answer_rate == 1.0:
-            return is_correct
-
-        if is_correct or self.for_evaluator:
-            return True
-
-        current_total = len(collected_episodes)
-        if current_total == 0:
-            return True
-
-        current_correct = sum([1 for ep in collected_episodes if ep.graded_reward == max_reward])
-        # Check if collecting this episode would maintain the desired correct_answer_rate
-        return (current_correct / (current_total + 1)) >= correct_answer_rate
-
-    def _log_episode(self, episode: Episode) -> None:
-        """Log episode information if tracker is available"""
+    def _log_episode(self, episode: Episode, for_evaluator: bool) -> None:
+        """Log episode information if tracker is available."""
         if self.tracker:
-            self.tracker.log_actor_step(episode, self.for_evaluator)
+            Thread(target=self.tracker.log_actor_step, args=(episode, for_evaluator)).start()
+
+    def _log_iteration_stats(self, iter_stats: Dict, for_evaluator: bool) -> None:
+        """Log iteration results and update tracker."""
+        self.logger.info(f"Actor stats: {iter_stats}")
+        if self.tracker:
+            self.tracker.log_actor_iteration_stats(iter_stats, for_evaluator)
 
     def _compute_iteration_stats(
         self, stats_tracker: Dict, collected_episodes: List[Episode], max_reward: float, elapsed_time: float
     ) -> Dict:
-        """Compute comprehensive iteration statistics"""
+        """Compute comprehensive iteration statistics."""
 
+        # TODO convert to tensor and gather from all ranks
         episode_prompt_tokens = np.array([ep.count_prompt_tokens() for ep in collected_episodes])
         episode_completion_tokens = np.array([ep.count_completion_tokens() for ep in collected_episodes])
         episode_total_tokens = np.array([ep.count_total_tokens() for ep in collected_episodes])
         correct_samples = sum(1 for ep in collected_episodes if ep.graded_reward == max_reward)
 
         base_stats = {
-            'elapsed/time': round(elapsed_time, 4),
+            'elapsed/total_time': round(elapsed_time, 4),
             'elapsed/step_time': round(elapsed_time / max(stats_tracker['total'], 1), 4),
             'elapsed/total_episodes': stats_tracker['total'],
-            'exploration_epsilon': self.get_epsilon(),
-            'objective/accuracy': correct_samples / stats_tracker['total'],
-            'objective/correct_ratio': correct_samples / len(collected_episodes),
-            'objective/bad_ratio': stats_tracker['bad'] / stats_tracker['total'],
-            'objective/duplicate_ratio': stats_tracker['duplicate'] / stats_tracker['total'],
-            'episode/completion_tokens': np.mean(episode_completion_tokens).item(),
-            'episode/completion_tokens_p90': np.percentile(episode_completion_tokens, 90).item(),
-            'usage/total_tokens': np.sum(episode_total_tokens),
-            'usage/prompt_tokens': np.sum(episode_prompt_tokens),
-            'usage/completion_tokens': np.sum(episode_completion_tokens),
+            'accuracy': correct_samples / stats_tracker['total'] if stats_tracker['total'] > 0 else 0.0,
+            'stats/correct_ratio': correct_samples / len(collected_episodes) if collected_episodes else 0.0,
+            'stats/skipped_ratio': stats_tracker['skipped'] / stats_tracker['total'] if stats_tracker['total'] > 0 else 0.0,
+            'episode/completion_tokens': (
+                np.mean(episode_completion_tokens).item() if episode_completion_tokens.size > 0 else 0.0
+            ),
+            'usage/total_tokens': np.sum(episode_total_tokens).item() if episode_total_tokens.size > 0 else 0.0,
+            'usage/prompt_tokens': np.sum(episode_prompt_tokens).item() if episode_prompt_tokens.size > 0 else 0.0,
+            'usage/completion_tokens': np.sum(episode_completion_tokens).item() if episode_completion_tokens.size > 0 else 0.0,
         }
 
         step_stats = self._compute_step_level_stats(collected_episodes)
@@ -334,40 +241,26 @@ class EgreedyActor:
 
     @staticmethod
     def _compute_step_level_stats(collected_episodes: List[Episode]) -> Dict:
-        """Compute detailed statistics for each step"""
+        """Compute detailed statistics for each step."""
         steps_data = {}
-
         for episode in collected_episodes:
             for t in episode.transitions:
                 step_name = t.state.state_id
                 if step_name not in steps_data:
                     steps_data[step_name] = {'lengths': [], 'rewards': []}
-
                 steps_data[step_name]['rewards'].append(t.reward)
-
                 try:
                     steps_data[step_name]['lengths'].append(t.action.usage.completion_tokens)
-                except Exception as _e:
-                    logger.error(f"Error processing step {step_name}: {_e}")
+                except Exception:  # Broad exception to catch cases where usage might be None
                     steps_data[step_name]['lengths'].append(0)
 
         stats = {}
         for step_name, data in steps_data.items():
             if not data['lengths']:
                 continue
-
             for metric_name, values in [('length', data['lengths']), ('reward', data['rewards'])]:
                 array_data = np.array(values)
                 base_key = f"episode/{step_name}_{metric_name}"
                 stats[f"{base_key}_mean"] = float(np.mean(array_data))
                 stats[f"{base_key}_std"] = float(np.std(array_data))
-
         return stats
-
-    def _log_iteration_results(self, iter_stats: Dict) -> None:
-        """Log iteration results and update tracker"""
-        self.iter_count += 1
-        logger.info(f"{self.role_name} stats: {iter_stats}")
-
-        if self.tracker:
-            self.tracker.log_actor_iteration_stats(iter_stats, self.for_evaluator)

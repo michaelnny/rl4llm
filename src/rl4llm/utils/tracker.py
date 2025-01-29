@@ -2,6 +2,7 @@ import gzip
 import json
 import os
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 import pandas as pd
 import yaml
@@ -225,10 +226,14 @@ class TrainingTracker:
 
     def __init__(
         self,
-        tb_log_dir: str = './runs/tb_logs',
-        samples_dir: str = './runs/samples',
+        output_paths: Dict[str, str],
         log_intervals: Optional[Dict[str, int]] = None,  # Now used for default intervals
     ):
+        assert 'tensorboard' in output_paths, "output_paths must contain 'tensorboard' key"
+        assert 'samples' in output_paths, "output_paths must contain 'samples' key"
+        assert 'checkpoints' in output_paths, "output_paths must contain 'checkpoints' key"
+
+        self.output_paths = output_paths
         if log_intervals is None:
             log_intervals = {'actor': 5, 'evaluator': 5, 'learner': 1}
 
@@ -238,12 +243,14 @@ class TrainingTracker:
         default_learner_interval = log_intervals.get('learner', 5)
 
         # Initialize loggers
-        self.tb_logger = TensorBoardLogger(tb_log_dir)
+        self.tb_logger = TensorBoardLogger(output_paths['tensorboard'])
 
         # Initialize role-specific trackers, passing in intervals
-        self.actor = ActorTracker(self.tb_logger, samples_dir, 'actor', episode_log_interval=default_actor_interval)
-        self.learner = LearnerTracker(self.tb_logger, samples_dir, step_log_interval=default_learner_interval)
-        self.evaluator = ActorTracker(self.tb_logger, samples_dir, 'evaluator', episode_log_interval=default_evaluator_interval)
+        self.actor = ActorTracker(self.tb_logger, output_paths['samples'], 'actor', episode_log_interval=default_actor_interval)
+        self.learner = LearnerTracker(self.tb_logger, output_paths['samples'], step_log_interval=default_learner_interval)
+        self.evaluator = ActorTracker(
+            self.tb_logger, output_paths['samples'], 'evaluator', episode_log_interval=default_evaluator_interval
+        )
 
     def log_params(self, config: Dict[str, Any], step: int = 0):
         """Log configuration parameters"""

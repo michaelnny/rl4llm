@@ -57,9 +57,9 @@ training_config:
   max_gamma: 0.9998 # for compute dynamic discount
   max_expected_length: 10000
   value_loss_coef: 0.1
-  ckpt_enabled: true
-  ckpt_interval: 100 # every N updates
-  ckpt_keep_last_n: 3
+  checkpoint_enabled: true
+  checkpoint_interval: 100 # every N updates
+  checkpoint_keep_n: 3
 datasets:
   - name: "MATH"
     path: "./data/sft_stage/math_hard_2k_r1_episodes_fixed.jsonl.gz"

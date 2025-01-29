@@ -20,17 +20,7 @@ class LLMGenerator:
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-    @torch.no_grad()
-    def generate_actions_for_rl(
-        self,
-        batch_states: List[List[ChatTurn]],
-        max_new_tokens: int = 512,
-        temperature: float = 1.0,
-        top_p: float = 0.95,
-        top_k: Optional[int] = 0,
-        do_sample: Optional[bool] = True,
-        exploring_steps: Optional[int] = 0,  # Kept for compatibility
-    ) -> List[EnvAction]:
+    def generate_actions_for_rl(self, batch_states: List[List[ChatTurn]], **kwargs) -> List[EnvAction]:
         device = self.model.device
         if self.model.training:
             self.model.eval()
@@ -39,10 +29,8 @@ class LLMGenerator:
         batch_messages = []
         for states in batch_states:
             batch_messages.append([{'role': t.role, 'content': t.content} for t in states])
-        
-        message_prompt = self.tokenizer.apply_chat_template(
-            batch_messages, tokenize=False, add_generation_prompt=True
-        )
+
+        message_prompt = self.tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
 
         inputs = self.tokenizer(
             message_prompt,
@@ -59,77 +47,17 @@ class LLMGenerator:
         eos_token_id = self.tokenizer.eos_token_id
         pad_token_id = self.tokenizer.pad_token_id
 
-        # Initialize generation variables
-        generated_sequences = input_ids.clone()
-        current_attention_mask = attention_mask.clone()
-        past_key_values = None
-        active = torch.ones(batch_size, dtype=torch.bool, device=device)
-
-        # Manual generation loop
-        for _ in range(max_new_tokens):
-            model_inputs = self.model.prepare_inputs_for_generation(
-                input_ids=input_ids,
-                past_key_values=past_key_values,
-                attention_mask=current_attention_mask,
-            )
-
-            outputs = self.model(**model_inputs, return_dict=True)
-            past_key_values = outputs.past_key_values
-            next_token_logits = outputs.logits[:, -1, :]
-
-            # Sampling logic
-            if do_sample:
-                if temperature != 1.0:
-                    next_token_logits = next_token_logits / temperature
-
-                # Top-k filtering
-                if top_k > 0:
-                    top_k_values, _ = torch.topk(next_token_logits, top_k, dim=-1)
-                    min_values = top_k_values[:, -1].unsqueeze(-1)
-                    next_token_logits = torch.where(
-                        next_token_logits < min_values, 
-                        torch.tensor(-float('inf'), device=device), 
-                        next_token_logits
-                    )
-
-                # Top-p filtering
-                if top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True, dim=-1)
-                    cumulative_probs = torch.cumsum(
-                        torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1
-                    )
-                    sorted_indices_to_remove = cumulative_probs > top_p
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                    sorted_indices_to_remove[..., 0] = 0
-                    indices_to_remove = sorted_indices_to_remove.scatter(
-                        -1, sorted_indices, sorted_indices_to_remove
-                    )
-                    next_token_logits = next_token_logits.masked_fill(indices_to_remove, -float('inf'))
-
-                # Sample next token
-                probs = torch.nn.functional.softmax(next_token_logits, dim=-1)
-                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
-            else:
-                # Greedy decoding
-                next_tokens = torch.argmax(next_token_logits, dim=-1)
-
-            # Update active sequences
-            eos_reached = (next_tokens == eos_token_id) & active
-            active = active & ~eos_reached
-
-            if not active.any():
-                break
-
-            # Replace inactive sequences with pad_token_id
-            next_tokens = next_tokens * active.long() + pad_token_id * (~active).long()
-
-            # Update sequences and attention mask
-            generated_sequences = torch.cat([generated_sequences, next_tokens.unsqueeze(-1)], dim=-1)
-            input_ids = next_tokens.unsqueeze(-1)
-            current_attention_mask = torch.cat([
-                current_attention_mask, 
-                active.unsqueeze(-1).long()
-            ], dim=1)
+        # Call the core generation method
+        temperature = kwargs.get('temperature', 1.0)
+        generated_sequences = self.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=kwargs.get('max_new_tokens', 512),
+            temperature=temperature,
+            top_p=kwargs.get('top_p', 0.95),
+            top_k=kwargs.get('top_k', 0),
+            do_sample=kwargs.get('do_sample', True),
+        )
 
         # Extract completions and calculate token usage
         prompt_length = seq_length
@@ -143,7 +71,7 @@ class LLMGenerator:
         for i in range(batch_size):
             completion_ids = batch_completion_ids[i].tolist()
             completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
-            
+
             rollouts.append(
                 EnvAction(
                     text=completion_text,
@@ -157,3 +85,109 @@ class LLMGenerator:
             )
 
         return rollouts
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        do_sample: bool,
+    ) -> torch.Tensor:
+        """Core generation method with manual sampling and KV caching."""
+        device = self.model.device
+        eos_token_id = self.tokenizer.eos_token_id
+        pad_token_id = self.tokenizer.pad_token_id
+
+        generated_sequences = input_ids.clone()
+        active = torch.ones(input_ids.size(0), dtype=torch.bool, device=device)
+        past_key_values = None
+
+        for _ in range(max_new_tokens):
+            # Prepare model inputs using cached KV values
+            model_inputs = self.model.prepare_inputs_for_generation(
+                input_ids=input_ids, past_key_values=past_key_values, attention_mask=attention_mask
+            )
+
+            # Forward pass with cached computation
+            outputs = self.model(**model_inputs, return_dict=True)
+            past_key_values = outputs.past_key_values
+            next_token_logits = outputs.logits[:, -1, :]
+
+            # Apply sampling parameters
+            next_token = self._sample_next_token(
+                logits=next_token_logits, temperature=temperature, top_p=top_p, top_k=top_k, do_sample=do_sample
+            )
+
+            # Update sequence status
+            active, generated_sequences, input_ids, attention_mask = self._update_generation_state(
+                next_token=next_token,
+                active=active,
+                generated_sequences=generated_sequences,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                eos_token_id=eos_token_id,
+                pad_token_id=pad_token_id,
+            )
+
+            if not active.any():
+                break
+
+        return generated_sequences
+
+    def _sample_next_token(
+        self, logits: torch.Tensor, temperature: float, top_p: float, top_k: int, do_sample: bool
+    ) -> torch.Tensor:
+        """Apply temperature, top-p/k filtering and sampling."""
+        if do_sample:
+            if temperature != 1.0:
+                logits = logits / temperature
+
+            # Top-k filtering
+            if top_k > 0:
+                top_k_values, _ = torch.topk(logits, top_k, dim=-1)
+                min_values = top_k_values[:, -1].unsqueeze(-1)
+                logits = torch.where(logits < min_values, torch.tensor(-float('inf'), device=logits.device), logits)
+
+            # Top-p filtering
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+                cumulative_probs = torch.cumsum(torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                indices_to_remove = sorted_indices_to_remove.scatter(-1, sorted_indices, sorted_indices_to_remove)
+                logits = logits.masked_fill(indices_to_remove, -float('inf'))
+
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+            return torch.multinomial(probs, num_samples=1).squeeze(-1)
+        else:
+            return torch.argmax(logits, dim=-1)
+
+    def _update_generation_state(
+        self,
+        next_token: torch.Tensor,
+        active: torch.Tensor,
+        generated_sequences: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        eos_token_id: int,
+        pad_token_id: int,
+    ) -> tuple:
+        """Update generation state and manage sequence completion."""
+        # Check for EOS tokens
+        eos_reached = (next_token == eos_token_id) & active
+        active = active & ~eos_reached
+
+        # Replace inactive sequences with pad tokens
+        next_token = next_token * active.long() + pad_token_id * (~active).long()
+
+        # Update sequences and attention mask
+        generated_sequences = torch.cat([generated_sequences, next_token.unsqueeze(-1)], dim=-1)
+        input_ids = next_token.unsqueeze(-1)
+        attention_mask = torch.cat([attention_mask, active.unsqueeze(-1).long()], dim=1)
+
+        return active, generated_sequences, input_ids, attention_mask

@@ -183,7 +183,7 @@ class EpisodeProcessor:
             logger.warning('No episodes provided')
             return []
 
-        logger.info(f"Processing total of {len(episodes)} episodes")
+        logger.info(f"Processing {len(episodes)} episodes")
 
         if self.pool is None:
             # Initialize the pool once if not already initialized

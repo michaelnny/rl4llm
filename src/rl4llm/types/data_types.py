@@ -188,9 +188,9 @@ class BaseTrainingConfig(BaseModel):
     """Common training configuration"""
 
     # pad_id: int = Field(..., ge=0, description='Padding token id for token sequences')
-    ckpt_enabled: Optional[bool] = Field(False, description='Enable to save model checkpoint')
-    ckpt_interval: Optional[int] = Field(0, ge=0, description='Frequency to save model checkpoint')
-    ckpt_keep_last_n: Optional[int] = Field(3, ge=1, description='Keep most recent N model checkpoints')
+    checkpoint_enabled: Optional[bool] = Field(False, description='Enable to save model checkpoint')
+    checkpoint_interval: Optional[int] = Field(0, ge=0, description='Frequency to save model checkpoint')
+    checkpoint_keep_n: Optional[int] = Field(3, ge=1, description='Keep most recent N model checkpoints')
     num_epochs: int = Field(1, ge=1, le=100, description='Number of epochs to go through the dataset')
     value_loss_coef: float = Field(0.5, ge=0.0, le=1.0, description='Value function loss coefficient')
     gamma: float = Field(1.0, ge=0.0, le=1.0, description='Fallback default discount factor for compute returns')

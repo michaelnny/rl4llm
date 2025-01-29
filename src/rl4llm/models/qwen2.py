@@ -25,11 +25,11 @@ class ValueHead(nn.Module):
 
     def __init__(self, hidden_dim: int, num_units: int):
         super().__init__()
-        self.linear1 = nn.Linear(hidden_dim, num_units)
+        self.linear1 = nn.Linear(hidden_dim, num_units, bias=False)
         self.activation1 = nn.Tanh()
-        self.linear2 = nn.Linear(num_units, num_units)
+        self.linear2 = nn.Linear(num_units, num_units, bias=False)
         self.activation2 = nn.Tanh()
-        self.linear3 = nn.Linear(num_units, 1)
+        self.linear3 = nn.Linear(num_units, 1, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Compute value for the given state"""
