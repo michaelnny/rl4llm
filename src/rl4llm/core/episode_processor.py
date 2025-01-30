@@ -47,7 +47,7 @@ class WorkerProcessor:
     def process_single_episode(self, episode: Episode) -> ProcessedEpisode:
         """Process a single episode with token and reward handling."""
 
-        assert episode.transitions
+        assert episode.transitions and len(episode.transitions) >= 1, 'Episode must have transitions'
 
         # Tokenize each turn, but we need the loss mask for each turn, where 0s for user's turn, and 1s for assistant's turn
         all_token_ids = []
@@ -79,12 +79,12 @@ class WorkerProcessor:
             )
             all_token_ids.append(user_token_ids)
             all_rewards.append(np.zeros_like(user_token_ids, dtype=float))
-            all_temperatures.append(np.ones_like(user_token_ids, dtype=float))
+            all_temperatures.append(np.zeros_like(user_token_ids, dtype=float))
             all_masks.append(np.zeros_like(user_token_ids))
 
             # Add assistant's turn
             assistant_token_ids = self._text_to_token_ids(t.action.text)
-            assistant_token_ids = self._handle_special_tokens(assistant_token_ids, is_intermediate=t.is_done)
+            assistant_token_ids = self._handle_special_tokens(assistant_token_ids, is_terminal=t.is_done)
             assistant_rewards = np.zeros_like(assistant_token_ids, dtype=float)
             assistant_rewards[-1] = t.reward
             assistant_masks = np.ones_like(assistant_token_ids)
@@ -106,10 +106,9 @@ class WorkerProcessor:
 
         # Validate shapes
         shapes = {
-            'token_ids': token_ids.shape,
             'temperatures': temperatures.shape,
             'rewards': rewards.shape,
-            'masks': loss_masks.shape,
+            'loss_masks': loss_masks.shape,
         }
         if not all(shape == token_ids.shape for shape in shapes.values()):
             raise ValueError(f"Inconsistent shapes in sequence components: {shapes}")
@@ -127,7 +126,7 @@ class WorkerProcessor:
     def _text_to_token_ids(self, text: str) -> np.ndarray:
         return np.array(self.tokenizer.encode(text, truncation=True, padding=False, add_special_tokens=False))
 
-    def _handle_special_tokens(self, token_ids: np.ndarray, is_intermediate: bool) -> np.ndarray:
+    def _handle_special_tokens(self, token_ids: np.ndarray, is_terminal: bool) -> np.ndarray:
         bos_id = self.tokenizer.bos_token_id
         eos_id = self.tokenizer.eos_token_id
         pad_id = self.tokenizer.pad_token_id
@@ -135,9 +134,9 @@ class WorkerProcessor:
         # Remove all BOS, EOS, PAD tokens
         token_ids = token_ids[(token_ids != bos_id) & (token_ids != eos_id) & (token_ids != pad_id)]
 
-        if not is_intermediate:
+        if is_terminal:
             # Append a single EOS token to final sequences
-            token_ids = np.concatenate((token_ids, np.array([eos_id])))
+            token_ids = np.concatenate((token_ids, np.array([eos_id])), axis=0)
 
         return token_ids
 

@@ -52,7 +52,8 @@ def main(config_file=None):
 
     tracker, logger = setup_tracker_and_logger(config, local_rank)
 
-    tracker.log_params(config)
+    if tracker:
+        tracker.log_params(config)
 
     # Initialize DeepSpeed distributed environment
     deepspeed.init_distributed()

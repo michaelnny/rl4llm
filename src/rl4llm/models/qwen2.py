@@ -59,7 +59,7 @@ class CustomQwen2Model(Qwen2ForCausalLM):
         )
 
         # Compute state values
-        values = self.value_head(outputs.hidden_states[-1])
+        values = self.value_head(outputs.hidden_states[-1]).squeeze(-1)
 
         # Return ExtendedModelOutput with the computed state values
         return ExtendedModelOutput(

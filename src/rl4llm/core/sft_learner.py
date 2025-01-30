@@ -88,7 +88,17 @@ class SFTLearner(BaseDeepSpeedClass):
             assert_file_exist(item['path'])
 
         # Create prompt mapping
-        state_prompt_map = {item['state_id']: item['user_prompt'] for item in prompt_templates}
+        user_prompt_map = {}
+        system_prompt_map = {}
+
+        for item in prompt_templates:
+            state_id = item['state_id'].lower().strip()
+            if 'user_prompt' in item and item['user_prompt']:
+                user_prompt_map[state_id] = item['user_prompt']
+            if 'system_prompt' in item and item['system_prompt']:
+                system_prompt_map[state_id] = item['system_prompt']
+            else:
+                system_prompt_map[state_id] = None
 
         # Process all datasets
         train_episodes: List[Episode] = []
@@ -101,6 +111,15 @@ class SFTLearner(BaseDeepSpeedClass):
                 items = load_from_jsonl_file(item['path'])
                 reward_scale = item.get('reward_scale', 1.0)
                 episodes = [Episode(**item) for item in items]
+
+                for ep in episodes:
+                    for i, t in enumerate(ep.transitions):
+                        state_id = t.state.state_id
+                        # Replace with a simpler prompt
+                        if state_id in user_prompt_map:
+                            t.state.user_prompt = user_prompt_map[state_id]
+                        if state_id in system_prompt_map:
+                            t.state.system_prompt = system_prompt_map[state_id]
 
                 num_correct_samples += len([ep for ep in episodes if ep.graded_reward >= 1.0])
 
@@ -126,9 +145,9 @@ class SFTLearner(BaseDeepSpeedClass):
             f"Loaded {len(train_episodes)} episodes, correct vs incorrect: {correct_rate:.2f}:{1 - correct_rate:.2f}"
         )
 
+        # Generate more synthetic samples
         math_augmenter = MathAugmenter()
-        with mp.Pool(processes=mp.cpu_count()) as pool:  # ONE pool for both
-
+        with mp.Pool(processes=mp.cpu_count()) as pool:
             # Parallel Augmentation
             augmented_episode_lists = pool.map(
                 partial(self._augment_single_episode, math_augmenter=math_augmenter),
@@ -140,19 +159,35 @@ class SFTLearner(BaseDeepSpeedClass):
 
             train_episodes.extend(augmented_episodes)
 
-            # # Parallel Conversion not working due to tokenizer unpickable
-            # train_samples = pool.map(
-            #     partial(
-            #         self._convert_single_episode_to_train_sample, max_seq_len=max_seq_len, state_prompt_map=state_prompt_map
-            #     ),
-            #     train_episodes,
-            # )
+        # Turn episodes into training samples
+        processed_episodes = self.sample_processor.process_episodes(train_episodes)
+        train_samples = []
+        for ep in processed_episodes:
+            token_ids = ep.token_ids
+            rewards = ep.rewards
+            loss_masks = ep.loss_masks
+            is_correct = rewards[-1] > 0.0
 
-        self.logger.info("Converting episodes to training samples ...")
-        train_samples = [
-            self._convert_single_episode_to_train_sample(ep, max_seq_len=max_seq_len, state_prompt_map=state_prompt_map)
-            for ep in train_episodes
-        ]
+            # # Compute returns and create training sample
+            mc_returns = self._compute_masked_mc_returns(rewards, loss_masks)
+
+            if max_seq_len > 0 and len(token_ids) > max_seq_len:
+                self.logger.warning(f"Truncating sequence of length {len(token_ids)} to max_seq_len={max_seq_len}")
+                token_ids = token_ids[:max_seq_len]
+                mc_returns = mc_returns[:max_seq_len]
+                loss_masks = loss_masks[:max_seq_len]
+
+            assert sum(loss_masks) > 0, "No assistant turns found in the episode"
+
+            train_samples.append(
+                SFTSample(
+                    input_tokens=torch.from_numpy(token_ids[:-1]).to(dtype=torch.long),
+                    target_tokens=torch.from_numpy(token_ids[1:]).to(dtype=torch.long),
+                    mc_returns=torch.from_numpy(mc_returns[1:]).to(dtype=self.dtype),
+                    loss_masks=torch.from_numpy(loss_masks[1:]).to(dtype=torch.bool),
+                    correctness=torch.tensor([is_correct]).to(dtype=torch.bool),
+                )
+            )
 
         return DataLoader(
             train_samples,
@@ -172,7 +207,7 @@ class SFTLearner(BaseDeepSpeedClass):
                 copied_ep = deepcopy(episode)
                 first_t = copied_ep.transitions[0]
                 origin_text = first_t.action.text
-                augmented_text, _ = math_augmenter.augment_text(origin_text, max_replacements=random.randint(3, 5))
+                augmented_text, _ = math_augmenter.augment_text(origin_text, max_replacements=random.randint(5, 10))
                 if augmented_text != origin_text and augmented_text not in aug_texts:
                     first_t.action.text = augmented_text
                     first_t.reward = 0.0
@@ -183,95 +218,6 @@ class SFTLearner(BaseDeepSpeedClass):
         except Exception as e:
             print(f"Failed to process episode for augmentation: {str(e)}")
         return aug_episode_list
-
-    def _convert_single_episode_to_train_sample(
-        self, episode: Episode, max_seq_len: int, state_prompt_map: Dict[str, str]
-    ) -> SFTSample:
-        """Convert a single episode to a training sample."""
-        episode_token_ids = []
-        episode_rewards = []
-        episode_loss_masks = []
-
-        assert len(episode.transitions) > 0, 'Episode must have at least one transition'
-
-        # Process each transition in the episode
-        for i, t in enumerate(episode.transitions):
-            is_first_turn = i == 0
-            state_id = t.state.state_id
-
-            # Add user's turn
-            user_prompt = state_prompt_map[state_id] if state_id in state_prompt_map else t.state.user_prompt
-            user_content = user_prompt
-            if is_first_turn:
-                # add original question to first user turn
-                try:
-                    user_content = user_prompt.format(question=episode.question)
-                except Exception:
-                    user_content = f"{user_prompt}\n\nQuestion:\n{episode.question}"
-
-            user_token_ids = self.tokenizer.apply_chat_template(
-                (
-                    [{'role': 'system', 'content': t.state.system_prompt}, {'role': 'user', 'content': user_content}]
-                    if is_first_turn and t.state.system_prompt
-                    else [{'role': 'user', 'content': user_content}]
-                ),
-                tokenize=True,
-                add_generation_prompt=True,
-            )
-
-            episode_token_ids.append(user_token_ids)
-            episode_rewards.append(np.zeros_like(user_token_ids, dtype=float))
-            episode_loss_masks.append(np.zeros_like(user_token_ids))
-
-            assistant_token_ids = self._text_to_token_ids(t.action.text)
-            assistant_token_ids = self._handle_special_tokens(assistant_token_ids, is_intermediate=t.is_done)
-            assistant_rewards = np.zeros_like(assistant_token_ids, dtype=float)
-            assistant_rewards[-1] = t.reward
-
-            assistant_masks = np.ones_like(assistant_token_ids)
-            episode_token_ids.append(assistant_token_ids)
-            episode_rewards.append(assistant_rewards)
-            episode_loss_masks.append(assistant_masks)
-
-        # Concatenate and validate sequences
-        token_ids = np.concatenate(episode_token_ids)
-        rewards = np.concatenate(episode_rewards)
-        loss_masks = np.concatenate(episode_loss_masks)
-        correctness = np.array([episode.graded_reward >= 1.0])
-
-        # Compute returns and create training sample
-        mc_returns = self._compute_masked_mc_returns(rewards, loss_masks)
-
-        if max_seq_len > 0 and len(token_ids) > max_seq_len:
-            self.logger.warning(f"Truncating sequence of length {len(token_ids)} to max_seq_len={max_seq_len}")
-            token_ids = token_ids[:max_seq_len]
-            mc_returns = mc_returns[:max_seq_len]
-            loss_masks = loss_masks[:max_seq_len]
-            correctness = correctness[:max_seq_len]
-
-        return SFTSample(
-            input_tokens=torch.from_numpy(token_ids[:-1]).to(dtype=torch.long),
-            target_tokens=torch.from_numpy(token_ids[1:]).to(dtype=torch.long),
-            mc_returns=torch.from_numpy(mc_returns[1:]).to(dtype=torch.float),
-            loss_masks=torch.from_numpy(loss_masks[1:]).to(dtype=torch.bool),
-            correctness=torch.from_numpy(correctness).to(dtype=torch.bool),
-        )
-
-    def _text_to_token_ids(self, text: str) -> np.ndarray:
-        return np.array(self.tokenizer.encode(text, truncation=True, padding=False, add_special_tokens=False))
-
-    def _handle_special_tokens(self, token_ids: np.ndarray, is_intermediate: bool) -> np.ndarray:
-
-        # Remove all BOS, EOS, PAD tokens
-        token_ids = token_ids[
-            (token_ids != self.bos_token_id) & (token_ids != self.eos_token_id) & (token_ids != self.pad_token_id)
-        ]
-
-        if not is_intermediate:
-            # Append a single EOS token to final sequences
-            token_ids = np.concatenate((token_ids, np.array([self.eos_token_id])))
-
-        return token_ids
 
     def _compute_masked_mc_returns(self, rewards: np.ndarray, masks: np.ndarray) -> np.ndarray:
         """
@@ -331,7 +277,13 @@ class SFTLearner(BaseDeepSpeedClass):
         elif is_final:
             tag = 'final'
 
-        self._create_checkpoint(self.policy_engine, self.ckpt_dir, tag)
+        self._save_hf_model(
+            self.policy_engine,
+            save_base_dir=self.ckpt_dir,
+            step_count=self.update_count,
+            tag=tag,
+            keep_last_n=self.train_cfg.checkpoint_keep_n,
+        )
 
     def on_exit(self):
         """Cleanup on exit."""
@@ -345,10 +297,12 @@ class SFTLearner(BaseDeepSpeedClass):
     def train(self) -> None:
         """Run SFT training epochs."""
         # episodes = self.sample_processor.process_episodes(episodes)
-        self.policy_engine = self.policy_engine.to(self.device)  # Move engines to device
-        torch.cuda.empty_cache()
 
         train_loader = self._load_and_prepare_sft_datasets()
+
+        self.policy_engine.train()
+        self.policy_engine = self.policy_engine.to(self.device)  # Move engines to device
+        torch.cuda.empty_cache()
 
         total_samples = len(train_loader.dataset)
         total_steps = math.ceil(total_samples / self.batch_size) * self.train_cfg.num_epochs
@@ -449,22 +403,24 @@ class SFTLearner(BaseDeepSpeedClass):
         correctness_masks = batch.correctness.bool().to(device)
 
         assert pred_pi_logits.dim() == 3  # [B, max_seq_len, vocab_size]
+        assert pred_values.dim() == 2  # [B, max_seq_len]
         assert target_tokens.dim() == loss_masks.dim() == 2  # [B, max_seq_len]
         assert pred_pi_logits.shape[0] == target_tokens.shape[0] == loss_masks.shape[0]
+        assert mc_returns.shape == pred_values.shape
 
         B, T, *_ = pred_pi_logits.shape
         lm_losses = F.cross_entropy(pred_pi_logits.view(-1, pred_pi_logits.size(-1)), target_tokens.view(-1), reduction='none')
-        assert not torch.any(torch.isnan(lm_losses))
         lm_losses = lm_losses.view(B, T)
         assert lm_losses.shape == loss_masks.shape
 
         # Value head loss
-        value_losses = F.mse_loss(pred_values.to(self.dtype), mc_returns.to(self.dtype), reduction='none')
+        value_losses = F.mse_loss(pred_values.to(self.dtype), mc_returns.to(self.dtype), reduction="none")
 
         # only using correct samples to compute LM loss, and skip the augmented tokens if any
         lm_losses = correctness_masks * masked_mean(lm_losses, loss_masks, dim=1)  # [batch_size]
         # using both incorrect and correct samples for value loss, we also include the augmented tokens
         value_losses = masked_mean(value_losses, loss_masks, dim=1)  # [batch_size]
+
         total_losses = lm_losses + self.train_cfg.value_loss_coef * value_losses
         loss = total_losses.mean()
 

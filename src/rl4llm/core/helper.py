@@ -19,9 +19,9 @@ def masked_mean(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[in
     assert torch.is_tensor(values) and values.shape == mask.shape
 
     if dim is not None:
-        return (values * mask).sum(dim=dim, keepdim=True) / mask.sum(dim=dim, keepdim=True)
+        return (values * mask).sum(dim=dim, keepdim=True) / (mask.sum(dim=dim, keepdim=True) + 1e-8)
     else:
-        return (values * mask).sum() / mask.sum()
+        return (values * mask).sum() / (mask.sum() + 1e-8)
 
 
 def masked_normalize(values: torch.Tensor, mask: torch.Tensor, dim: int = 1, eps: float = 1e-8) -> torch.Tensor:

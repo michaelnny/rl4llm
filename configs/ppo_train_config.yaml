@@ -9,7 +9,7 @@ model:
   load_in_4bit: false
   activation_checkpoint: true
   initialize_value_weights: true
-  load_checkpoint_dir: "./runs/PPO_Qwen2.5_3B_Instruct/checkpoints"
+  # load_checkpoint_path: "./runs/PPO_Qwen2.5_3B_Instruct/checkpoints"
   
 
 training_config:
@@ -28,7 +28,7 @@ training_config:
   value_loss_coef: 0.1
   kl_coef: 0.01
   checkpoint_enabled: true
-  checkpoint_interval: 500 # every N updates
+  checkpoint_interval: 300 # every N updates
   checkpoint_keep_n: 1
 
 datasets: # List of tasks/datasets to load

@@ -1,34 +1,34 @@
 # SFT config
 job:
-  name: "sft_run_qwen2.5-1.5b" # Identifier for the training job
+  name: "sft_run_qwen2.5-3b" # Identifier for the training job
   seed: 117 # Seed for reproducibility
   artifacts_path: "./runs" # Artifacts Configuration
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
   load_in_4bit: false
   activation_checkpoint: true
   initialize_value_weights: true
   max_seq_len: 4096
 
 training_config:
-  num_epochs: 1
+  num_epochs: 2
   # min_gamma: 0.999 # for compute dynamic discount
   # max_gamma: 0.9998 # for compute dynamic discount
   # max_expected_length: 10000
-  gamma: 0.99975 # default discount factor
+  gamma: 0.99975 # discount factor
   value_loss_coef: 0.1
   checkpoint_enabled: true
-  checkpoint_interval: 50 # every N updates
-  checkpoint_keep_n: 3
+  checkpoint_interval: 100 # every N updates
+  checkpoint_keep_n: 2
 
 datasets:
   - name: "MATH-GPT4"
     path: "./data/sft_stage/math_gpt4_episodes.jsonl.gz"
-    reward_scale: 0.5
-  # - name: "MATH-HARD-R1"
-  #   path: "./data/sft_stage/math_hard_2k_r1_episodes.jsonl.gz"
-  #   reward_scale: 1.0
+    reward_scale: 0.8
+  - name: "MATH-HARD-R1"
+    path: "./data/sft_stage/math_hard_2k_r1_episodes.jsonl.gz"
+    reward_scale: 1.0
 
 prompt_templates:
   - state_id: reasoning
@@ -45,8 +45,8 @@ prompt_templates:
 deepspeed:
   # memory_breakdown: true  # for debugging
   steps_per_print: 10000 # disable default logging
-  train_micro_batch_size_per_gpu: 4
-  train_batch_size: 128
+  train_micro_batch_size_per_gpu: 5
+  train_batch_size: 80
   gradient_clipping: 1.0
   prescale_gradients: false
   wall_clock_breakdown: false
@@ -65,7 +65,7 @@ deepspeed:
     type: "WarmupDecayLR"
     params:
       warmup_num_steps: 50
-      total_num_steps: 10000
+      total_num_steps: 2000
       warmup_min_lr: [1.0e-7, 1.0e-7, 5.0e-6] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
       warmup_max_lr: [5.0e-7, 5.0e-7, 5.0e-5] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
   zero_optimization:
@@ -85,7 +85,7 @@ deepspeed:
     zero_quantized_weights: false
     zero_quantized_gradients: false
     offload_param:
-      device: none
+      device: cpu
     offload_optimizer:
       device: cpu
       pin_memory: true

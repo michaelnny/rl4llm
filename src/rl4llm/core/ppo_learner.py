@@ -67,9 +67,7 @@ class PPOLearner(BaseDeepSpeedClass):
         """Initializes the DeepSpeed policy training engine."""
         model = self._load_policy_model()
         param_groups = self._get_params_groups(model, self.config['deepspeed']['optimizer'])
-        load_ckpt_dir = self.config['model'].get("load_checkpoint_dir")
-        load_ckpt_tag = self.config['model'].get("load_checkpoint_tag")
-        return self._create_deepspeed_training_engine(model, param_groups, load_ckpt_dir=load_ckpt_dir, load_ckpt_tag=load_ckpt_tag)
+        return self._create_deepspeed_training_engine(model, param_groups)
 
     def _init_reference_engine(self) -> deepspeed.InferenceEngine:
         """Initializes the DeepSpeed reference inference engine."""
@@ -96,7 +94,13 @@ class PPOLearner(BaseDeepSpeedClass):
         elif is_final:
             tag = 'final'
 
-        self._create_checkpoint(self.policy_engine, self.ckpt_dir, tag)
+        self._save_hf_model(
+            self.policy_engine,
+            save_base_dir=self.ckpt_dir,
+            step_count=self.update_count,
+            tag=tag,
+            keep_last_n=self.train_cfg.checkpoint_keep_n,
+        )
 
     def on_exit(self):
         """Cleanup on exit."""
@@ -162,15 +166,6 @@ class PPOLearner(BaseDeepSpeedClass):
             }
         )
         self._log_iteration_stats(iter_stats)  # Log iter stats
-
-    def _is_zero3_enabled(self) -> bool:
-        """Check if ZeRO-3 is enabled."""
-        ds_config = self.config['deepspeed']
-        return (
-            'zero_optimization' in ds_config
-            and 'stage' in ds_config['zero_optimization']
-            and ds_config['zero_optimization']['stage'] == 3
-        )
 
     def get_lasted_policy_weights(self) -> Dict[str, torch.Tensor]:
         """Retrieves consolidated 16-bit model state dict."""

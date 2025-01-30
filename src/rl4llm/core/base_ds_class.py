@@ -3,6 +3,7 @@ import os
 import random
 import time
 import math
+from contextlib import nullcontext
 from abc import ABC, abstractmethod
 from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -94,13 +95,22 @@ class BaseDeepSpeedClass:
             self.logger.info('Setup activation checkpoint...')
             model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
+        load_ckpt_path = self.config['model'].get("load_checkpoint_path")
+        if load_ckpt_path:
+            self.logger.info(f"Loading checkpoint from {load_ckpt_path!r}")
+            checkpoint = torch.load(load_ckpt_path, map_location="cpu")
+            model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
+            self.logger.info(f"Loaded checkpoint from {load_ckpt_path!r}")
+
+            del checkpoint
+
         # Initialize weights for value head if needed
-        if model_config.get('initialize_value_weights', False):
+        elif model_config.get('initialize_value_weights', False):
             if hasattr(model, "value_head") and model.value_head:
                 self.logger.info('Initialize value head weights...')
                 module = model.value_head
                 if isinstance(module, torch.nn.Linear):
-                    torch.nn.init.normal_(module.weight, mean=0.0, std=0.01)
+                    torch.nn.init.normal_(module.weight, mean=0.0, std=0.02 / math.sqrt(2 * model.config.num_hidden_layers))
                     if module.bias is not None:
                         torch.nn.init.zeros_(module.bias)
 
@@ -134,8 +144,6 @@ class BaseDeepSpeedClass:
         self,
         model: PreTrainedModel,
         model_parameters: Optional[List[Dict]] = None,
-        load_ckpt_dir: Optional[str] = None,
-        load_ckpt_tag: Optional[str] = None,
     ) -> deepspeed.DeepSpeedEngine:
         """Creates DeepSpeed training engine."""
         if self.logger:
@@ -153,8 +161,8 @@ class BaseDeepSpeedClass:
             dist_init_required=True,
         )
 
-        if load_ckpt_dir:
-            _, checkpoint_state_dict = engine.load_checkpoint(load_ckpt_dir, load_ckpt_tag, load_module_only=True)
+        # if load_ckpt_dir:
+        #     _, checkpoint_state_dict = engine.load_checkpoint(load_ckpt_dir, load_ckpt_tag, load_module_only=True)
 
         return engine
 
@@ -257,20 +265,68 @@ class BaseDeepSpeedClass:
 
         return full_state_dict
 
-    def _create_checkpoint(
+    # def _create_checkpoint(
+    #     self,
+    #     engine: deepspeed.DeepSpeedEngine,
+    #     save_dir: str,
+    #     tag: Optional[str] = None,
+    #     keep_last_n: Optional[int] = 3,
+    # ) -> None:
+    #     """Saves checkpoint using DeepSpeed engine."""
+
+    #     self.logger.info(f"Saving checkpoint to {save_dir!r}")
+
+    #     # Use DeepSpeed's save checkpoint if enabled
+    #     engine.save_checkpoint(save_dir=save_dir, tag=tag)
+
+    #     # _ = engine.save_16bit_model(save_dir)
+
+    #     if keep_last_n > 0 and self.local_rank == 0:
+    #         # Cleanup old checkpoints, keeping only N most recent
+    #         cleanup_old_checkpoints(save_dir, keep_last_n)
+
+    def _save_hf_model(
         self,
-        ds_engine: deepspeed.DeepSpeedEngine,
-        save_dir: str,
+        engine: deepspeed.DeepSpeedEngine,
+        save_base_dir: str,
+        step_count: int,
         tag: Optional[str] = None,
-        keep_last_n: Optional[int] = 3,
-    ):
-        """Saves checkpoint using DeepSpeed engine. To be implemented by subclasses."""
+        keep_last_n: Optional[int] = 0,
+    ) -> None:
+        """Saves the model's weights to the specified directory using HF 'save_pretrained'."""
 
-        self.logger.info(f"Saving checkpoint to {save_dir!r}")
+        assert save_base_dir, "Save directory must be specified."
 
-        # Use DeepSpeed's save checkpoint if enabled
-        ds_engine.save_checkpoint(save_dir=save_dir, tag=tag)
+        is_zero3 = self._is_zero3_model(engine)
 
-        if keep_last_n > 0 and self.local_rank == 0:
-            # Cleanup old checkpoints, keeping only N most recent
-            cleanup_old_checkpoints(save_dir, keep_last_n)
+        # Retrieve the model from the DeepSpeed engine
+        model: PreTrainedModel = engine.module
+
+        if is_zero3:
+            # Gather all parameters across processes
+            ctx = deepspeed.zero.GatheredParameters(model.parameters())
+        else:
+            ctx = nullcontext()
+
+        with ctx:
+            # Only save on the main process
+            if self.local_rank == 0:
+                if tag:
+                    ckpt_dir = os.path.join(save_base_dir, f"checkpoint_step_{step_count}_{tag}")
+                else:
+                    ckpt_dir = os.path.join(save_base_dir, f"checkpoint_step_{step_count}")
+
+                # Ensure the save directory exists
+                os.makedirs(ckpt_dir, exist_ok=True)
+
+                # Save model in Hugging Face format
+                model.save_pretrained(ckpt_dir, save_peft_format=False)
+                self.logger.info(f"Model saved to {ckpt_dir}")
+
+                # Remove old checkpoints
+                if keep_last_n > 0 and self.local_rank == 0:
+                    cleanup_old_checkpoints(save_base_dir, keep_last_n)
+
+    def _is_zero3_model(self, engine: deepspeed.DeepSpeedEngine) -> bool:
+        """Check if the model is ZeRO-3 partitioned."""
+        return engine.zero_optimization_partition_weights()

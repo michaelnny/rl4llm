@@ -9,7 +9,7 @@ model:
   load_in_4bit: false
   activation_checkpoint: true
   initialize_value_weights: false
-  load_checkpoint_dir: "./runs/PPO_Qwen2.5_3B_Instruct/checkpoints"
+  # load_checkpoint_path: "./runs/PPO_Qwen2.5_3B_Instruct/checkpoints"
 
 training_config:
   rollout_iterations: 10000
