@@ -8,7 +8,8 @@ model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
   load_in_4bit: false
   activation_checkpoint: true
-  initialize_value_weights: true
+  initialize_value_weights: false
+  load_checkpoint_dir: "./runs/PPO_Qwen2.5_3B_Instruct/checkpoints"
 
 training_config:
   rollout_iterations: 10000
@@ -19,15 +20,14 @@ training_config:
   # max_expected_length: 10000
   policy_clip_eps: 0.2 # PPO policy clip parameter
   value_clip_eps: 0.2 # PPO value clip parameter
-  gamma: 1.0 # default discount factor
+  gamma: 0.99975 # default discount factor
   gae_lambda: 0.95
   normalize_rewards: true
   normalize_advantages: true
-  value_loss_coef: 1.0
-  policy_grad_clip: 0.0
+  value_loss_coef: 0.1
   kl_coef: 0.01
   checkpoint_enabled: true
-  checkpoint_interval: 100 # every N rollouts
+  checkpoint_interval: 500 # every N updates
   checkpoint_keep_n: 1
 
 datasets: # List of tasks/datasets to load

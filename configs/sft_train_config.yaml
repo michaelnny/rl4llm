@@ -1,21 +1,55 @@
 # SFT config
 job:
-  name: "sft_run_qwen2.5-3b" # Identifier for the training job
+  name: "sft_run_qwen2.5-1.5b" # Identifier for the training job
   seed: 117 # Seed for reproducibility
   artifacts_path: "./runs" # Artifacts Configuration
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
   load_in_4bit: false
   activation_checkpoint: true
   initialize_value_weights: true
+  max_seq_len: 4096
+
+training_config:
+  num_epochs: 1
+  # min_gamma: 0.999 # for compute dynamic discount
+  # max_gamma: 0.9998 # for compute dynamic discount
+  # max_expected_length: 10000
+  gamma: 0.99975 # default discount factor
+  value_loss_coef: 0.1
+  checkpoint_enabled: true
+  checkpoint_interval: 50 # every N updates
+  checkpoint_keep_n: 3
+
+datasets:
+  - name: "MATH-GPT4"
+    path: "./data/sft_stage/math_gpt4_episodes.jsonl.gz"
+    reward_scale: 0.5
+  # - name: "MATH-HARD-R1"
+  #   path: "./data/sft_stage/math_hard_2k_r1_episodes.jsonl.gz"
+  #   reward_scale: 1.0
+
+prompt_templates:
+  - state_id: reasoning
+    system_prompt: |
+      A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
+      The assistant first thinks about the reasoning process in the mind and then provides the user
+      with the answer. Please put your final answer (e.g. numerical value or expression) within \\boxed{}.
+    user_prompt: |
+      {question}
+  - state_id: final_answer
+    user_prompt: |
+      Present your final answer.
 
 deepspeed:
   # memory_breakdown: true  # for debugging
   steps_per_print: 10000 # disable default logging
   train_micro_batch_size_per_gpu: 4
-  gradient_accumulation_steps: 16
-  gradient_clipping: 0.0
+  train_batch_size: 128
+  gradient_clipping: 1.0
+  prescale_gradients: false
+  wall_clock_breakdown: false
   fp16:
     enabled: false
   bf16:
@@ -31,18 +65,30 @@ deepspeed:
     type: "WarmupDecayLR"
     params:
       warmup_num_steps: 50
-      total_num_steps: 2000
-      warmup_min_lr: [1.0e-7, 1.0e-7, 1.0e-7] # for params groups in order: ["policy nodecay", "policy", "value head"]
-      warmup_max_lr: [1.0e-5, 1.0e-5, 1.0e-5] # for params groups in order: ["policy nodecay", "policy", "value head"]
+      total_num_steps: 10000
+      warmup_min_lr: [1.0e-7, 1.0e-7, 5.0e-6] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
+      warmup_max_lr: [5.0e-7, 5.0e-7, 5.0e-5] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
   zero_optimization:
     stage: 2
     contiguous_gradients: true
-    overlap_comm: true
     allgather_partitions: true
     reduce_scatter: true
+    overlap_comm: true
+    stage3_max_live_parameters: auto
+    stage3_max_reuse_distance: auto
+    stage3_param_persistence_threshold: auto
+    stage3_prefetch_bucket_size: auto
+    reduce_bucket_size: auto
+    memory_efficient_linear: false
+    # ZeRO++
+    zero_hpz_partition_size: 8
+    zero_quantized_weights: false
+    zero_quantized_gradients: false
+    offload_param:
+      device: none
     offload_optimizer:
       device: cpu
-      pin_memory: false
+      pin_memory: true
   activation_checkpointing:
     partition_activations: true
     cpu_checkpointing: true
@@ -50,29 +96,6 @@ deepspeed:
     number_checkpoints: null
     synchronize_checkpoint_boundary: false
     profile: false
-
-training_config:
-  num_epochs: 2
-  min_gamma: 0.999 # for compute dynamic discount
-  max_gamma: 0.9998 # for compute dynamic discount
-  max_expected_length: 10000
-  value_loss_coef: 0.1
-  checkpoint_enabled: true
-  checkpoint_interval: 100 # every N updates
-  checkpoint_keep_n: 3
-datasets:
-  - name: "MATH"
-    path: "./data/sft_stage/math_hard_2k_r1_episodes_fixed.jsonl.gz"
-  # - name: 'GSM'
-  #   path: "./data/sft_stage/gsm_.jsonl"
-
-prompt_templates:
-  - state_id: reasoning
-    user_prompt: |
-      {question}
-  - state_id: final_answer
-    user_prompt: |
-      Present your final answer.
 
 logging:
   level: "INFO"

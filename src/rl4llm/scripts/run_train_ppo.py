@@ -3,29 +3,17 @@
 import argparse
 import os
 import sys
-
 from traceback import format_exc
-import logging
-from typing import Dict, Tuple
-from datetime import datetime
 
 import deepspeed
 import torch
 
 from rl4llm.core.actor import Actor
-from rl4llm.core.learner import Learner
+from rl4llm.core.ppo_learner import PPOLearner
 from rl4llm.data import load_and_combine_datasets
 from rl4llm.envs import VectorEnvWrapper
 from rl4llm.types import DecodingConfig
-from rl4llm.utils import (
-    TrainingTracker,
-    DummyLogger,
-    load_yaml_config_file,
-    save_to_json_file,
-    save_yaml_config_file,
-    set_seed,
-    setup_tracker_and_logger,
-)
+from rl4llm.utils import load_yaml_config_file, set_seed, setup_tracker_and_logger
 
 
 def parse_args():
@@ -76,7 +64,7 @@ def main(config_file=None):
     # Set device for each process using local_rank
     torch.cuda.set_device(local_rank)
 
-    learner = Learner(config=config, local_rank=local_rank, tracker=tracker, logger=logger)
+    learner = PPOLearner(config=config, local_rank=local_rank, tracker=tracker, logger=logger)
 
     train_config = config['training_config']
     actor_config = config['actor']

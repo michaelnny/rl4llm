@@ -47,7 +47,7 @@ class CustomQwen2Model(Qwen2ForCausalLM):
     def __init__(self, config, **kwargs):
         super().__init__(config, **kwargs)
 
-        self.value_output = ValueHead(config.hidden_size, int(config.hidden_size // 2))
+        self.value_head = nn.Linear(config.hidden_size, 1, bias=False)
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs) -> ExtendedModelOutput:
         # Call the original model's forward method
@@ -59,7 +59,7 @@ class CustomQwen2Model(Qwen2ForCausalLM):
         )
 
         # Compute state values
-        values = self.value_output(outputs.hidden_states[-1].detach())
+        values = self.value_head(outputs.hidden_states[-1])
 
         # Return ExtendedModelOutput with the computed state values
         return ExtendedModelOutput(

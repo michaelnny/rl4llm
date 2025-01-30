@@ -11,13 +11,13 @@ import torch.distributed as dist
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
-from rl4llm.core.base_agent import BaseAgent
+from rl4llm.core.base_ds_class import BaseDeepSpeedClass
 from rl4llm.envs import VectorEnvWrapper
 from rl4llm.types import DecodingConfig, EnvAction, EnvState, Episode, TokenUsage
 from rl4llm.utils import TrainingTracker
 
 
-class Actor(BaseAgent):
+class Actor(BaseDeepSpeedClass):
     """Implements the actor for generating samples using the deepspeed inference engine."""
 
     def __init__(
