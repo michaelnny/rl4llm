@@ -1,7 +1,7 @@
 datasets:
 - name: MATH-GPT4
   path: ./data/sft_stage/math_gpt4_episodes.jsonl.gz
-  reward_scale: 0.8
+  reward_scale: 1.0
 - name: MATH-HARD-R1
   path: ./data/sft_stage/math_hard_2k_r1_episodes.jsonl.gz
   reward_scale: 1.0
@@ -30,20 +30,20 @@ deepspeed:
   prescale_gradients: false
   scheduler:
     params:
-      total_num_steps: 2000
+      total_num_steps: 10000
       warmup_max_lr:
-      - 5.0e-07
-      - 5.0e-07
-      - 5.0e-05
+      - 1.0e-06
+      - 1.0e-06
+      - 9.0e-06
       warmup_min_lr:
       - 1.0e-07
       - 1.0e-07
-      - 5.0e-06
-      warmup_num_steps: 50
+      - 1.0e-07
+      warmup_num_steps: 20
     type: WarmupDecayLR
   steps_per_print: 10000
-  train_batch_size: 120
-  train_micro_batch_size_per_gpu: 6
+  train_batch_size: 80
+  train_micro_batch_size_per_gpu: 5
   wall_clock_breakdown: false
   zero_optimization:
     allgather_partitions: true
@@ -99,9 +99,10 @@ prompt_templates:
 
     '
 training_config:
+  augment_rate: 0.0
   checkpoint_enabled: true
-  checkpoint_interval: 10
+  checkpoint_interval: 100
   checkpoint_keep_n: 2
-  gamma: 0.99975
-  num_epochs: 2
-  value_loss_coef: 0.1
+  gamma: 1.0
+  num_epochs: 5
+  value_loss_coef: 0.5

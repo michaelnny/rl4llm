@@ -1,16 +1,15 @@
 # RL PPO config
 job:
-  name: "PPO_Qwen2.5_3B_Instruct"
+  name: "ppo_run_qwen2.5-3b"
   seed: 117
   artifacts_path: "./runs"
 
 model:
   pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
+  load_checkpoint: "./checkpoints/sft/checkpoint_step_256_epoch_2"
   load_in_4bit: false
   activation_checkpoint: true
-  initialize_value_weights: true
-  # load_checkpoint_path: "./runs/PPO_Qwen2.5_3B_Instruct/checkpoints"
-  
+  initialize_value_weights: false
 
 training_config:
   rollout_iterations: 10000
@@ -21,22 +20,23 @@ training_config:
   # max_expected_length: 10000
   policy_clip_eps: 0.2 # PPO policy clip parameter
   value_clip_eps: 0.2 # PPO value clip parameter
-  gamma: 0.99975 # default discount factor
+  gamma: 1.0 # 0.99975 # default discount factor
   gae_lambda: 0.95
-  normalize_rewards: true
+  normalize_rewards: false
   normalize_advantages: true
-  value_loss_coef: 0.1
+  value_loss_coef: 0.3
   kl_coef: 0.01
+  separate_advantage: false
   checkpoint_enabled: true
-  checkpoint_interval: 300 # every N updates
-  checkpoint_keep_n: 1
+  checkpoint_interval: 200 # every N updates
+  checkpoint_keep_n: 5
 
 datasets: # List of tasks/datasets to load
   # - "gsm"
   - "math"
 
 environment:
-  num_envs: 16
+  num_envs: 8
   min_reward: 0.0
   max_reward: 1.0
   mid_step_score: 0.5 # only used in multi-step MDP, where we assign a small reward for each non-terminal step
@@ -44,8 +44,7 @@ environment:
   state_config: # define state transition for MDP
     - state_id: reasoning
       system_prompt: |
-        A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
-        The assistant first thinks about the reasoning process in the mind and then provides the user
+        Think first about the reasoning process in your mind and then provides the user
         with the answer. Please put your final answer (e.g. numerical value or expression) within \\boxed{}.
       user_prompt: |
         {question}
@@ -58,7 +57,7 @@ environment:
 
 actor:
   decoding:
-    max_new_tokens: 2048
+    max_new_tokens: 2560
     temperature: 0.6
     top_p: 1.0
     # top_k: 500
@@ -69,7 +68,7 @@ evaluator:
   interval: 10 # Perform evaluation every N iterations
   rollout_episodes: 500 # Maximum number of samples to test
   decoding:
-    max_new_tokens: 2048
+    max_new_tokens: 2560
     temperature: 0.0
     top_p: 1.0
     # top_k: 500
@@ -78,8 +77,8 @@ evaluator:
 deepspeed:
   # memory_breakdown: true  # for debugging
   steps_per_print: 10000 # disable default logging
-  train_micro_batch_size_per_gpu: 8
-  train_batch_size: 128
+  train_micro_batch_size_per_gpu: 5
+  train_batch_size: 120
   gradient_clipping: 1.0
   prescale_gradients: false
   wall_clock_breakdown: false
@@ -100,7 +99,7 @@ deepspeed:
       warmup_num_steps: 50
       total_num_steps: 50000
       warmup_min_lr: [1.0e-7, 1.0e-7, 5.0e-6] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
-      warmup_max_lr: [5.0e-7, 5.0e-7, 5.0e-5] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
+      warmup_max_lr: [1.0e-6, 1.0e-6, 9.0e-6] # for params groups *in order*: ["policy nodecay", "policy", "value head"]
   zero_optimization:
     stage: 2
     contiguous_gradients: true
@@ -118,7 +117,7 @@ deepspeed:
     zero_quantized_weights: false
     zero_quantized_gradients: false
     offload_param:
-      device: none
+      device: cpu
     offload_optimizer:
       device: cpu
       pin_memory: true

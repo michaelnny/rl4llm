@@ -147,7 +147,7 @@ def main(config_file=None):
                 if 'accuracy' in eval_stats and eval_stats['accuracy'] > best_eval_accuracy:
                     best_eval_accuracy = eval_stats['accuracy']
                     logger.info(f"Best policy model with eval accuracy {best_eval_accuracy:.4f}")
-                    learner.save_policy_model(is_best=True)
+                    learner.save_policy_model(tag="best")
 
             # save data to external files
             tracker.flush()

@@ -51,7 +51,8 @@ def compute_logprobs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> 
     assert labels.dim() == 2, 'Targets should have at least two dimension (batch_size, seq_len)'
     assert logits.shape[:-1] == labels.shape, f"Shape mismatch: logits shape {logits.shape} and labels shape {labels.shape}"
 
-    log_probs = F.log_softmax(logits, dim=-1)
+    logits_float = logits.float()
+    log_probs = F.log_softmax(logits_float.float(), dim=-1)
     log_probs_labels = log_probs.gather(dim=-1, index=labels.unsqueeze(-1))
     return log_probs_labels.squeeze(-1)
 
@@ -68,6 +69,7 @@ def compute_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
     """
     assert logits.dim() == 3, 'Logits should have at least three dimensions (batch_size, seq_len, vocab_size)'
 
-    pd = torch.softmax(logits, dim=-1)
-    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
+    logits_float = logits.float()
+    pd = torch.softmax(logits_float, dim=-1)
+    entropy = torch.logsumexp(logits_float, dim=-1) - torch.sum(pd * logits_float, dim=-1)
     return entropy

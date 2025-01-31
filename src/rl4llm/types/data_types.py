@@ -209,7 +209,7 @@ class SFTConfig(BaseTrainingConfig):
     """For supervised fine-tuning training configuration"""
 
     # num_epochs: int = Field(1, ge=1, le=100, description='Number of epochs to go through the dataset')
-    # value_loss_coef: float = Field(0.5, ge=0.0, le=1.0, description='Value head loss coefficient')
+    augment_rate: float = Field(0.5, ge=0.0, le=1.0, description='Rate to generate augmented samples')
 
 
 class PPOConfig(BaseTrainingConfig):
@@ -221,6 +221,7 @@ class PPOConfig(BaseTrainingConfig):
     normalize_rewards: bool = Field(False, description='Normalized rewards before compute advantages')
     normalize_advantages: bool = Field(True, description='Normalized rewards before compute PPO policy loss')
     kl_coef: float = Field(0.03, ge=0.0, le=1.0, description='Token-level KL divergence coefficient')
+    separate_advantage: Optional[bool] = Field(False, description='Use separate env reward and KL for compute advantages')
 
 
 class SFTSample(BaseModel):

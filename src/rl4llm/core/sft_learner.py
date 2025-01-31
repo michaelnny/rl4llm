@@ -55,227 +55,15 @@ class SFTLearner(BaseDeepSpeedClass):
         self.iteration_count = 0
         self.episode_count = 0
 
-    def _calculate_batch_size(self) -> int:
-        """Calculates the effective batch size."""
-        ds_config = self.config['deepspeed']
-        if 'train_batch_size' in ds_config:
-            return ds_config['train_batch_size']
-        if 'gradient_accumulation_steps' not in ds_config:
-            return self.batch_size_per_gpu
-
-        return self.batch_size_per_gpu * ds_config['gradient_accumulation_steps']
-
-    def _init_policy_engine(self) -> deepspeed.DeepSpeedEngine:
-        """Initializes the DeepSpeed policy training engine."""
-        model = self._load_policy_model()
-        param_groups = self._get_params_groups(model, self.config['deepspeed']['optimizer'])
-        return self._create_deepspeed_training_engine(model, param_groups)
-
-    def _load_and_prepare_sft_datasets(self) -> DataLoader:
-        """Load and prepare datasets for training."""
-        self.logger.info("Loading and preparing datasets for training...")
-        datasets_config = self.config['datasets']
-        prompt_templates = self.config['prompt_templates']
-
-        max_seq_len = min(self.config['model'].get('max_seq_len', 4096), self.tokenizer.model_max_length)
-
-        # Validate inputs
-        if not datasets_config or not prompt_templates:
-            raise ValueError('Missing datasets_config or prompt_templates')
-
-        # Check file existence
-        for item in datasets_config:
-            assert_file_exist(item['path'])
-
-        # Create prompt mapping
-        user_prompt_map = {}
-        system_prompt_map = {}
-
-        for item in prompt_templates:
-            state_id = item['state_id'].lower().strip()
-            if 'user_prompt' in item and item['user_prompt']:
-                user_prompt_map[state_id] = item['user_prompt']
-            if 'system_prompt' in item and item['system_prompt']:
-                system_prompt_map[state_id] = item['system_prompt']
-            else:
-                system_prompt_map[state_id] = None
-
-        # Process all datasets
-        train_episodes: List[Episode] = []
-
-        num_correct_samples = 0
-
-        for item in datasets_config:
-            try:
-                # Load episodes
-                items = load_from_jsonl_file(item['path'])
-                reward_scale = item.get('reward_scale', 1.0)
-                episodes = [Episode(**item) for item in items]
-
-                for ep in episodes:
-                    for i, t in enumerate(ep.transitions):
-                        state_id = t.state.state_id
-                        # Replace with a simpler prompt
-                        if state_id in user_prompt_map:
-                            t.state.user_prompt = user_prompt_map[state_id]
-                        if state_id in system_prompt_map:
-                            t.state.system_prompt = system_prompt_map[state_id]
-
-                num_correct_samples += len([ep for ep in episodes if ep.graded_reward >= 1.0])
-
-                # Scale the rewards (e.g. GPT4 samples are not very good reasoning samples)
-                if reward_scale > 0 and reward_scale < 1.0:
-                    for ep in episodes:
-                        if ep.graded_reward == 1.0:
-                            ep.graded_reward *= reward_scale
-                            for t in ep.transitions:
-                                t.reward *= reward_scale
-
-                train_episodes.extend(episodes)
-
-            except Exception as e:
-                self.logger.error(f"Error processing dataset {item['name']}: {str(e)}")
-                continue
-
-        if len(train_episodes) == 0:
-            raise RuntimeError('Got no samples for trining')
-
-        correct_rate = num_correct_samples / len(train_episodes)
-        self.logger.info(
-            f"Loaded {len(train_episodes)} episodes, correct vs incorrect: {correct_rate:.2f}:{1 - correct_rate:.2f}"
-        )
-
-        # Generate more synthetic samples
-        math_augmenter = MathAugmenter()
-        with mp.Pool(processes=mp.cpu_count()) as pool:
-            # Parallel Augmentation
-            augmented_episode_lists = pool.map(
-                partial(self._augment_single_episode, math_augmenter=math_augmenter),
-                [ep for ep in train_episodes if ep.graded_reward > 0.0],
-            )
-            augmented_episodes = [ep for sublist in augmented_episode_lists for ep in sublist]
-
-            self.logger.info(f"Generated {len(augmented_episodes)} augmented samples")
-
-            train_episodes.extend(augmented_episodes)
-
-        # Turn episodes into training samples
-        processed_episodes = self.sample_processor.process_episodes(train_episodes)
-        train_samples = []
-        for ep in processed_episodes:
-            token_ids = ep.token_ids
-            rewards = ep.rewards
-            loss_masks = ep.loss_masks
-            is_correct = rewards[-1] > 0.0
-
-            # # Compute returns and create training sample
-            mc_returns = self._compute_masked_mc_returns(rewards, loss_masks)
-
-            if max_seq_len > 0 and len(token_ids) > max_seq_len:
-                self.logger.warning(f"Truncating sequence of length {len(token_ids)} to max_seq_len={max_seq_len}")
-                token_ids = token_ids[:max_seq_len]
-                mc_returns = mc_returns[:max_seq_len]
-                loss_masks = loss_masks[:max_seq_len]
-
-            assert sum(loss_masks) > 0, "No assistant turns found in the episode"
-
-            train_samples.append(
-                SFTSample(
-                    input_tokens=torch.from_numpy(token_ids[:-1]).to(dtype=torch.long),
-                    target_tokens=torch.from_numpy(token_ids[1:]).to(dtype=torch.long),
-                    mc_returns=torch.from_numpy(mc_returns[1:]).to(dtype=self.dtype),
-                    loss_masks=torch.from_numpy(loss_masks[1:]).to(dtype=torch.bool),
-                    correctness=torch.tensor([is_correct]).to(dtype=torch.bool),
-                )
-            )
-
-        return DataLoader(
-            train_samples,
-            batch_size=self.batch_size_per_gpu,
-            pin_memory=True,
-            collate_fn=partial(self._train_collate_fn, pad_id=self.pad_token_id),
-            drop_last=True,
-        )
-
-    @staticmethod
-    def _augment_single_episode(episode: Episode, math_augmenter: MathAugmenter) -> List[Episode]:
-        """Helper function to augment a single episode in parallel."""
-        aug_episode_list = []
-        try:
-            aug_texts = []
-            for _ in range(2):
-                copied_ep = deepcopy(episode)
-                first_t = copied_ep.transitions[0]
-                origin_text = first_t.action.text
-                augmented_text, _ = math_augmenter.augment_text(origin_text, max_replacements=random.randint(5, 10))
-                if augmented_text != origin_text and augmented_text not in aug_texts:
-                    first_t.action.text = augmented_text
-                    first_t.reward = 0.0
-                    copied_ep.transitions = [first_t]
-                    copied_ep.graded_reward = 0.0
-                    aug_episode_list.append(copied_ep)
-                    aug_texts.append(augmented_text)
-        except Exception as e:
-            print(f"Failed to process episode for augmentation: {str(e)}")
-        return aug_episode_list
-
-    def _compute_masked_mc_returns(self, rewards: np.ndarray, masks: np.ndarray) -> np.ndarray:
-        """
-        Computes monte carlo returns considering only assistant turns using NumPy arrays.
-
-        Args:
-            rewards (np.ndarray): Float array with rewards (0 for user), shape [seq_len]
-            masks (np.ndarray): Binary mask (0 for user, 1 for assistant), shape [seq_len]
-
-        Returns:
-            np.ndarray: Array of the original shape, with discounted returns
-                    for assistant turns and zeros for user turns
-        """
-        # Input validation
-        assert rewards.ndim == masks.ndim == 1, 'Inputs must be 1-dimensional'
-        assert len(rewards) == len(masks), 'Rewards and masks must have same length'
-
-        # Initialize returns array
-        returns = np.zeros_like(masks, dtype=np.float32)
-
-        # Get assistant rewards using boolean indexing
-        assistant_rewards = rewards[masks.astype(bool)]
-        seq_len = len(assistant_rewards)
-        # Handle empty case
-        if seq_len == 0:
-            return returns
-
-        gamma = self.train_cfg.gamma
-
-        # Initialize assistant returns
-        assistant_returns = np.zeros_like(assistant_rewards)
-
-        R = 0
-        for t in reversed(range(len(assistant_rewards))):
-            R = assistant_rewards[t] + gamma * R
-            assistant_returns[t] = R
-
-        # Place assistant returns back in the original array
-        returns[masks.astype(bool)] = assistant_returns
-
-        return returns
-
     def get_policy_grad_norm(self) -> float:
         """Compute the norm of the policy model's gradients."""
         return self._get_grad_norm(self.policy_engine)
 
     def save_policy_model(
         self,
-        is_best: bool = False,
-        is_final: bool = False,
+        tag: Optional[str] = None,
     ) -> None:
         """Save the policy model to the output directory."""
-
-        tag = None
-        if is_best:
-            tag = 'best'
-        elif is_final:
-            tag = 'final'
 
         self._save_hf_model(
             self.policy_engine,
@@ -292,7 +80,7 @@ class SFTLearner(BaseDeepSpeedClass):
             self.tracker.close()
 
         if self.train_cfg.checkpoint_enabled:
-            self.save_policy_model(is_final=True)
+            self.save_policy_model(tag="final")
 
     def train(self) -> None:
         """Run SFT training epochs."""
@@ -333,9 +121,8 @@ class SFTLearner(BaseDeepSpeedClass):
                             self.save_policy_model()
 
                 self.iteration_count += 1
-                self.save_policy_model(is_final=True)
-
-        self.save_policy_model(is_final=True)
+                if self.train_cfg.checkpoint_enabled:
+                    self.save_policy_model(tag=f'epoch_{epoch}')
 
         elapsed_time = pbar.format_dict.get('elapsed', 0)
         pbar.close()
@@ -362,11 +149,6 @@ class SFTLearner(BaseDeepSpeedClass):
             'value/learning_rate': self._get_lr_by_group_name('value'),
         }
 
-    def _prepare_model_inputs(self, input_tokens: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Prepare model inputs and attention mask."""
-        attention_mask = (input_tokens != self.pad_token_id).bool()
-        return input_tokens.to(self.device), attention_mask.to(self.device)
-
     def _process_minibatch(self, mini_batch: SFTSample) -> Dict[str, np.array]:
         """Process a mini-batch and compute loss and metrics."""
         input_tokens, attn_mask = self._prepare_model_inputs(mini_batch.input_tokens)
@@ -375,6 +157,7 @@ class SFTLearner(BaseDeepSpeedClass):
             attention_mask=attn_mask,
             return_dict=True,
             use_cache=False,
+            return_values=True,  # compute values
         )
         loss, metrics = self._compute_loss(pred_pi_logits=outputs.logits, pred_values=outputs.values, batch=mini_batch)
         self.policy_engine.backward(loss)
@@ -384,7 +167,7 @@ class SFTLearner(BaseDeepSpeedClass):
     def _compute_loss(
         self, pred_pi_logits: torch.Tensor, pred_values: torch.Tensor, batch: SFTSample
     ) -> Tuple[torch.Tensor, Dict[str, np.array]]:
-        """Compute PPO loss and other metrics.
+        """Compute language modeling loss, value loss, and other metrics.
 
         Args:
             pred_pi_logits (torch.Tensor): Predicted policy logits.
@@ -416,16 +199,13 @@ class SFTLearner(BaseDeepSpeedClass):
         # Value head loss
         value_losses = F.mse_loss(pred_values.to(self.dtype), mc_returns.to(self.dtype), reduction="none")
 
-        # only using correct samples to compute LM loss, and skip the augmented tokens if any
-        lm_losses = correctness_masks * masked_mean(lm_losses, loss_masks, dim=1)  # [batch_size]
-        # using both incorrect and correct samples for value loss, we also include the augmented tokens
+        # only using correct samples to compute LM loss, and skip the augmented episode
+        lm_losses = masked_mean(lm_losses, loss_masks, dim=1)[correctness_masks]  # [correct_batch_size]
         value_losses = masked_mean(value_losses, loss_masks, dim=1)  # [batch_size]
 
-        total_losses = lm_losses + self.train_cfg.value_loss_coef * value_losses
-        loss = total_losses.mean()
+        loss = lm_losses.mean() + self.train_cfg.value_loss_coef * value_losses.mean()
 
         stats = {
-            'loss/total': total_losses.detach().to(device=self.device, dtype=self.dtype),
             'loss/lm': lm_losses.detach().to(device=self.device, dtype=self.dtype),
             'loss/value': value_losses.detach().to(device=self.device, dtype=self.dtype),
         }
@@ -462,6 +242,220 @@ class SFTLearner(BaseDeepSpeedClass):
             loss_masks=batch_loss_masks,
             correctness=batch_correctness,
         )
+
+    def _calculate_batch_size(self) -> int:
+        """Calculates the effective batch size."""
+        ds_config = self.config['deepspeed']
+        if 'train_batch_size' in ds_config:
+            return ds_config['train_batch_size']
+        if 'gradient_accumulation_steps' not in ds_config:
+            return self.batch_size_per_gpu
+
+        return self.batch_size_per_gpu * ds_config['gradient_accumulation_steps']
+
+    def _init_policy_engine(self) -> deepspeed.DeepSpeedEngine:
+        """Initializes the DeepSpeed policy training engine."""
+        model = self._load_policy_model()
+        param_groups = self._get_params_groups(model, self.config['deepspeed']['optimizer'])
+        return self._create_deepspeed_training_engine(model, param_groups)
+
+    def _load_and_prepare_sft_datasets(self) -> DataLoader:
+        """Load and prepare datasets for SFT training."""
+        self.logger.info("Loading and preparing datasets for training...")
+        datasets_config = self.config['datasets']
+        prompt_templates = self.config['prompt_templates']
+
+        max_seq_len = min(self.config['model'].get('max_seq_len', 4096), self.tokenizer.model_max_length)
+
+        # Validate inputs
+        if not datasets_config or not prompt_templates:
+            raise ValueError('Missing datasets_config or prompt_templates')
+
+        # Check file existence
+        for item in datasets_config:
+            assert_file_exist(item['path'])
+
+        # Create prompt mapping
+        user_prompt_map = {}
+        system_prompt_map = {}
+
+        for item in prompt_templates:
+            state_id = item['state_id'].lower().strip()
+            if 'user_prompt' in item and item['user_prompt']:
+                user_prompt_map[state_id] = item['user_prompt']
+            if 'system_prompt' in item and item['system_prompt']:
+                system_prompt_map[state_id] = item['system_prompt']
+            else:
+                system_prompt_map[state_id] = None
+
+        # Process all datasets
+        train_episodes: List[Episode] = []
+
+        num_correct_samples = 0
+
+        for item in datasets_config:
+            try:
+                # Load episodes
+                items = load_from_jsonl_file(item['path'])
+                reward_scale = item.get('reward_scale', 1.0)
+                episodes = [Episode(**item) for item in items]
+
+                for ep in episodes:
+                    if len(ep.transitions) > 1:
+                        # only use the first transition
+                        ep.transitions = ep.transitions[:1]
+
+                    assert ep.transitions[0].state.state_id == 'reasoning'
+
+                    for i, t in enumerate(ep.transitions):
+                        state_id = t.state.state_id
+                        # Replace with a simpler prompt
+                        if state_id in user_prompt_map:
+                            t.state.user_prompt = user_prompt_map[state_id]
+                        if state_id in system_prompt_map:
+                            t.state.system_prompt = system_prompt_map[state_id]
+
+                num_correct_samples += len([ep for ep in episodes if ep.graded_reward >= 1.0])
+
+                # Optionally, scale the rewards (e.g. GPT4 samples are not very good reasoning samples)
+                if reward_scale > 0 and reward_scale < 1.0:
+                    for ep in episodes:
+                        if ep.graded_reward == 1.0:
+                            ep.graded_reward *= reward_scale
+                            for t in ep.transitions:
+                                t.reward *= reward_scale
+
+                train_episodes.extend(episodes)
+
+            except Exception as e:
+                self.logger.error(f"Error processing dataset {item['name']}: {str(e)}")
+                continue
+
+        if len(train_episodes) == 0:
+            raise RuntimeError('Got no samples for trining')
+
+        correct_rate = num_correct_samples / len(train_episodes)
+        self.logger.info(
+            f"Loaded {len(train_episodes)} episodes, correct vs incorrect: {correct_rate:.2f}:{1 - correct_rate:.2f}"
+        )
+
+        if self.train_cfg.augment_rate > 0:
+            # Generate more synthetic samples
+            math_augmenter = MathAugmenter()
+            correct_episodes = [ep for ep in train_episodes if ep.graded_reward > 0.0]
+            sampled_episodes = random.choices(correct_episodes, k=int(self.train_cfg.augment_rate * len(correct_episodes)))
+            if len(sampled_episodes) > 0:
+                self.logger.info(f"Augmenting {len(sampled_episodes)} samples")
+                with mp.Pool(processes=mp.cpu_count()) as pool:
+                    # Parallel Augmentation
+                    augmented_episodes = pool.map(
+                        partial(self._augment_single_episode, math_augmenter=math_augmenter),
+                        sampled_episodes,
+                    )
+                    self.logger.info(f"Generated {len(augmented_episodes)} augmented samples")
+                    train_episodes.extend(augmented_episodes)
+
+        # Turn episodes into SFT training samples
+        processed_episodes = self.sample_processor.process_episodes(train_episodes)
+        train_samples = []
+        for ep in processed_episodes:
+            token_ids = ep.token_ids
+            rewards = ep.rewards
+            loss_masks = ep.loss_masks
+            is_correct = rewards[-1] > 0.0
+
+            # Compute returns and create training sample
+            mc_returns = self._compute_masked_mc_returns(rewards, loss_masks)
+
+            if max_seq_len > 0 and len(token_ids) > max_seq_len:
+                self.logger.warning(f"Truncating sequence of length {len(token_ids)} to max_seq_len={max_seq_len}")
+                token_ids = token_ids[:max_seq_len]
+                mc_returns = mc_returns[:max_seq_len]
+                loss_masks = loss_masks[:max_seq_len]
+
+            assert sum(loss_masks) > 0, "No assistant turns found in the episode"
+
+            train_samples.append(
+                SFTSample(
+                    input_tokens=torch.from_numpy(token_ids[:-1]).to(dtype=torch.long),
+                    target_tokens=torch.from_numpy(token_ids[1:]).to(dtype=torch.long),
+                    mc_returns=torch.from_numpy(mc_returns[1:]).to(dtype=self.dtype),
+                    loss_masks=torch.from_numpy(loss_masks[1:]).to(dtype=torch.bool),
+                    correctness=torch.tensor([is_correct]).to(dtype=torch.bool),
+                )
+            )
+        
+        assert len(train_samples) > 0, "No training samples found"
+
+        return DataLoader(
+            train_samples,
+            batch_size=self.batch_size_per_gpu,
+            shuffle=True,
+            pin_memory=self.device.type == 'cuda',
+            collate_fn=partial(self._train_collate_fn, pad_id=self.pad_token_id),
+            drop_last=True,
+        )
+
+    @staticmethod
+    def _augment_single_episode(episode: Episode, math_augmenter: MathAugmenter) -> Episode:
+        """Helper function to augment a single episode by randomly replace numbers in the correct answer."""
+
+        try:
+            copied_ep = deepcopy(episode)
+            first_t = copied_ep.transitions[0]
+            origin_text = first_t.action.text
+            augmented_text, _ = math_augmenter.augment_text(origin_text, max_replacements=random.randint(5, 10))
+            if augmented_text != origin_text:
+                first_t.action.text = augmented_text
+                first_t.reward = 0.0
+                copied_ep.transitions = [first_t]
+                copied_ep.graded_reward = 0.0
+                return copied_ep
+
+        except Exception as e:
+            print(f"Failed to process episode for augmentation: {str(e)}")
+            return None
+
+    def _compute_masked_mc_returns(self, rewards: np.ndarray, masks: np.ndarray) -> np.ndarray:
+        """
+        Computes monte carlo returns considering only assistant turns.
+
+        Args:
+            rewards (np.ndarray): Float array with rewards (0 for user), shape [seq_len]
+            masks (np.ndarray): Binary mask (0 for user, 1 for assistant), shape [seq_len]
+
+        Returns:
+            np.ndarray: Array of the original shape, with discounted returns
+                for assistant turns and zeros for user turns
+        """
+        # Input validation
+        assert rewards.ndim == masks.ndim == 1, 'Inputs must be 1-dimensional'
+        assert len(rewards) == len(masks), 'Rewards and masks must have same length'
+
+        # Initialize returns array
+        returns = np.zeros_like(masks, dtype=np.float32)
+
+        # Get assistant rewards using boolean indexing
+        assistant_rewards = rewards[masks.astype(bool)]
+        seq_len = len(assistant_rewards)
+        # Handle empty case
+        if seq_len == 0:
+            return returns
+
+        gamma = self.train_cfg.gamma
+
+        # Initialize assistant returns
+        assistant_returns = np.zeros_like(assistant_rewards)
+
+        R = 0
+        for t in reversed(range(len(assistant_rewards))):
+            R = assistant_rewards[t] + gamma * R
+            assistant_returns[t] = R
+
+        # Place assistant returns back in the original array
+        returns[masks.astype(bool)] = assistant_returns
+
+        return returns
 
     def _log_batch_stats(self, batch_stats: Dict[str, Any]):
         """Log batch statistics."""

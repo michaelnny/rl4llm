@@ -41,7 +41,7 @@ nohup sh -c "PYTHONPATH=src deepspeed --num_gpus=1 src/rl4llm/scripts/run_train_
 
 
 
-PYTHONPATH=src deepspeed --num_gpus=1 src/rl4llm/scripts/run_train_ppo.py --config-file ./configs/ppo_train_test_config.yaml
+PYTHONPATH=src deepspeed --num_gpus=1 src/rl4llm/scripts/run_train_ppo.py --config-file ./configs/ppo_train_config.yaml
 
 
 

@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 from dataclasses import dataclass
@@ -21,24 +22,28 @@ class ExtendedModelOutput(CausalLMOutputWithPast):
 
 
 class ValueHead(nn.Module):
-    """A simple value head with two linear layers"""
+    """Simplified value head with residual connection and dropout"""
 
-    def __init__(self, hidden_dim: int, num_units: int):
+    def __init__(self, hidden_dim: int, scaling_factor: float = 0.75, dropout_prob: float = 0.2):
         super().__init__()
-        self.linear1 = nn.Linear(hidden_dim, num_units, bias=False)
-        self.activation1 = nn.Tanh()
-        self.linear2 = nn.Linear(num_units, num_units, bias=False)
-        self.activation2 = nn.Tanh()
-        self.linear3 = nn.Linear(num_units, 1, bias=False)
+
+        assert scaling_factor >= 0.5 and scaling_factor <= 2.0
+        # Calculate scaled_dim and ensure it's a multiple of 256
+        base_dim = int(hidden_dim * scaling_factor)
+        scaled_dim = 256 * ((base_dim + 255) // 256)  # Round up to nearest multiple of 256
+
+        self.w1 = nn.Linear(hidden_dim, scaled_dim, bias=False)
+        self.w2 = nn.Linear(scaled_dim, hidden_dim, bias=False)
+        self.w3 = nn.Linear(hidden_dim, scaled_dim, bias=False)
+        self.dropout = nn.Dropout(dropout_prob)
+        self.out = nn.Linear(hidden_dim, 1, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute value for the given state"""
-        x = self.linear1(x)
-        x = self.activation1(x)
-        x = self.linear2(x)
-        x = self.activation2(x)
-        out = self.linear3(x)
-        return out.squeeze(-1)  # [batch_size, seq_len]
+        residual = x
+        x = F.silu(self.w1(x)) * self.w3(x)  # SwiGLU
+        x = self.w2(x)
+        x = self.dropout(x + residual)
+        return self.out(x).squeeze(-1)
 
 
 class CustomQwen2Model(Qwen2ForCausalLM):
@@ -47,9 +52,9 @@ class CustomQwen2Model(Qwen2ForCausalLM):
     def __init__(self, config, **kwargs):
         super().__init__(config, **kwargs)
 
-        self.value_head = nn.Linear(config.hidden_size, 1, bias=False)
+        self.value_head = ValueHead(config.hidden_size, dropout_prob=0.0)
 
-    def forward(self, input_ids=None, attention_mask=None, **kwargs) -> ExtendedModelOutput:
+    def forward(self, input_ids=None, attention_mask=None, return_values=False, **kwargs) -> ExtendedModelOutput:
         # Call the original model's forward method
         outputs = super().forward(
             input_ids=input_ids,
@@ -59,7 +64,9 @@ class CustomQwen2Model(Qwen2ForCausalLM):
         )
 
         # Compute state values
-        values = self.value_head(outputs.hidden_states[-1]).squeeze(-1)
+        values = None
+        if return_values:
+            values = self.value_head(outputs.hidden_states[-1]).squeeze(-1)
 
         # Return ExtendedModelOutput with the computed state values
         return ExtendedModelOutput(

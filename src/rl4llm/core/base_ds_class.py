@@ -50,6 +50,11 @@ class BaseDeepSpeedClass:
         self.tracker = tracker
         self.logger = logger if logger else logging.getLogger(__name__)  # Use default logger if none provided
         self.model_name = self.config['model']['pretrained_model']
+        self.pretrained_model_name_or_path = (
+            self.config['model']['load_checkpoint']
+            if 'load_checkpoint' in self.config['model'] and self.config['model']['load_checkpoint']
+            else self.model_name
+        )
         self.seed = self.config['job'].get('seed', 123)
         self.tokenizer: PreTrainedTokenizer = self._init_tokenizer()
         self.pad_token_id = self.tokenizer.pad_token_id
@@ -72,9 +77,10 @@ class BaseDeepSpeedClass:
 
     def _load_policy_model(self) -> PreTrainedModel:
         """Loads the causal LM for policy and reference models."""
+        self.logger.info(f"Initializing pretrained model from {self.pretrained_model_name_or_path}")
         model_config = self.config['model']
         model_kwargs = {
-            "pretrained_model_name_or_path": self.model_name,
+            "pretrained_model_name_or_path": self.pretrained_model_name_or_path,
             "torch_dtype": self.dtype,
             "use_cache": False,
             "attn_implementation": model_config.get('attn_implementation', 'flash_attention_2'),
@@ -95,24 +101,15 @@ class BaseDeepSpeedClass:
             self.logger.info('Setup activation checkpoint...')
             model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
-        load_ckpt_path = self.config['model'].get("load_checkpoint_path")
-        if load_ckpt_path:
-            self.logger.info(f"Loading checkpoint from {load_ckpt_path!r}")
-            checkpoint = torch.load(load_ckpt_path, map_location="cpu")
-            model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
-            self.logger.info(f"Loaded checkpoint from {load_ckpt_path!r}")
-
-            del checkpoint
-
         # Initialize weights for value head if needed
-        elif model_config.get('initialize_value_weights', False):
+        if model_config.get('initialize_value_weights', False):
             if hasattr(model, "value_head") and model.value_head:
                 self.logger.info('Initialize value head weights...')
-                module = model.value_head
-                if isinstance(module, torch.nn.Linear):
-                    torch.nn.init.normal_(module.weight, mean=0.0, std=0.02 / math.sqrt(2 * model.config.num_hidden_layers))
-                    if module.bias is not None:
-                        torch.nn.init.zeros_(module.bias)
+                for module in model.value_head.modules():
+                    if isinstance(module, torch.nn.Linear):
+                        torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                        if module.bias is not None:
+                            torch.nn.init.zeros_(module.bias)
 
         return model
 
@@ -176,11 +173,12 @@ class BaseDeepSpeedClass:
         value_params = []
         nodecay_params = []
         for name, param in policy_model.named_parameters():
+
             if param.requires_grad:
-                if any(nd in name for nd in ['norm', 'tok_embeddings']):
-                    nodecay_params.append(param)
-                elif "value_head" in name:
+                if "value_head" in name:
                     value_params.append(param)
+                elif any(nd in name for nd in ['norm', 'tok_embeddings']):
+                    nodecay_params.append(param)
                 else:
                     policy_params.append(param)
 
@@ -239,6 +237,11 @@ class BaseDeepSpeedClass:
             and 'stage' in ds_config['zero_optimization']
             and ds_config['zero_optimization']['stage'] == 3
         )
+
+    def _prepare_model_inputs(self, input_tokens: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Prepare model inputs and attention mask."""
+        attention_mask = (input_tokens != self.pad_token_id).bool()
+        return input_tokens.to(self.device), attention_mask.to(self.device)
 
     @staticmethod
     def _get_grad_norm(engine: deepspeed.DeepSpeedEngine) -> float:
