@@ -55,6 +55,7 @@ class BaseDeepSpeedClass:
             if 'load_checkpoint' in self.config['model'] and self.config['model']['load_checkpoint']
             else self.model_name
         )
+        self.max_seq_len = self.config['model'].get('max_seq_len', 8192)
         self.seed = self.config['job'].get('seed', 123)
         self.tokenizer: PreTrainedTokenizer = self._init_tokenizer()
         self.pad_token_id = self.tokenizer.pad_token_id
@@ -177,7 +178,7 @@ class BaseDeepSpeedClass:
             if param.requires_grad:
                 if "value_head" in name:
                     value_params.append(param)
-                elif any(nd in name for nd in ['norm', 'tok_embeddings']):
+                elif any(nd in name for nd in ["bias", "layer_norm.weight", "layernorm.weight", "norm.weight"]):
                     nodecay_params.append(param)
                 else:
                     policy_params.append(param)

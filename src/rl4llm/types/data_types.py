@@ -194,15 +194,17 @@ class BaseTrainingConfig(BaseModel):
     num_epochs: int = Field(1, ge=1, le=100, description='Number of epochs to go through the dataset')
     value_loss_coef: float = Field(0.1, ge=0.0, le=1.0, description='Value function loss coefficient')
     gamma: float = Field(1.0, ge=0.0, le=1.0, description='Fallback default discount factor for compute returns')
+    full_pad: Optional[bool] = Field(False, description='Pad sequence to maximum length')
+
     """For compute dynamic discount factor"""
-    min_gamma: float = Field(0.999, ge=0.0, le=1.0, description='Minimum discount factor for compute returns')
-    max_gamma: float = Field(0.9998, ge=0.0, le=1.0, description='Maximum discount factor for compute returns')
-    max_expected_length: int = Field(
-        10000, ge=1000, le=50000, description='Maximum sequence length when compute dynamic discount factor'
-    )
-    nonlinear_scaling_factor: float = Field(
-        1.0, ge=0.1, le=5.0, description='Nonlinear scaling factor for compute dynamic discount factor'
-    )
+    # min_gamma: float = Field(0.999, ge=0.0, le=1.0, description='Minimum discount factor for compute returns')
+    # max_gamma: float = Field(0.9998, ge=0.0, le=1.0, description='Maximum discount factor for compute returns')
+    # max_expected_length: int = Field(
+    #     10000, ge=1000, le=50000, description='Maximum sequence length when compute dynamic discount factor'
+    # )
+    # nonlinear_scaling_factor: float = Field(
+    #     1.0, ge=0.1, le=5.0, description='Nonlinear scaling factor for compute dynamic discount factor'
+    # )
 
 
 class SFTConfig(BaseTrainingConfig):
@@ -221,7 +223,7 @@ class PPOConfig(BaseTrainingConfig):
     normalize_rewards: bool = Field(False, description='Normalized rewards before compute advantages')
     normalize_advantages: bool = Field(True, description='Normalized rewards before compute PPO policy loss')
     kl_coef: float = Field(0.03, ge=0.0, le=1.0, description='Token-level KL divergence coefficient')
-    separate_advantage: Optional[bool] = Field(False, description='Use separate env reward and KL for compute advantages')
+    separate_advantages: Optional[bool] = Field(False, description='Use separate env reward and KL for compute advantages')
 
 
 class SFTSample(BaseModel):

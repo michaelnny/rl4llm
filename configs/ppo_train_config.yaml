@@ -6,15 +6,17 @@ job:
 
 model:
   pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
-  load_checkpoint: "./checkpoints/sft/checkpoint_step_256_epoch_2"
+  load_checkpoint: "./checkpoints/sft/checkpoint_step_200"
   load_in_4bit: false
   activation_checkpoint: true
   initialize_value_weights: false
+  max_seq_len: 4096
 
 training_config:
   rollout_iterations: 10000
   num_epochs: 4
   rollout_episodes: 1024
+  full_pad: false
   # min_gamma: 0.999 # for compute dynamic discount
   # max_gamma: 0.9998 # for compute dynamic discount
   # max_expected_length: 10000
@@ -26,7 +28,7 @@ training_config:
   normalize_advantages: true
   value_loss_coef: 0.3
   kl_coef: 0.01
-  separate_advantage: false
+  separate_advantages: true
   checkpoint_enabled: true
   checkpoint_interval: 200 # every N updates
   checkpoint_keep_n: 5
@@ -57,7 +59,7 @@ environment:
 
 actor:
   decoding:
-    max_new_tokens: 2560
+    max_new_tokens: 2048
     temperature: 0.6
     top_p: 1.0
     # top_k: 500
@@ -68,7 +70,7 @@ evaluator:
   interval: 10 # Perform evaluation every N iterations
   rollout_episodes: 500 # Maximum number of samples to test
   decoding:
-    max_new_tokens: 2560
+    max_new_tokens: 2048
     temperature: 0.0
     top_p: 1.0
     # top_k: 500
@@ -77,13 +79,11 @@ evaluator:
 deepspeed:
   # memory_breakdown: true  # for debugging
   steps_per_print: 10000 # disable default logging
-  train_micro_batch_size_per_gpu: 5
-  train_batch_size: 120
+  train_micro_batch_size_per_gpu: 4
+  train_batch_size: 128
   gradient_clipping: 1.0
   prescale_gradients: false
   wall_clock_breakdown: false
-  fp16:
-    enabled: false
   bf16:
     enabled: true
   optimizer:

@@ -29,12 +29,16 @@ class Actor(BaseDeepSpeedClass):
         logger: Optional[logging.Logger] = None,
     ):
         super().__init__(config, local_rank, dtype, tracker, logger)
-        self.cpu_model: PreTrainedModel = self._load_model()  # Load model on CPU initially
+        self.cpu_model: PreTrainedModel = self._load_inference_model()  # Load model on CPU initially
         self.inference_engine: deepspeed.InferenceEngine = self._create_inference_engine()
 
-    def _load_model(self) -> PreTrainedModel:
+    def _load_inference_model(self) -> PreTrainedModel:
         """Loads the causal LM for actor inference."""
-        return AutoModelForCausalLM.from_pretrained(self.model_name, torch_dtype=self.dtype).to('cpu')
+        self.logger.info(f'Loading model: {self.pretrained_model_name_or_path}')
+        model = AutoModelForCausalLM.from_pretrained(self.pretrained_model_name_or_path, torch_dtype=self.dtype, use_cache=False)
+        for param in model.parameters():
+            param.requires_grad = False
+        return model
 
     def _create_inference_engine(self) -> deepspeed.InferenceEngine:
         """Creates DeepSpeed inference engine and moves model to device."""
@@ -43,12 +47,13 @@ class Actor(BaseDeepSpeedClass):
 
     def sync_model_weights(self, model_state_dict: Dict) -> None:
         """Sync the model weights with the learner model."""
+        self.logger.info('Syncing model weights with learner')
         self.cpu_model.load_state_dict(model_state_dict, strict=False)
         if hasattr(self, 'inference_engine') and self.inference_engine is not None:
             del self.inference_engine
             torch.cuda.empty_cache()
         self.inference_engine = self._create_inference_engine()
-    
+
     def offload_for_training(self) -> None:
         """Offload model to CPU for training."""
         self.cpu_model = self.cpu_model.to('cpu')
@@ -170,7 +175,7 @@ class Actor(BaseDeepSpeedClass):
 
     def _init_stats_tracker(self) -> Dict:
         """Initialize statistics tracking dictionary."""
-        return {'total': 0, 'correct': 0, 'bad': 0, 'duplicate': 0, 'skipped': 0}
+        return {'total': 0, 'correct': 0, 'bad': 0, 'skipped': 0}
 
     def _process_batch_episodes(self, batch_episodes: List[Episode], stats_tracker: Dict, for_evaluator: bool) -> List[Episode]:
         """Process and filter batch episodes."""

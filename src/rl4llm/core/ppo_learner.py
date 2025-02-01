@@ -42,13 +42,15 @@ class PPOLearner(BaseDeepSpeedClass):
         logger: Optional[logging.Logger] = None,
     ):
         super().__init__(config, local_rank, tracker=tracker, logger=logger)
-        self.policy_engine: deepspeed.DeepSpeedEngine = self._init_policy_engine()
-        self.reference_engine: deepspeed.InferenceEngine = self._init_reference_engine()
-        self.sample_processor: EpisodeProcessor = EpisodeProcessor(tokenizer=self.tokenizer)
+
         self.batch_size_per_gpu: int = self.config['deepspeed']['train_micro_batch_size_per_gpu']
         self.batch_size: int = self._calculate_batch_size()
         self.ckpt_dir: str = self.tracker.output_paths['checkpoints'] if self.tracker else "/tmp"
         self.train_cfg: PPOConfig = PPOConfig(**self.config['training_config'])
+        self.policy_engine: deepspeed.DeepSpeedEngine = self._init_policy_engine()
+        self.reference_engine: deepspeed.DeepSpeedEngine = self._init_reference_engine()
+        self.sample_processor: EpisodeProcessor = EpisodeProcessor(tokenizer=self.tokenizer)
+
         self.update_count = 0
         self.iteration_count = 0
         self.episode_count = 0
@@ -95,7 +97,7 @@ class PPOLearner(BaseDeepSpeedClass):
             batch_size=self.batch_size_per_gpu,
             shuffle=True,
             pin_memory=self.device.type == 'cuda',
-            collate_fn=partial(self._train_collate_fn, pad_id=self.pad_token_id, dtype=self.dtype),
+            collate_fn=self._train_collate_fn,
         )
         total_steps = math.ceil(self.train_cfg.num_epochs * len(episodes) / self.batch_size)
         pbar = tqdm(desc='Training steps', unit='batch', total=total_steps)
@@ -163,7 +165,7 @@ class PPOLearner(BaseDeepSpeedClass):
         param_groups = self._get_params_groups(model, self.config['deepspeed']['optimizer'])
         return self._create_deepspeed_training_engine(model, param_groups)
 
-    def _init_reference_engine(self) -> deepspeed.InferenceEngine:
+    def _init_reference_engine(self) -> deepspeed.DeepSpeedEngine:
         """Initializes the DeepSpeed reference inference engine."""
         self.logger.info(f"Initializing reference model from {self.pretrained_model_name_or_path}")
         ref_model = AutoModelForCausalLM.from_pretrained(
@@ -171,7 +173,39 @@ class PPOLearner(BaseDeepSpeedClass):
         )
         for param in ref_model.parameters():
             param.requires_grad = False
-        reference_engine = self._create_deepspeed_inference_engine(ref_model)
+
+        stage = 3 if self._is_zero3_enabled() else 0
+        ref_ds_config = {
+            "steps_per_print": 1000,
+            'train_micro_batch_size_per_gpu': self.batch_size_per_gpu,
+            'train_batch_size': self.batch_size if self.batch_size > 0 else 'auto',
+            "zero_optimization": {
+                "stage": stage,
+                "stage3_param_persistence_threshold": "auto",
+                "offload_param": {
+                    "device": "cpu",
+                    "pin_memory": True,
+                },
+            },
+            "f16": {
+                "enabled": self.dtype == torch.float16,
+            },
+            "bf16": {
+                "enabled": self.dtype == torch.bfloat16,
+            },
+            "prescale_gradients": False,
+            "wall_clock_breakdown": False,
+        }
+
+        reference_engine: deepspeed.DeepSpeedEngine = None
+        reference_engine, *_ = deepspeed.initialize(
+            model=ref_model,
+            model_parameters=None,
+            config=ref_ds_config,
+            args={"local_rank": self.local_rank},
+            dist_init_required=True,
+        )
+
         return reference_engine.to('cpu')  # Default on CPU
 
     def _get_lr_by_group_name(self, name: str) -> float:
@@ -221,12 +255,11 @@ class PPOLearner(BaseDeepSpeedClass):
         old_values *= loss_masks  # Apply loss masks
 
         pi_logprobs = compute_logprobs_from_logits(pred_pi_logits, actions)
-        entropies = compute_entropy_from_logits(pred_pi_logits)  # Compute entropy and logprobs
 
         kl = (pi_logprobs - ref_logprobs) * loss_masks  # Compute KL and KL-based reward score
         kl_score = -config.kl_coef * kl
 
-        if config.separate_advantage:
+        if config.separate_advantages:
             returns, advantages = self._compute_returns_and_gae_advantages(rewards=rewards, values=old_values, masks=loss_masks)
             kl_returns = self._compute_mc_returns(rewards=kl_score, masks=loss_masks)
             kl_advantages = kl_returns
@@ -262,13 +295,11 @@ class PPOLearner(BaseDeepSpeedClass):
         # Apply mask and mean
         pg_losses = masked_mean(pg_losses, loss_masks, dim=1)
         value_losses = masked_mean(value_losses, loss_masks, dim=1)
-        entropies = masked_mean(entropies, loss_masks, dim=1)
         value_error = masked_mean(value_error, loss_masks, dim=1)
         approxkl = masked_mean(approxkl, loss_masks, dim=1)
         pg_clipfrac = masked_mean(pg_clipfrac, loss_masks, dim=1)
         vf_clipfrac = masked_mean(vf_clipfrac, loss_masks, dim=1)
         returns = masked_mean(returns, loss_masks, dim=1)
-        # advantages = masked_mean(advantages, loss_masks, dim=1)
         # Sum rewards, kl, kl_score
         rewards = masked_sum(rewards, loss_masks, dim=1)
         kl = masked_sum(kl, loss_masks, dim=1)
@@ -282,7 +313,6 @@ class PPOLearner(BaseDeepSpeedClass):
             'loss/policy': pg_losses.detach().to(device=self.device, dtype=self.dtype),
             'loss/value': value_losses.detach().to(device=self.device, dtype=self.dtype),
             'loss/total': total_losses.detach().to(device=self.device, dtype=self.dtype),
-            'policy/entropy': entropies.detach().to(device=self.device, dtype=self.dtype),
             'policy/approxkl': approxkl.detach().to(device=self.device, dtype=self.dtype),
             'policy/clipfrac': pg_clipfrac.detach().to(device=self.device, dtype=self.dtype),
             'value/error': value_error.detach().to(device=self.device, dtype=self.dtype),
@@ -291,7 +321,6 @@ class PPOLearner(BaseDeepSpeedClass):
             'objective/kl_score': kl_score.detach().to(device=self.device, dtype=self.dtype),
             'objective/rewards': rewards.detach().to(device=self.device, dtype=self.dtype),
             'objective/returns': returns.detach().to(device=self.device, dtype=self.dtype),
-            # 'objective/advantages': advantages.detach().to(device=self.device, dtype=self.dtype),
         }
         return loss, stats
 
@@ -356,17 +385,17 @@ class PPOLearner(BaseDeepSpeedClass):
 
     def _compute_mc_returns_for_single_episode(self, rewards: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
         """Computes monte carlo returns considering only assistant turns."""
-        returns = torch.zeros_like(rewards, dtype=self.dtype, device=self.device)
 
         gamma = self.train_cfg.gamma
         assistant_rewards = rewards[masks]
-        assistant_returns = torch.zeros_like(rewards, dtype=self.dtype, device=self.device)
+        assistant_returns = torch.zeros_like(assistant_rewards, dtype=self.dtype, device=self.device)
         running_return = 0
         # Reverse compute returns (like standard GAE-lambda but without baseline)
         for t in reversed(range(len(assistant_rewards))):
-            running_return = rewards[t] + gamma * running_return
+            running_return = assistant_rewards[t] + gamma * running_return
             assistant_returns[t] = running_return
 
+        returns = torch.zeros_like(rewards, dtype=self.dtype, device=self.device)
         returns[masks] = assistant_returns
         return returns
 
@@ -408,7 +437,7 @@ class PPOLearner(BaseDeepSpeedClass):
             episodes,
             batch_size=self.batch_size_per_gpu,
             shuffle=False,
-            collate_fn=partial(self._preprocess_collate_fn, pad_id=self.pad_token_id, dtype=self.dtype),
+            collate_fn=self._preprocess_collate_fn,
         )
         all_transitions: List[PPOSample] = []
 
@@ -489,10 +518,11 @@ class PPOLearner(BaseDeepSpeedClass):
         # Add back the original logits where temperature was zero
         return scaled_logits.add_(logits.mul(zero_temp_mask))
 
-    @staticmethod
-    def _preprocess_collate_fn(batch: List[ProcessedEpisode], pad_id: int, dtype: torch.dtype) -> Tuple[PPOSample, List[int]]:
+    def _preprocess_collate_fn(self, batch: List[ProcessedEpisode]) -> Tuple[PPOSample, List[int]]:
         """Collate function for preprocessing episodes."""
         batch_size = len(batch)
+        pad_id = self.pad_token_id
+        dtype = self.dtype
         max_seq_len = max([len(item.token_ids) for item in batch])
 
         token_ids = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)  # Initialize tensors
@@ -527,11 +557,15 @@ class PPOLearner(BaseDeepSpeedClass):
             lengths,
         )
 
-    @staticmethod
-    def _train_collate_fn(batch: List[PPOSample], pad_id: int, dtype: torch.dtype) -> PPOSample:
+    def _train_collate_fn(self, batch: List[PPOSample]) -> PPOSample:
         """Collate function for training PPO samples."""
         batch_size = len(batch)
+
+        pad_id = self.pad_token_id
+        dtype = self.dtype
         max_seq_len = max([len(item.states) for item in batch])
+        if self.train_cfg.full_pad:
+            max_seq_len = max(max_seq_len, self.max_seq_len)
 
         states = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)  # Initialize tensors
         actions = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)

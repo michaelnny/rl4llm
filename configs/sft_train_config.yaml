@@ -19,6 +19,7 @@ training_config:
   gamma: 1.0 # 0.99975 # discount factor
   augment_rate: 0.0
   value_loss_coef: 0.5
+  full_pad: false
   checkpoint_enabled: true
   checkpoint_interval: 100 # every N updates
   checkpoint_keep_n: 5

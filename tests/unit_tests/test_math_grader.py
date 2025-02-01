@@ -68,6 +68,7 @@ def test_boxed_answers(answer, ground_truth, expected_score):
         (r'So, the final answer is \( \boxed{\$400.00} \).', '400', 1.0),
         (r'Therefore, the answer is $a = \boxed{-\frac{1}{4}}$.', '-0.25', 1.0),
         (r'So, the final answer is $\boxed{-1.8}$.', r'-\frac{9}{5}', 1.0),
+        (r'So, the final answer is $\boxed{\frac{2469}{20000}}$.', r'\dfrac{2469}{20,!000}', 1.0),
     ],
 )
 def test_complex_latex_answers(answer, ground_truth, expected_score):

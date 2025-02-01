@@ -1,10 +1,11 @@
+actor:
+  decoding:
+    do_sample: true
+    max_new_tokens: 2048
+    temperature: 0.6
+    top_p: 1.0
 datasets:
-- name: MATH-GPT4
-  path: ./data/sft_stage/math_gpt4_episodes.jsonl.gz
-  reward_scale: 1.0
-- name: MATH-HARD-R1
-  path: ./data/sft_stage/math_hard_2k_r1_episodes.jsonl.gz
-  reward_scale: 1.0
+- math
 deepspeed:
   activation_checkpointing:
     contiguous_memory_optimization: true
@@ -15,8 +16,6 @@ deepspeed:
     synchronize_checkpoint_boundary: false
   bf16:
     enabled: true
-  fp16:
-    enabled: false
   gradient_clipping: 1.0
   optimizer:
     params:
@@ -30,20 +29,20 @@ deepspeed:
   prescale_gradients: false
   scheduler:
     params:
-      total_num_steps: 10000
+      total_num_steps: 50000
       warmup_max_lr:
       - 1.0e-06
       - 1.0e-06
-      - 5.0e-06
+      - 9.0e-06
       warmup_min_lr:
       - 1.0e-07
       - 1.0e-07
-      - 1.0e-07
+      - 5.0e-06
       warmup_num_steps: 50
     type: WarmupDecayLR
   steps_per_print: 10000
-  train_batch_size: 80
-  train_micro_batch_size_per_gpu: 5
+  train_batch_size: 128
+  train_micro_batch_size_per_gpu: 4
   wall_clock_breakdown: false
   zero_optimization:
     allgather_partitions: true
@@ -65,44 +64,70 @@ deepspeed:
     zero_hpz_partition_size: 8
     zero_quantized_gradients: false
     zero_quantized_weights: false
+environment:
+  max_reward: 1.0
+  mid_step_score: 0.5
+  min_reward: 0.0
+  num_envs: 8
+  shuffle: true
+  state_config:
+  - is_start: true
+    should_grade: true
+    state_id: reasoning
+    system_prompt: 'Think first about the reasoning process in your mind and then
+      provides the user
+
+      with the answer. Please put your final answer (e.g. numerical value or expression)
+      within \\boxed{}.
+
+      '
+    transitions:
+    - prob: 1.0
+      state_id: end_terminal
+      terminal: true
+    user_prompt: '{question}
+
+      '
+evaluator:
+  decoding:
+    do_sample: false
+    max_new_tokens: 2048
+    temperature: 0.0
+    top_p: 1.0
+  enabled: true
+  interval: 10
+  rollout_episodes: 500
 job:
   artifacts_path: ./runs
-  name: sft_run_qwen2.5-3b
+  name: ppo_run_qwen2.5-3b
   seed: 117
 logging:
   intervals:
-    learner: 1
+    actor: 10
+    evaluator: 10
+    learner: 5
   level: INFO
 model:
   activation_checkpoint: true
-  initialize_value_weights: true
+  initialize_value_weights: false
+  load_checkpoint: ./checkpoints/sft/checkpoint_step_200
   load_in_4bit: false
   max_seq_len: 4096
   pretrained_model: Qwen/Qwen2.5-3B-Instruct
-prompt_templates:
-- state_id: reasoning
-  system_prompt: 'A conversation between User and Assistant. The user asks a question,
-    and the Assistant solves it.
-
-    The assistant first thinks about the reasoning process in the mind and then provides
-    the user
-
-    with the answer. Please put your final answer (e.g. numerical value or expression)
-    within \\boxed{}.
-
-    '
-  user_prompt: '{question}
-
-    '
-- state_id: final_answer
-  user_prompt: 'Present your final answer.
-
-    '
 training_config:
-  augment_rate: 0.0
   checkpoint_enabled: true
-  checkpoint_interval: 100
-  checkpoint_keep_n: 2
+  checkpoint_interval: 200
+  checkpoint_keep_n: 5
+  full_pad: false
+  gae_lambda: 0.95
   gamma: 1.0
-  num_epochs: 5
-  value_loss_coef: 0.1
+  kl_coef: 0.01
+  normalize_advantages: true
+  normalize_rewards: false
+  num_epochs: 4
+  policy_clip_eps: 0.2
+  rollout_episodes: 1024
+  rollout_iterations: 10000
+  separate_advantages: true
+  value_clip_eps: 0.2
+  value_loss_coef: 0.3

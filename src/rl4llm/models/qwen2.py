@@ -47,7 +47,7 @@ class ValueHead(nn.Module):
 
 
 class CustomQwen2Model(Qwen2ForCausalLM):
-    """Custom decoder only transformer QWen2.5 model with additional value head for RL PPO"""
+    """Custom decoder only transformer QWen2.5 model with additional value head for RL"""
 
     def __init__(self, config, **kwargs):
         super().__init__(config, **kwargs)
@@ -77,3 +77,101 @@ class CustomQwen2Model(Qwen2ForCausalLM):
             attentions=outputs.attentions,
             values=values,
         )
+
+    # def generate(
+    #     self,
+    #     input_ids: Optional[torch.LongTensor] = None,
+    #     generation_config: Optional[GenerationConfig] = None,
+    #     logits_processor: Optional[Any] = None,
+    #     stopping_criteria: Optional[Any] = None,
+    #     prefix_allowed_tokens_fn: Optional[Any] = None,
+    #     synced_gpus: Optional[bool] = None,
+    #     **kwargs,
+    # ) -> Union[GenerateOutput, torch.LongTensor]:
+    #     """
+    #     Enhanced generate method supporting KV cache and sampling, maintaining compatibility
+    #     with the standard generate interface.
+    #     """
+    #     # Prepare generation config
+    #     generation_config = generation_config if generation_config is not None else self.generation_config
+    #     generation_config = copy.deepcopy(generation_config)
+    #     model_kwargs = generation_config.update(**kwargs)
+        
+    #     # Set default values for generation
+    #     if generation_config.max_length is None:
+    #         generation_config.max_length = self.config.max_position_embeddings
+            
+    #     if generation_config.pad_token_id is None:
+    #         generation_config.pad_token_id = self.config.pad_token_id
+            
+    #     if generation_config.eos_token_id is None:
+    #         generation_config.eos_token_id = self.config.eos_token_id
+
+    #     # Prepare model inputs
+    #     input_ids_len = input_ids.shape[-1]
+        
+    #     # Initialize generation variables
+    #     unfinished_sequences = torch.ones(
+    #         input_ids.shape[0], dtype=torch.long, device=input_ids.device
+    #     )
+        
+    #     # Use model's prepare_inputs_for_generation if available
+    #     model_kwargs["use_cache"] = True
+    #     model_kwargs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+        
+    #     # Main generation loop
+    #     while True:
+    #         outputs = self.forward(**model_kwargs)
+    #         next_token_logits = outputs.logits[:, -1, :]
+            
+    #         # Apply temperature if specified
+    #         if generation_config.temperature != 1.0:
+    #             next_token_logits = next_token_logits / generation_config.temperature
+            
+    #         # Apply top-p sampling if specified
+    #         if generation_config.top_p < 1.0:
+    #             sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+    #             cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                
+    #             sorted_indices_to_remove = cumulative_probs > generation_config.top_p
+    #             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+    #             sorted_indices_to_remove[..., 0] = 0
+                
+    #             indices_to_remove = sorted_indices_to_remove.scatter(
+    #                 1, sorted_indices, sorted_indices_to_remove
+    #             )
+    #             next_token_logits = next_token_logits.masked_fill(indices_to_remove, float('-inf'))
+            
+    #         # Sample next token
+    #         probs = torch.softmax(next_token_logits, dim=-1)
+    #         next_tokens = torch.multinomial(probs, num_samples=1)
+            
+    #         # Update sequences
+    #         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
+            
+    #         # Update model kwargs for next step
+    #         model_kwargs = self.prepare_inputs_for_generation(
+    #             input_ids,
+    #             past_key_values=outputs.past_key_values,
+    #             **model_kwargs
+    #         )
+            
+    #         # Update unfinished sequences
+    #         unfinished_sequences = unfinished_sequences.mul(
+    #             (next_tokens != generation_config.eos_token_id).long()
+    #         )
+            
+    #         # Stop if max length reached or all sequences finished
+    #         if (
+    #             unfinished_sequences.max() == 0 or 
+    #             input_ids.shape[-1] - input_ids_len >= generation_config.max_new_tokens
+    #         ):
+    #             break
+                
+    #     # Prepare output in the standard format
+    #     return GenerateOutput(
+    #         sequences=input_ids,
+    #         scores=None,  # Can be added if needed
+    #         attentions=None,  # Can be added if needed
+    #         hidden_states=None,  # Can be added if needed
+    #     )

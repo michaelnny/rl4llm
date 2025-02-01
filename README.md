@@ -4,7 +4,7 @@
 ```bash
 
 # Login to remote server
-ssh -p 37785 root@86.57.175.52 -L 8080:localhost:8080
+ssh -p 37225 root@86.57.175.52 -L 8080:localhost:8080
 
 
 # Install CUDA Toolkit and MPICH for deepspeed
@@ -15,7 +15,7 @@ sudo apt-get -y install cuda-toolkit-12-4 libmpich-dev
 
 
 # On local machine, copy project files to remote server
-rsync -avz -e "ssh -p 37785" --exclude='.*' --exclude='__pycache__/' --exclude='tests' --exclude='runs' ./rl4llm root@86.57.175.52:/project/
+rsync -avz -e "ssh -p 37225" --exclude='.*' --exclude='__pycache__/' --exclude='tests' --exclude='runs' ./rl4llm root@86.57.175.52:/project/
 
 
 # Install packages
@@ -60,7 +60,7 @@ pkill -f "python"
 To monitoring the job, open tensorboard
 ```bash
 
-rsync -avz -e "ssh -p 37785" --exclude='.pt' --exclude='checkpoints' root@86.57.175.52:/project/rl4llm/runs ./rl4llm
+rsync -avz -e "ssh -p 37225" --exclude='.pt' --exclude='checkpoints' root@86.57.175.52:/project/rl4llm/runs ./rl4llm
 
 
 tensorboard --logdir ./rl4llm/runs --samples_per_plugin=text=1000

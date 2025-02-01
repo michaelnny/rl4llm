@@ -349,6 +349,9 @@ def normalize_latex_string(input_string: str) -> str:
     # NOTE: X/Y changed to \frac{X}{Y} in dataset, but in simple cases fix in case the model output is X/Y
     output_string = fix_a_slash_b_notation(output_string)
 
+    # Remove ",!" from numbers, e.g., "1,!000" --> "1000"
+    output_string = re.sub(r'(\d),!(\d)', r'\1\2', output_string)
+
     # Regex pattern to match valid numbers with commas as thousand separators
     pattern = r'^[+-]?(\d{1,3}(,\d{3})*|\d+)(\.\d+)?$'
     if re.fullmatch(pattern, output_string):

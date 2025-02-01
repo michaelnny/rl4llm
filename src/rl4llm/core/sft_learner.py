@@ -45,12 +45,14 @@ class SFTLearner(BaseDeepSpeedClass):
         logger: Optional[logging.Logger] = None,
     ):
         super().__init__(config, local_rank, tracker=tracker, logger=logger)
-        self.policy_engine: deepspeed.DeepSpeedEngine = self._init_policy_engine()
-        self.sample_processor: EpisodeProcessor = EpisodeProcessor(tokenizer=self.tokenizer)
+
         self.batch_size_per_gpu: int = self.config['deepspeed']['train_micro_batch_size_per_gpu']
         self.batch_size: int = self._calculate_batch_size()
         self.ckpt_dir: str = self.tracker.output_paths['checkpoints'] if self.tracker else "/tmp"
         self.train_cfg: SFTConfig = SFTConfig(**self.config['training_config'])
+        self.policy_engine: deepspeed.DeepSpeedEngine = self._init_policy_engine()
+        self.sample_processor: EpisodeProcessor = EpisodeProcessor(tokenizer=self.tokenizer)
+
         self.update_count = 0
         self.iteration_count = 0
         self.episode_count = 0
@@ -212,14 +214,16 @@ class SFTLearner(BaseDeepSpeedClass):
 
         return loss, stats
 
-    @staticmethod
-    def _train_collate_fn(batch: List[SFTSample], pad_id: int) -> SFTSample:
+    def _train_collate_fn(self, batch: List[SFTSample]) -> SFTSample:
         """
         Custom collate function to pad sequences.
         """
 
         batch_size = len(batch)
+        pad_id = self.pad_token_id
         max_seq_len = max([len(item.input_tokens) for item in batch])
+        if self.train_cfg.full_pad:
+            max_seq_len = max(max_seq_len, self.max_seq_len)
 
         batch_input_tokens = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)
         batch_target_tokens = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)
@@ -228,7 +232,7 @@ class SFTLearner(BaseDeepSpeedClass):
         batch_correctness = torch.full((batch_size,), 0, dtype=torch.bool)
 
         for i, item in enumerate(batch):
-            seq_len = len(item.input_tokens)
+            seq_len = min(len(item.input_tokens), max_seq_len)
             batch_input_tokens[i, :seq_len] = item.input_tokens
             batch_target_tokens[i, :seq_len] = item.target_tokens
             batch_mc_returns[i, :seq_len] = item.mc_returns
@@ -384,7 +388,7 @@ class SFTLearner(BaseDeepSpeedClass):
                     correctness=torch.tensor([is_correct]).to(dtype=torch.bool),
                 )
             )
-        
+
         assert len(train_samples) > 0, "No training samples found"
 
         return DataLoader(
@@ -392,7 +396,7 @@ class SFTLearner(BaseDeepSpeedClass):
             batch_size=self.batch_size_per_gpu,
             shuffle=True,
             pin_memory=self.device.type == 'cuda',
-            collate_fn=partial(self._train_collate_fn, pad_id=self.pad_token_id),
+            collate_fn=self._train_collate_fn,
             drop_last=True,
         )
 
