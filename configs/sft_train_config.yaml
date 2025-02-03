@@ -12,13 +12,13 @@ model:
   max_seq_len: 4096
 
 training_config:
-  num_epochs: 2
+  num_epochs: 5
   min_gamma: 0.9975 # for compute dynamic discount
   max_gamma: 0.9995 # for compute dynamic discount
   max_expected_length: 10000
   gamma: 1.0 # fixed discount factor
   dynamic_discount: true
-  augment_rate: 0.5
+  augment_rate: 0.7
   value_loss_coef: 0.1
   policy_loss_coef: 1.0
   checkpoint_enabled: true
@@ -45,7 +45,7 @@ prompt_templates:
 deepspeed:
   # memory_breakdown: true  # for debugging
   steps_per_print: 10000 # disable default logging
-  train_micro_batch_size_per_gpu: 5
+  train_micro_batch_size_per_gpu: 6
   train_batch_size: 120
   gradient_clipping: 1.0
   prescale_gradients: false

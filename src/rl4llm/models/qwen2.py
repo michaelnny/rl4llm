@@ -56,30 +56,32 @@ class AttentionValueHead(nn.Module):
         super().__init__()
 
         assert scaling_factor >= 0.5 and scaling_factor <= 2.0
-        scaled_dim = 256 * (((hidden_dim * scaling_factor) + 255) // 256) if scaling_factor != 1.0 else hidden_dim
+        scaled_dim = int(256 * (((hidden_dim * scaling_factor) + 255) // 256)) if scaling_factor != 1.0 else hidden_dim
 
-        # Self-attention layer
-        self.attention = nn.MultiheadAttention(hidden_dim, num_attention_heads, dropout=dropout_prob, batch_first=True)
-        # Feed-Forward Network after attention
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim, scaled_dim),
-            nn.SiLU(),
-            nn.Linear(scaled_dim, hidden_dim),
+        self.hidden_dim = hidden_dim
+
+        # Self-attention layer with minimal dropout
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_attention_heads,
+            dropout=dropout_prob,  # Keep only this dropout in attention mechanism
+            batch_first=True,
         )
-        self.norm = nn.RMSNorm(hidden_dim)  # Layer normalization
-        self.out = nn.Linear(hidden_dim, 1, bias=False)
+
+        # Feed-Forward Network
+        self.ffn = nn.Sequential(nn.Linear(hidden_dim, scaled_dim), nn.GELU(), nn.Linear(scaled_dim, hidden_dim))
+
+        # Output projection
+        self.out = nn.Linear(hidden_dim, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x is expected to be of shape (batch_size, sequence_length, hidden_dim)
-        residual = x
-        # Self-attention: query, key, value are all x
+        # Attention block with residual
         attn_output, _ = self.attention(x, x, x)
-        x = attn_output + residual  # Residual connection after attention
-        x = self.norm(x)  # Layer normalization
-        residual = x
-        x = self.ffn(x)
-        x = x + residual  # Residual connection after FFN
-        x = self.norm(x)  # Layer normalization
+        x = x + attn_output
+
+        # FFN block with residual
+        x = x + self.ffn(x)
+
         return self.out(x).squeeze(-1)
 
 

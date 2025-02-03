@@ -69,7 +69,6 @@ class SFTLearner(BaseDeepSpeedClass):
         tag: Optional[str] = None,
     ) -> None:
         """Save the policy model to the output directory."""
-
         self._save_hf_model(
             self.policy_engine,
             save_base_dir=self.ckpt_dir,
@@ -77,7 +76,6 @@ class SFTLearner(BaseDeepSpeedClass):
             tag=tag,
             keep_last_n=self.train_cfg.checkpoint_keep_n,
         )
-        dist.barrier()
 
     def on_exit(self):
         """Cleanup on exit."""
@@ -85,7 +83,7 @@ class SFTLearner(BaseDeepSpeedClass):
             self.tracker.flush()
             self.tracker.close()
 
-        if self.train_cfg.checkpoint_enabled and self.update_count > 100:
+        if self.train_cfg.checkpoint_enabled and self.update_count > 50:
             self.save_policy_model(tag="final")
 
     def train(self) -> None:
@@ -127,8 +125,6 @@ class SFTLearner(BaseDeepSpeedClass):
                         self.save_policy_model()
 
             self.iteration_count += 1
-            if self.train_cfg.checkpoint_enabled:
-                self.save_policy_model(tag=f'epoch_{epoch}')
 
         elapsed_time = pbar.format_dict.get('elapsed', 0)
         pbar.close()
@@ -400,7 +396,7 @@ class SFTLearner(BaseDeepSpeedClass):
             copied_ep = deepcopy(episode)
             first_t = copied_ep.transitions[0]
             origin_text = first_t.action.text
-            augmented_text, _ = math_augmenter.augment_text(origin_text, max_replacements=random.randint(5, 10))
+            augmented_text, _ = math_augmenter.augment_text(origin_text, max_replacements=random.randint(5, 20))
             if augmented_text != origin_text:
                 first_t.action.text = augmented_text
                 first_t.reward = 0.0

@@ -316,14 +316,12 @@ class BaseDeepSpeedClass:
     @staticmethod
     def _get_model_state_dict(engine: deepspeed.DeepSpeedEngine) -> Dict[str, torch.Tensor]:
         """Retrieves the model state_dict from the engine."""
-
-        # engine.eval()  # Ensure model is in eval mode when extracting weights
-
         if engine.zero_optimization_partition_weights():  # check for zero3
             full_state_dict = engine._zero3_consolidated_16bit_state_dict()
         else:
             full_state_dict = {k: v.cpu() for k, v in engine.module.state_dict().items()}
 
+        dist.barrier()
         return full_state_dict
 
     # def _create_checkpoint(
@@ -359,34 +357,35 @@ class BaseDeepSpeedClass:
         assert save_base_dir, "Save directory must be specified."
 
         is_zero3 = self._is_zero3_model(engine)
-
-        # Retrieve the model from the DeepSpeed engine
         model: PreTrainedModel = engine.module
 
-        if is_zero3:
-            # Gather all parameters across processes
-            ctx = deepspeed.zero.GatheredParameters(model.parameters())
+        # Prepare the checkpoint directory name
+        if tag:
+            ckpt_dir = os.path.join(save_base_dir, f"checkpoint_step_{step_count}_{tag}")
         else:
-            ctx = nullcontext()
+            ckpt_dir = os.path.join(save_base_dir, f"checkpoint_step_{step_count}")
 
-        with ctx:
-            # Only save on the main process
+        # Create directory on main process only
+        if self.local_rank == 0:
+            os.makedirs(ckpt_dir, exist_ok=True)
+
+        dist.barrier()
+
+        if is_zero3:
+            with deepspeed.zero.GatheredParameters(model.parameters(), modifier_rank=0):
+                if self.local_rank == 0:
+                    model.save_pretrained(ckpt_dir, save_peft_format=False)
+                    self.logger.info(f"Model saved to {ckpt_dir}")
+        else:
             if self.local_rank == 0:
-                if tag:
-                    ckpt_dir = os.path.join(save_base_dir, f"checkpoint_step_{step_count}_{tag}")
-                else:
-                    ckpt_dir = os.path.join(save_base_dir, f"checkpoint_step_{step_count}")
-
-                # Ensure the save directory exists
-                os.makedirs(ckpt_dir, exist_ok=True)
-
-                # Save model in Hugging Face format
                 model.save_pretrained(ckpt_dir, save_peft_format=False)
                 self.logger.info(f"Model saved to {ckpt_dir}")
 
-                # Remove old checkpoints
-                if keep_last_n > 0 and self.local_rank == 0:
-                    cleanup_old_checkpoints(save_base_dir, keep_last_n)
+        dist.barrier()
+
+        # Cleanup old checkpoints only on main process
+        if keep_last_n > 0 and self.local_rank == 0:
+            cleanup_old_checkpoints(save_base_dir, keep_last_n)
 
     def _is_zero3_model(self, engine: deepspeed.DeepSpeedEngine) -> bool:
         """Check if the model is ZeRO-3 partitioned."""

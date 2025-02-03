@@ -31,7 +31,7 @@ deepspeed:
     type: WarmupDecayLR
   steps_per_print: 10000
   train_batch_size: 120
-  train_micro_batch_size_per_gpu: 5
+  train_micro_batch_size_per_gpu: 6
   wall_clock_breakdown: false
   zero_optimization:
     allgather_bucket_size: 500000.0
@@ -71,7 +71,7 @@ prompt_templates:
 
     '
 training_config:
-  augment_rate: 0.5
+  augment_rate: 0.7
   checkpoint_enabled: true
   checkpoint_interval: 100
   checkpoint_keep_n: 5
@@ -80,6 +80,6 @@ training_config:
   max_expected_length: 10000
   max_gamma: 0.9995
   min_gamma: 0.9975
-  num_epochs: 2
+  num_epochs: 5
   policy_loss_coef: 1.0
   value_loss_coef: 0.1

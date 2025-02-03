@@ -116,7 +116,6 @@ def main(config_file=None):
 
             if latest_state_dict is not None:
                 actor.sync_model_weights(latest_state_dict)
-                dist.barrier()
 
             episodes, _ = actor.generate_samples(
                 vector_env=train_env,
@@ -125,9 +124,9 @@ def main(config_file=None):
             )
 
             actor.offload_for_training()
-            dist.barrier()
 
             # step 2: Train on collected episodes
+            dist.barrier()
             learner.train(episodes)
 
             # get latest weights to pass to actor for generation

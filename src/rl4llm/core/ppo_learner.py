@@ -75,7 +75,6 @@ class PPOLearner(BaseDeepSpeedClass):
             tag=tag,
             keep_last_n=self.train_cfg.checkpoint_keep_n,
         )
-        dist.barrier()
 
     def on_exit(self):
         """Cleanup on exit."""
@@ -83,7 +82,7 @@ class PPOLearner(BaseDeepSpeedClass):
             self.tracker.flush()
             self.tracker.close()
 
-        if self.train_cfg.checkpoint_enabled and self.update_count > 100:
+        if self.train_cfg.checkpoint_enabled and self.update_count > 50:
             self.save_policy_model(tag="final")
 
     def train(self, episodes: List[Episode]) -> None:
@@ -93,6 +92,7 @@ class PPOLearner(BaseDeepSpeedClass):
         self.reference_engine = self.reference_engine.to(self.device)
         torch.cuda.empty_cache()
         transitions = self._prepare_ppo_transitions(processed_episodes)
+        dist.barrier()
         self.reference_engine = self.reference_engine.to('cpu')  # Offload ref engine after preparing transitions
         torch.cuda.empty_cache()
         self.policy_engine.train()  # Set policy model to train mode
@@ -101,7 +101,7 @@ class PPOLearner(BaseDeepSpeedClass):
         data_loader = DataLoader(  # Create DataLoader
             transitions,
             batch_size=self.batch_size_per_gpu,
-            sampler=True,
+            sampler=sampler,
             pin_memory=self.device.type == 'cuda',
             collate_fn=self._train_collate_fn,
             drop_last=True,
@@ -109,7 +109,6 @@ class PPOLearner(BaseDeepSpeedClass):
         total_steps = math.ceil(self.train_cfg.num_epochs * len(episodes) / self.batch_size)
         pbar = tqdm(desc='Training steps', unit='batch', total=total_steps, disable=not self._is_rank0())
         accumulated_iter_stats = defaultdict(list)
-        dist.barrier()
 
         # with torch.autograd.set_detect_anomaly(True):
         for epoch in range(self.train_cfg.num_epochs):
@@ -159,6 +158,7 @@ class PPOLearner(BaseDeepSpeedClass):
         self.policy_engine = self.policy_engine.to('cpu')
         self.reference_engine = self.reference_engine.to('cpu')
         torch.cuda.empty_cache()
+        dist.barrier()
 
     def _calculate_batch_size(self) -> int:
         """Calculates the effective batch size."""

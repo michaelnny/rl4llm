@@ -35,7 +35,9 @@ class Actor(BaseDeepSpeedClass):
     def _load_inference_model(self) -> PreTrainedModel:
         """Loads the causal LM for actor inference."""
         self.logger.info(f'Loading model: {self.pretrained_model_name_or_path}')
-        model = AutoModelForCausalLM.from_pretrained(self.pretrained_model_name_or_path, torch_dtype=self.dtype, use_cache=False)
+        model = AutoModelForCausalLM.from_pretrained(
+            self.pretrained_model_name_or_path, torch_dtype=self.dtype, use_cache=False
+        )
         for param in model.parameters():
             param.requires_grad = False
         return model
@@ -53,6 +55,8 @@ class Actor(BaseDeepSpeedClass):
             del self.inference_engine
             torch.cuda.empty_cache()
         self.inference_engine = self._create_inference_engine()
+
+        dist.barrier()
 
     def offload_for_training(self) -> None:
         """Offload model to CPU for training."""
