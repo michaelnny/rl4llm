@@ -1,3 +1,4 @@
+"""For tracking training progress and logging data"""
 import gzip
 import json
 import os
@@ -128,12 +129,12 @@ class ActorTracker:
                 del t['action']['token_logits']
         self.episode_file.log_entry(episode_data)
 
-        if self._step_count % self.episode_log_interval == 0:  # Apply interval check here
+        if self._step_count % self.episode_log_interval == 0:
             # Log episode statistics
             stats = self._collect_episode_stats(data)
-            self.tb_logger.log_dict(stats, self._step_count, self.step_tag)  # Use internal counter
+            self.tb_logger.log_dict(stats, self._step_count, self.step_tag)
             # Log sample text
-            self._log_episode_sample(data, self._step_count)  # Use internal counter
+            self._log_episode_sample(data, self._step_count)
 
     def log_iteration(self, data: Dict[str, Any]):
         self._iter_count += 1
@@ -188,7 +189,7 @@ class LearnerTracker:
         self.role_name = 'learner'.lower()  # Hardcoded role name as it's always learner
         self.step_tag = f"{self.role_name}/step"
         self.iter_tag = f"{self.role_name}/iteration"
-        self.step_log_interval = step_log_interval  # Interval for step logs
+        self.step_log_interval = step_log_interval
         self._step_count = 0
         self._iter_count = 0
 
@@ -198,13 +199,14 @@ class LearnerTracker:
 
     def log_step_stats(self, stats: Dict[str, Any]):
         self._step_count += 1
-        if self._step_count % self.step_log_interval == 0:  # Apply interval check here
-            # Log to tensorboard
-            self.tb_logger.log_dict(stats, self._step_count, self.step_tag)  # Use internal counter
 
-            # Log to file
-            record = {'step': self._step_count, **stats}  # Use internal counter
-            self.step_file.log_entry(record)
+        # always log to file
+        record = {'step': self._step_count, **stats}
+        self.step_file.log_entry(record)
+
+        if self._step_count % self.step_log_interval == 0:
+            # Log to tensorboard
+            self.tb_logger.log_dict(stats, self._step_count, self.step_tag)
 
     def log_iteration(self, stats: Dict[str, Any]):
         self._iter_count += 1

@@ -7,6 +7,7 @@ from traceback import format_exc
 
 import deepspeed
 import torch
+import torch.distributed as dist
 
 from rl4llm.core.sft_learner import SFTLearner
 from rl4llm.utils import load_yaml_config_file, set_seed, setup_tracker_and_logger
@@ -63,7 +64,8 @@ def main(config_file=None):
 
     # Initialize the SFTLearner
     learner = SFTLearner(config=config, local_rank=local_rank, tracker=tracker, logger=logger)
-
+    dist.barrier()
+    
     def handle_exit():
         learner.on_exit()
 

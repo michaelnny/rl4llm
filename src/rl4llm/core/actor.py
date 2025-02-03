@@ -182,11 +182,11 @@ class Actor(BaseDeepSpeedClass):
         current_batch_size = len(batch_episodes)
         stats_tracker['total'] += current_batch_size
 
-        if not for_evaluator:
-            filtered_episodes = [sample for sample in batch_episodes if self._is_valid_sample(sample)]  # Filter bad samples
-            bad_count = current_batch_size - len(filtered_episodes)
-            stats_tracker['skipped'] += bad_count
-            batch_episodes = filtered_episodes
+        # if not for_evaluator:
+        #     filtered_episodes = [sample for sample in batch_episodes if self._is_valid_sample(sample)]  # Filter bad samples
+        #     bad_count = current_batch_size - len(filtered_episodes)
+        #     stats_tracker['skipped'] += bad_count
+        #     batch_episodes = filtered_episodes
 
         processed_episodes = []
         for episode in batch_episodes:

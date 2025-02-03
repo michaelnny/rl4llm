@@ -2,11 +2,11 @@
 
 import logging
 import math
+import multiprocessing as mp
 import os
 import random
-import multiprocessing as mp
-from copy import deepcopy
 from collections import defaultdict
+from copy import deepcopy
 from functools import partial
 from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -18,6 +18,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from rl4llm.core.base_ds_class import BaseDeepSpeedClass
@@ -30,7 +31,7 @@ from rl4llm.core.helper import (
     masked_sum,
 )
 from rl4llm.data import MathAugmenter
-from rl4llm.types import Episode, SFTConfig, SFTSample, ProcessedEpisode
+from rl4llm.types import Episode, ProcessedEpisode, SFTConfig, SFTSample
 from rl4llm.utils import TrainingTracker, assert_file_exist, load_from_jsonl_file
 
 
@@ -57,6 +58,8 @@ class SFTLearner(BaseDeepSpeedClass):
         self.iteration_count = 0
         self.episode_count = 0
 
+        dist.barrier()
+
     def get_policy_grad_norm(self) -> float:
         """Compute the norm of the policy model's gradients."""
         return self._get_grad_norm(self.policy_engine)
@@ -74,6 +77,7 @@ class SFTLearner(BaseDeepSpeedClass):
             tag=tag,
             keep_last_n=self.train_cfg.checkpoint_keep_n,
         )
+        dist.barrier()
 
     def on_exit(self):
         """Cleanup on exit."""
@@ -81,14 +85,14 @@ class SFTLearner(BaseDeepSpeedClass):
             self.tracker.flush()
             self.tracker.close()
 
-        if self.train_cfg.checkpoint_enabled:
+        if self.train_cfg.checkpoint_enabled and self.update_count > 100:
             self.save_policy_model(tag="final")
 
     def train(self) -> None:
         """Run SFT training epochs."""
-        # episodes = self.sample_processor.process_episodes(episodes)
 
         train_loader = self._load_and_prepare_sft_datasets()
+        dist.barrier()
 
         self.policy_engine.train()
         self.policy_engine = self.policy_engine.to(self.device)  # Move engines to device
@@ -97,34 +101,34 @@ class SFTLearner(BaseDeepSpeedClass):
         total_samples = len(train_loader.dataset)
         total_steps = math.ceil(total_samples / self.batch_size) * self.train_cfg.num_epochs
 
-        pbar = tqdm(desc='Training steps', unit='batch', total=total_steps)
+        pbar = tqdm(desc='Training steps', unit='batch', total=total_steps, disable=not self._is_rank0())
 
         # Initialize accumulated batch stats
         accumulated_batch_stats = defaultdict(list)
-        with torch.autograd.set_detect_anomaly(True):
-            for epoch in range(self.train_cfg.num_epochs):
-                for mini_batch in train_loader:
-                    metrics = self._process_minibatch(mini_batch)
-                    del mini_batch
-                    # Accumulate batch stats
-                    for name, values in metrics.items():
-                        accumulated_batch_stats[name].extend(values)
-                    # Logging stats
-                    if self.policy_engine.is_gradient_accumulation_boundary():
-                        self.update_count += 1
-                        pbar.update(1)
-                        # Compute aggregated batch stats
-                        batch_stats = self._aggregate_stats(accumulated_batch_stats)
-                        elapsed_time = pbar.format_dict.get('elapsed', 0)
-                        batch_stats['step_time'] = round(elapsed_time / max(self.update_count, 1), 4)
-                        self._log_batch_stats(batch_stats)
-                        accumulated_batch_stats.clear()
-                        if self.train_cfg.checkpoint_enabled and self.update_count % self.train_cfg.checkpoint_interval == 0:
-                            self.save_policy_model()
+        # with torch.autograd.set_detect_anomaly(True):
+        for epoch in range(self.train_cfg.num_epochs):
+            for mini_batch in train_loader:
+                metrics = self._process_minibatch(mini_batch)
+                del mini_batch
+                # Accumulate batch stats
+                for name, values in metrics.items():
+                    accumulated_batch_stats[name].extend(values)
+                # Logging stats
+                if self.policy_engine.is_gradient_accumulation_boundary():
+                    self.update_count += 1
+                    pbar.update(1)
+                    # Compute aggregated batch stats
+                    batch_stats = self._aggregate_stats(accumulated_batch_stats)
+                    elapsed_time = pbar.format_dict.get('elapsed', 0)
+                    batch_stats['step_time'] = round(elapsed_time / max(self.update_count, 1), 4)
+                    self._log_batch_stats(batch_stats)
+                    accumulated_batch_stats.clear()
+                    if self.train_cfg.checkpoint_enabled and self.update_count % self.train_cfg.checkpoint_interval == 0:
+                        self.save_policy_model()
 
-                self.iteration_count += 1
-                if self.train_cfg.checkpoint_enabled:
-                    self.save_policy_model(tag=f'epoch_{epoch}')
+            self.iteration_count += 1
+            if self.train_cfg.checkpoint_enabled:
+                self.save_policy_model(tag=f'epoch_{epoch}')
 
         elapsed_time = pbar.format_dict.get('elapsed', 0)
         pbar.close()
@@ -136,20 +140,6 @@ class SFTLearner(BaseDeepSpeedClass):
         }
 
         self.logger.info(iter_stats)
-
-    def _get_lr_by_group_name(self, name: str) -> float:
-        """Get learning rate for a parameter group by name."""
-        for group in self.policy_engine.optimizer.param_groups:
-            if group['name'] == name:
-                return group['lr']
-        return self.policy_engine.optimizer.param_groups[0]['lr']
-
-    def _get_common_stats(self) -> Dict:
-        """Get common statistics like learning rates."""
-        return {
-            'policy/learning_rate': self._get_lr_by_group_name('policy'),
-            'value/learning_rate': self._get_lr_by_group_name('value'),
-        }
 
     def _process_minibatch(self, mini_batch: SFTSample) -> Dict[str, np.array]:
         """Process a mini-batch and compute loss and metrics."""
@@ -202,10 +192,12 @@ class SFTLearner(BaseDeepSpeedClass):
         value_losses = F.mse_loss(pred_values.to(self.dtype), mc_returns.to(self.dtype), reduction="none")
 
         # only using correct samples to compute LM loss, and skip the augmented episode
-        lm_losses = masked_mean(lm_losses, loss_masks, dim=1)[correctness_masks]  # [correct_batch_size]
-        value_losses = masked_mean(value_losses, loss_masks, dim=1)  # [batch_size]
+        lm_losses = (
+            self.train_cfg.policy_loss_coef * masked_mean(lm_losses, loss_masks, dim=1)[correctness_masks]
+        )  # [correct_batch_size]
+        value_losses = self.train_cfg.value_loss_coef * masked_mean(value_losses, loss_masks, dim=1)  # [batch_size]
 
-        loss = lm_losses.mean() + self.train_cfg.value_loss_coef * value_losses.mean()
+        loss = lm_losses.mean() + value_losses.mean()
 
         stats = {
             'loss/lm': lm_losses.detach().to(device=self.device, dtype=self.dtype),
@@ -222,8 +214,6 @@ class SFTLearner(BaseDeepSpeedClass):
         batch_size = len(batch)
         pad_id = self.pad_token_id
         max_seq_len = max([len(item.input_tokens) for item in batch])
-        if self.train_cfg.full_pad:
-            max_seq_len = max(max_seq_len, self.max_seq_len)
 
         batch_input_tokens = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)
         batch_target_tokens = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)
@@ -356,6 +346,7 @@ class SFTLearner(BaseDeepSpeedClass):
                         partial(self._augment_single_episode, math_augmenter=math_augmenter),
                         sampled_episodes,
                     )
+                    augmented_episodes = [ep for ep in augmented_episodes if ep is not None]
                     self.logger.info(f"Generated {len(augmented_episodes)} augmented samples")
                     train_episodes.extend(augmented_episodes)
 
@@ -391,10 +382,11 @@ class SFTLearner(BaseDeepSpeedClass):
 
         assert len(train_samples) > 0, "No training samples found"
 
+        sampler = DistributedSampler(train_samples, shuffle=True, seed=self.seed)
         return DataLoader(
             train_samples,
             batch_size=self.batch_size_per_gpu,
-            shuffle=True,
+            sampler=sampler,
             pin_memory=self.device.type == 'cuda',
             collate_fn=self._train_collate_fn,
             drop_last=True,
@@ -446,7 +438,16 @@ class SFTLearner(BaseDeepSpeedClass):
         if seq_len == 0:
             return returns
 
-        gamma = self.train_cfg.gamma
+        gamma = (
+            self._compute_dynamic_discount(
+                seq_len,
+                max_length=self.train_cfg.max_expected_length,
+                min_discount=self.train_cfg.min_gamma,
+                max_disount=self.train_cfg.max_gamma,
+            )
+            if self.train_cfg.dynamic_discount
+            else self.train_cfg.gamma
+        )
 
         # Initialize assistant returns
         assistant_returns = np.zeros_like(assistant_rewards)
@@ -460,16 +461,3 @@ class SFTLearner(BaseDeepSpeedClass):
         returns[masks.astype(bool)] = assistant_returns
 
         return returns
-
-    def _log_batch_stats(self, batch_stats: Dict[str, Any]):
-        """Log batch statistics."""
-        batch_stats.update(self._get_common_stats())
-        if self.tracker:
-            Thread(target=self.tracker.log_learner_step_stats, args=(batch_stats,)).start()
-
-    def _log_iteration_stats(self, iter_stats: Dict[str, Any]):
-        """Log iteration statistics."""
-        iter_stats.update(self._get_common_stats())
-        self.logger.info(f"Learner stats: {iter_stats}")
-        if self.tracker:
-            self.tracker.log_learner_iteration_stats(iter_stats)

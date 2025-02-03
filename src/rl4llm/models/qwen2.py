@@ -12,6 +12,8 @@ import torch
 import torch.nn as nn
 from transformers import Qwen2ForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.generation import GenerationConfig
+from transformers.generation.utils import GenerateOutput
 
 
 @dataclass
@@ -39,10 +41,45 @@ class ValueHead(nn.Module):
         self.out = nn.Linear(hidden_dim, 1, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = x
+        # residual = x
         x = F.silu(self.w1(x)) * self.w3(x)  # SwiGLU
         x = self.w2(x)
-        x = self.dropout(x + residual)
+        # x = self.dropout(x + residual)
+        x = self.dropout(x)
+        return self.out(x).squeeze(-1)
+
+
+class AttentionValueHead(nn.Module):
+    """Value head with a self-attention layer"""
+
+    def __init__(self, hidden_dim: int, num_attention_heads: int = 4, scaling_factor: float = 1.0, dropout_prob: float = 0.1):
+        super().__init__()
+
+        assert scaling_factor >= 0.5 and scaling_factor <= 2.0
+        scaled_dim = 256 * (((hidden_dim * scaling_factor) + 255) // 256) if scaling_factor != 1.0 else hidden_dim
+
+        # Self-attention layer
+        self.attention = nn.MultiheadAttention(hidden_dim, num_attention_heads, dropout=dropout_prob, batch_first=True)
+        # Feed-Forward Network after attention
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, scaled_dim),
+            nn.SiLU(),
+            nn.Linear(scaled_dim, hidden_dim),
+        )
+        self.norm = nn.RMSNorm(hidden_dim)  # Layer normalization
+        self.out = nn.Linear(hidden_dim, 1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x is expected to be of shape (batch_size, sequence_length, hidden_dim)
+        residual = x
+        # Self-attention: query, key, value are all x
+        attn_output, _ = self.attention(x, x, x)
+        x = attn_output + residual  # Residual connection after attention
+        x = self.norm(x)  # Layer normalization
+        residual = x
+        x = self.ffn(x)
+        x = x + residual  # Residual connection after FFN
+        x = self.norm(x)  # Layer normalization
         return self.out(x).squeeze(-1)
 
 
@@ -52,7 +89,7 @@ class CustomQwen2Model(Qwen2ForCausalLM):
     def __init__(self, config, **kwargs):
         super().__init__(config, **kwargs)
 
-        self.value_head = ValueHead(config.hidden_size, dropout_prob=0.0)
+        self.value_head = AttentionValueHead(config.hidden_size, dropout_prob=0.1)
 
     def forward(self, input_ids=None, attention_mask=None, return_values=False, **kwargs) -> ExtendedModelOutput:
         # Call the original model's forward method
@@ -77,101 +114,3 @@ class CustomQwen2Model(Qwen2ForCausalLM):
             attentions=outputs.attentions,
             values=values,
         )
-
-    # def generate(
-    #     self,
-    #     input_ids: Optional[torch.LongTensor] = None,
-    #     generation_config: Optional[GenerationConfig] = None,
-    #     logits_processor: Optional[Any] = None,
-    #     stopping_criteria: Optional[Any] = None,
-    #     prefix_allowed_tokens_fn: Optional[Any] = None,
-    #     synced_gpus: Optional[bool] = None,
-    #     **kwargs,
-    # ) -> Union[GenerateOutput, torch.LongTensor]:
-    #     """
-    #     Enhanced generate method supporting KV cache and sampling, maintaining compatibility
-    #     with the standard generate interface.
-    #     """
-    #     # Prepare generation config
-    #     generation_config = generation_config if generation_config is not None else self.generation_config
-    #     generation_config = copy.deepcopy(generation_config)
-    #     model_kwargs = generation_config.update(**kwargs)
-        
-    #     # Set default values for generation
-    #     if generation_config.max_length is None:
-    #         generation_config.max_length = self.config.max_position_embeddings
-            
-    #     if generation_config.pad_token_id is None:
-    #         generation_config.pad_token_id = self.config.pad_token_id
-            
-    #     if generation_config.eos_token_id is None:
-    #         generation_config.eos_token_id = self.config.eos_token_id
-
-    #     # Prepare model inputs
-    #     input_ids_len = input_ids.shape[-1]
-        
-    #     # Initialize generation variables
-    #     unfinished_sequences = torch.ones(
-    #         input_ids.shape[0], dtype=torch.long, device=input_ids.device
-    #     )
-        
-    #     # Use model's prepare_inputs_for_generation if available
-    #     model_kwargs["use_cache"] = True
-    #     model_kwargs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-        
-    #     # Main generation loop
-    #     while True:
-    #         outputs = self.forward(**model_kwargs)
-    #         next_token_logits = outputs.logits[:, -1, :]
-            
-    #         # Apply temperature if specified
-    #         if generation_config.temperature != 1.0:
-    #             next_token_logits = next_token_logits / generation_config.temperature
-            
-    #         # Apply top-p sampling if specified
-    #         if generation_config.top_p < 1.0:
-    #             sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-    #             cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-                
-    #             sorted_indices_to_remove = cumulative_probs > generation_config.top_p
-    #             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-    #             sorted_indices_to_remove[..., 0] = 0
-                
-    #             indices_to_remove = sorted_indices_to_remove.scatter(
-    #                 1, sorted_indices, sorted_indices_to_remove
-    #             )
-    #             next_token_logits = next_token_logits.masked_fill(indices_to_remove, float('-inf'))
-            
-    #         # Sample next token
-    #         probs = torch.softmax(next_token_logits, dim=-1)
-    #         next_tokens = torch.multinomial(probs, num_samples=1)
-            
-    #         # Update sequences
-    #         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
-            
-    #         # Update model kwargs for next step
-    #         model_kwargs = self.prepare_inputs_for_generation(
-    #             input_ids,
-    #             past_key_values=outputs.past_key_values,
-    #             **model_kwargs
-    #         )
-            
-    #         # Update unfinished sequences
-    #         unfinished_sequences = unfinished_sequences.mul(
-    #             (next_tokens != generation_config.eos_token_id).long()
-    #         )
-            
-    #         # Stop if max length reached or all sequences finished
-    #         if (
-    #             unfinished_sequences.max() == 0 or 
-    #             input_ids.shape[-1] - input_ids_len >= generation_config.max_new_tokens
-    #         ):
-    #             break
-                
-    #     # Prepare output in the standard format
-    #     return GenerateOutput(
-    #         sequences=input_ids,
-    #         scores=None,  # Can be added if needed
-    #         attentions=None,  # Can be added if needed
-    #         hidden_states=None,  # Can be added if needed
-    #     )

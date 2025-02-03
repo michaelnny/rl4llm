@@ -56,14 +56,20 @@ class BaseDeepSpeedClass:
             else self.model_name
         )
         self.max_seq_len = self.config['model'].get('max_seq_len', 8192)
-        self.seed = self.config['job'].get('seed', 123)
+        self.seed = self.config['job'].get('seed', 123) + self.local_rank
         self.tokenizer: PreTrainedTokenizer = self._init_tokenizer()
         self.pad_token_id = self.tokenizer.pad_token_id
         self.bos_token_id = self.tokenizer.bos_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
         self.stop_tokens = [self.tokenizer.eos_token, self.tokenizer.pad_token]
 
+        self.policy_engine: deepspeed.DeepSpeedEngine = None
+
         set_seed(self.seed)
+
+    def _is_rank0(self) -> bool:
+        """Check if the current process is rank 0."""
+        return self.local_rank == 0
 
     def _init_tokenizer(self) -> PreTrainedTokenizer:
         """Initialize tokenizer."""
@@ -84,7 +90,7 @@ class BaseDeepSpeedClass:
             "pretrained_model_name_or_path": self.pretrained_model_name_or_path,
             "torch_dtype": self.dtype,
             "use_cache": False,
-            "attn_implementation": model_config.get('attn_implementation', 'flash_attention_2'),
+            # "attn_implementation": model_config.get('attn_implementation', 'flash_attention_2'),
         }
         if model_config['load_in_4bit']:
             nf4_config = BitsAndBytesConfig(
@@ -121,11 +127,13 @@ class BaseDeepSpeedClass:
         """Creates DeepSpeed inference engine."""
         if self.logger:
             self.logger.info("Creating inference engine...")
-        tp_size = dist.get_world_size()
+        tp_size = dist.get_world_size() if self._is_zero3_enabled() else 1
         ds_infer_config = {
             "tensor_parallel": {"tp_size": tp_size},
             "dtype": self.dtype,
             "replace_with_kernel_inject": True,
+            "use_triton": True,
+            "max_out_tokens": self.max_seq_len,
         }
 
         inference_engine: deepspeed.InferenceEngine = None
@@ -195,7 +203,7 @@ class BaseDeepSpeedClass:
         agg_stats = {}
 
         for key, values in accumulated_stats.items():
-            if not values:  # Handle cases where no values were collected
+            if not values:
                 continue
 
             # Convert list of tensors to a single tensor
@@ -204,15 +212,24 @@ class BaseDeepSpeedClass:
             else:
                 values_tensor = values
 
-            # Gather tensors from all ranks
-            all_values = self._gather_tensor(values_tensor)
+            # Compute sum and count locally
+            local_sum = torch.sum(values_tensor)
+            local_count = torch.tensor(len(values_tensor), device=self.device, dtype=torch.float)
 
-            # Compute mean across all ranks
-            agg_stats[key] = torch.mean(all_values).item()
+            # Gather sums and counts across all ranks
+            global_sums = self._gather_scalar_tensor(local_sum)
+            global_counts = self._gather_scalar_tensor(local_count)
 
-            # Compute variance if needed
-            # var_keys = ['objective/kl_score', 'objective/returns'] if for_ppo else []
+            # Calculate global mean
+            total_sum = torch.sum(global_sums)
+            total_count = torch.sum(global_counts)
+            agg_stats[key] = (total_sum / total_count).item()
+
+            # Optional: Compute variance if needed (requires full data)
             if var_keys and key in var_keys:
+                # Note: Variance calculation requires gathering all data
+                # Only include this if absolutely necessary
+                all_values = self._safe_gather_tensor(values_tensor)  # Use safe gather
                 agg_stats[f"{key}_var"] = torch.var(all_values).item()
 
         if 'value/error' in agg_stats and 'objective/returns_var' in agg_stats:
@@ -220,6 +237,46 @@ class BaseDeepSpeedClass:
         if 'objective/kl_score' in agg_stats and 'objective/rewards' in agg_stats:
             agg_stats['objective/total_reward'] = agg_stats['objective/kl_score'] + agg_stats['objective/rewards']
         return agg_stats
+
+    def _gather_scalar_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Gather scalar tensors (sum/count) across all ranks."""
+        if not dist.is_initialized():
+            return tensor.unsqueeze(0)  # Return as 1-element tensor
+
+        tensor = tensor.contiguous().to(self.device)
+        gathered = [torch.empty_like(tensor) for _ in range(self.world_size)]
+        dist.all_gather(gathered, tensor)
+        return torch.stack(gathered)
+
+    def _safe_gather_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Safely gather tensors of variable lengths using padding."""
+        if not dist.is_initialized():
+            return tensor
+
+        tensor = tensor.contiguous().to(self.device)
+
+        # Get sizes from all ranks
+        local_size = torch.tensor(tensor.numel(), device=self.device, dtype=torch.long)
+        sizes = [torch.empty_like(local_size) for _ in range(self.world_size)]
+        dist.all_gather(sizes, local_size)
+        max_size = max(s.item() for s in sizes)
+
+        # Pad tensor to max size
+        if tensor.numel() < max_size:
+            pad_size = max_size - tensor.numel()
+            padded_tensor = torch.cat([tensor, torch.full((pad_size,), float('nan'), device=tensor.device)])
+        else:
+            padded_tensor = tensor
+
+        # Gather padded tensors
+        padded_tensors = [torch.empty_like(padded_tensor) for _ in range(self.world_size)]
+        dist.all_gather(padded_tensors, padded_tensor)
+
+        # Remove padding and combine
+        gathered = []
+        for t, s in zip(padded_tensors, sizes):
+            gathered.append(t[: s.item()])
+        return torch.cat(gathered)
 
     def _gather_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         """Gathers a tensor from all ranks."""
@@ -334,3 +391,49 @@ class BaseDeepSpeedClass:
     def _is_zero3_model(self, engine: deepspeed.DeepSpeedEngine) -> bool:
         """Check if the model is ZeRO-3 partitioned."""
         return engine.zero_optimization_partition_weights()
+
+    def _compute_dynamic_discount(
+        self, episode_length: int, max_length: int = 10000, min_discount: float = 0.999, max_disount: float = 0.9999
+    ) -> float:
+        """Compute dynamic discount factor."""
+        assert episode_length > 0, "Episode length must be greater than 0."
+        assert max_length > 1000, "Max length must be greater than 1000."
+        assert 0.0 < min_discount < 1.0, "Min discount must be in the range (0, 1)."
+        assert 0.0 < max_disount < 1.0, "Max discount must be in the range (0, 1)."
+        assert min_discount < max_disount, "Min discount must be less than max discount."
+        scaled_length = min(episode_length / max_length, 1.0)
+        gamma = min_discount + (max_disount - min_discount) * scaled_length
+        return gamma
+
+    def _get_lr_by_group_name(self, name: str) -> float:
+        """Get learning rate for a parameter group by name."""
+        if self._is_rank0():
+            for group in self.policy_engine.optimizer.param_groups:
+                if group['name'] == name:
+                    return group['lr']
+            return self.policy_engine.optimizer.param_groups[0]['lr']
+        return 0.0
+
+    def _get_common_stats(self) -> Dict:
+        """Get common statistics like learning rates."""
+        if self._is_rank0():
+            return {
+                'policy/learning_rate': self._get_lr_by_group_name('policy'),
+                'value/learning_rate': self._get_lr_by_group_name('value'),
+            }
+        return {}
+
+    def _log_batch_stats(self, batch_stats: Dict[str, Any]):
+        """Log batch statistics."""
+        if self._is_rank0() and self.tracker:
+            batch_stats.update(self._get_common_stats())
+            self.tracker.log_learner_step_stats(batch_stats)
+        dist.barrier()
+
+    def _log_iteration_stats(self, iter_stats: Dict[str, Any]):
+        """Log iteration statistics."""
+        if self._is_rank0() and self.tracker:
+            iter_stats.update(self._get_common_stats())
+            self.logger.info(f"Learner stats: {iter_stats}")
+            self.tracker.log_learner_iteration_stats(iter_stats)
+        dist.barrier()

@@ -52,7 +52,6 @@ class WorkerProcessor:
         # Tokenize each turn, but we need the loss mask for each turn, where 0s for user's turn, and 1s for assistant's turn
         all_token_ids = []
         all_rewards = []
-        all_temperatures = []
         all_masks = []
 
         for i, t in enumerate(episode.transitions):
@@ -79,7 +78,6 @@ class WorkerProcessor:
             )
             all_token_ids.append(user_token_ids)
             all_rewards.append(np.zeros_like(user_token_ids, dtype=float))
-            all_temperatures.append(np.zeros_like(user_token_ids, dtype=float))
             all_masks.append(np.zeros_like(user_token_ids))
 
             # Add assistant's turn
@@ -88,25 +86,21 @@ class WorkerProcessor:
             assistant_rewards = np.zeros_like(assistant_token_ids, dtype=float)
             assistant_rewards[-1] = t.reward
             assistant_masks = np.ones_like(assistant_token_ids)
-            assistant_temperatures = np.ones_like(assistant_token_ids, dtype=float) * t.action.temperature
 
             if t.action.exploring_steps is not None and t.action.exploring_steps > 0:
                 assistant_masks[: t.action.exploring_steps] = 0
 
             all_token_ids.append(assistant_token_ids)
             all_rewards.append(assistant_rewards)
-            all_temperatures.append(assistant_temperatures)
             all_masks.append(assistant_masks)
 
         # Build final sequences
         token_ids = np.concatenate(all_token_ids, axis=0)
         rewards = np.concatenate(all_rewards, axis=0)
-        temperatures = np.concatenate(all_temperatures, axis=0)
         loss_masks = np.concatenate(all_masks, axis=0)
 
         # Validate shapes
         shapes = {
-            'temperatures': temperatures.shape,
             'rewards': rewards.shape,
             'loss_masks': loss_masks.shape,
         }
@@ -120,7 +114,6 @@ class WorkerProcessor:
             token_ids=token_ids,
             rewards=rewards,
             loss_masks=loss_masks,
-            temperatures=temperatures,
         )
 
     def _text_to_token_ids(self, text: str) -> np.ndarray:

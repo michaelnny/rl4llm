@@ -175,10 +175,6 @@ class ProcessedEpisode(BaseModel):
     loss_masks: Optional[np.ndarray] = Field(
         None, description='Same size as token ids, user turns are 0s, assistant turns are 1s'
     )
-    temperatures: Optional[np.ndarray] = Field(
-        None,
-        description='Same size as token ids, user turns are 0s, assistant turns are the actual temperature used during generation',
-    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -187,30 +183,26 @@ class ProcessedEpisode(BaseModel):
 class BaseTrainingConfig(BaseModel):
     """Common training configuration"""
 
-    # pad_id: int = Field(..., ge=0, description='Padding token id for token sequences')
     checkpoint_enabled: Optional[bool] = Field(False, description='Enable to save model checkpoint')
     checkpoint_interval: Optional[int] = Field(0, ge=0, description='Frequency to save model checkpoint')
     checkpoint_keep_n: Optional[int] = Field(3, ge=1, description='Keep most recent N model checkpoints')
     num_epochs: int = Field(1, ge=1, le=100, description='Number of epochs to go through the dataset')
     value_loss_coef: float = Field(0.1, ge=0.0, le=1.0, description='Value function loss coefficient')
     gamma: float = Field(1.0, ge=0.0, le=1.0, description='Fallback default discount factor for compute returns')
-    full_pad: Optional[bool] = Field(False, description='Pad sequence to maximum length')
+    dynamic_discount: Optional[bool] = Field(False, description='Use dynamic discount')
 
     """For compute dynamic discount factor"""
-    # min_gamma: float = Field(0.999, ge=0.0, le=1.0, description='Minimum discount factor for compute returns')
-    # max_gamma: float = Field(0.9998, ge=0.0, le=1.0, description='Maximum discount factor for compute returns')
-    # max_expected_length: int = Field(
-    #     10000, ge=1000, le=50000, description='Maximum sequence length when compute dynamic discount factor'
-    # )
-    # nonlinear_scaling_factor: float = Field(
-    #     1.0, ge=0.1, le=5.0, description='Nonlinear scaling factor for compute dynamic discount factor'
-    # )
+    min_gamma: float = Field(0.999, ge=0.0, le=1.0, description='Minimum discount factor for compute returns')
+    max_gamma: float = Field(0.9999, ge=0.0, le=1.0, description='Maximum discount factor for compute returns')
+    max_expected_length: int = Field(
+        10000, ge=1000, le=50000, description='Maximum sequence length when compute dynamic discount factor'
+    )
 
 
 class SFTConfig(BaseTrainingConfig):
     """For supervised fine-tuning training configuration"""
 
-    # num_epochs: int = Field(1, ge=1, le=100, description='Number of epochs to go through the dataset')
+    policy_loss_coef: float = Field(1.0, ge=0.0, le=1.0, description='Policy loss coefficient')
     augment_rate: float = Field(0.5, ge=0.0, le=1.0, description='Rate to generate augmented samples')
 
 
@@ -222,8 +214,7 @@ class PPOConfig(BaseTrainingConfig):
     value_clip_eps: float = Field(0.2, ge=0.0, le=1.0, description='PPO value loss clip epsilon')
     normalize_rewards: bool = Field(False, description='Normalized rewards before compute advantages')
     normalize_advantages: bool = Field(True, description='Normalized rewards before compute PPO policy loss')
-    kl_coef: float = Field(0.03, ge=0.0, le=1.0, description='Token-level KL divergence coefficient')
-    separate_advantages: Optional[bool] = Field(False, description='Use separate env reward and KL for compute advantages')
+    kl_loss_coef: float = Field(0.01, ge=0.0, le=1.0, description='Token-level KL divergence coefficient')
 
 
 class SFTSample(BaseModel):
@@ -274,10 +265,6 @@ class PPOSample(BaseModel):
     )
     advantages: Optional[torch.Tensor] = Field(
         None, description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T'
-    )
-    temperatures: Optional[torch.Tensor] = Field(
-        None,
-        description='A float tensor for sampling temperatures (0s user tokens) corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
 
     class Config:

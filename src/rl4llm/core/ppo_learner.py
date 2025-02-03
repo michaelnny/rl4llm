@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, BitsAndBytesConfig
 
@@ -55,6 +56,8 @@ class PPOLearner(BaseDeepSpeedClass):
         self.iteration_count = 0
         self.episode_count = 0
 
+        dist.barrier()  # Ensure all processes are synchronized
+
     def get_policy_grad_norm(self) -> float:
         """Compute the norm of the policy model's gradients."""
         return self._get_grad_norm(self.policy_engine)
@@ -72,6 +75,7 @@ class PPOLearner(BaseDeepSpeedClass):
             tag=tag,
             keep_last_n=self.train_cfg.checkpoint_keep_n,
         )
+        dist.barrier()
 
     def on_exit(self):
         """Cleanup on exit."""
@@ -79,56 +83,61 @@ class PPOLearner(BaseDeepSpeedClass):
             self.tracker.flush()
             self.tracker.close()
 
-        if self.train_cfg.checkpoint_enabled:
+        if self.train_cfg.checkpoint_enabled and self.update_count > 100:
             self.save_policy_model(tag="final")
 
     def train(self, episodes: List[Episode]) -> None:
         """Run PPO training epochs."""
-        episodes = self.sample_processor.process_episodes(episodes)
+        processed_episodes = self.sample_processor.process_episodes(episodes)
         self.policy_engine = self.policy_engine.to(self.device)  # Move engines to device
         self.reference_engine = self.reference_engine.to(self.device)
         torch.cuda.empty_cache()
-        transitions = self._prepare_ppo_transitions(episodes)
+        transitions = self._prepare_ppo_transitions(processed_episodes)
         self.reference_engine = self.reference_engine.to('cpu')  # Offload ref engine after preparing transitions
         torch.cuda.empty_cache()
         self.policy_engine.train()  # Set policy model to train mode
+
+        sampler = DistributedSampler(transitions, shuffle=True, seed=self.seed)
         data_loader = DataLoader(  # Create DataLoader
             transitions,
             batch_size=self.batch_size_per_gpu,
-            shuffle=True,
+            sampler=True,
             pin_memory=self.device.type == 'cuda',
             collate_fn=self._train_collate_fn,
+            drop_last=True,
         )
         total_steps = math.ceil(self.train_cfg.num_epochs * len(episodes) / self.batch_size)
-        pbar = tqdm(desc='Training steps', unit='batch', total=total_steps)
+        pbar = tqdm(desc='Training steps', unit='batch', total=total_steps, disable=not self._is_rank0())
         accumulated_iter_stats = defaultdict(list)
+        dist.barrier()
 
-        with torch.autograd.set_detect_anomaly(True):
-            for epoch in range(self.train_cfg.num_epochs):
-                accumulated_batch_stats = defaultdict(list)
-                for mini_batch in data_loader:
-                    metrics = self._process_minibatch(mini_batch)  # Process mini-batch
-                    for name, values in metrics.items():  # Accumulate stats
-                        accumulated_batch_stats[name].extend(values)
-                        accumulated_iter_stats[name].extend(values)
+        # with torch.autograd.set_detect_anomaly(True):
+        for epoch in range(self.train_cfg.num_epochs):
+            accumulated_batch_stats = defaultdict(list)
+            for mini_batch in data_loader:
+                metrics = self._process_minibatch(mini_batch)  # Process mini-batch
+                for name, values in metrics.items():
+                    accumulated_batch_stats[name].extend(values)
+                    accumulated_iter_stats[name].extend(values)
 
-                    if self.policy_engine.is_gradient_accumulation_boundary():  # Gradient accumulation boundary
-                        self.update_count += 1
-                        pbar.update(1)
-                        batch_stats = self._aggregate_stats(accumulated_batch_stats)  # Aggregate batch stats
-                        elapsed_time = pbar.format_dict.get('elapsed', 0)
-                        batch_stats['step_time'] = round(elapsed_time / max(pbar.n, 1), 4)
-                        self._log_batch_stats(batch_stats)  # Log batch stats
-                        accumulated_batch_stats.clear()
+                if self.policy_engine.is_gradient_accumulation_boundary():
+                    self.update_count += 1
+                    pbar.update(1)
+                    batch_stats = self._aggregate_stats(accumulated_batch_stats)
+                    elapsed_time = pbar.format_dict.get('elapsed', 0)
+                    batch_stats['step_time'] = round(elapsed_time / max(pbar.n, 1), 4)
+                    self._log_batch_stats(batch_stats)
+                    accumulated_batch_stats.clear()
 
-                        if self.train_cfg.checkpoint_enabled and self.update_count % self.train_cfg.checkpoint_interval == 0:
-                            self.save_policy_model()
+                    if self.train_cfg.checkpoint_enabled and self.update_count % self.train_cfg.checkpoint_interval == 0:
+                        self.save_policy_model()
 
-        elapsed_time = pbar.format_dict.get('elapsed', 0)  # Finalize iteration
+        elapsed_time = pbar.format_dict.get('elapsed', 0)
         pbar.close()
         self.iteration_count += 1
-        self.episode_count += len(accumulated_iter_stats.get('loss/policy', []))
-        iter_stats = self._aggregate_stats(accumulated_iter_stats)  # Aggregate iter stats
+        self.episode_count += len(episodes)
+        self.logger.info('Aggregating iteration stats...')
+        iter_stats = self._aggregate_stats(accumulated_iter_stats)
         iter_stats.update(
             {
                 'elapsed/time': round(elapsed_time, 4),
@@ -137,7 +146,9 @@ class PPOLearner(BaseDeepSpeedClass):
                 'elapsed/episodes': self.episode_count,
             }
         )
+        self.logger.info('Logging iteration stats...')
         self._log_iteration_stats(iter_stats)  # Log iter stats
+        dist.barrier()
 
     def get_lasted_policy_weights(self) -> Dict[str, torch.Tensor]:
         """Retrieves consolidated 16-bit model state dict."""
@@ -208,20 +219,6 @@ class PPOLearner(BaseDeepSpeedClass):
 
         return reference_engine.to('cpu')  # Default on CPU
 
-    def _get_lr_by_group_name(self, name: str) -> float:
-        """Get learning rate for a parameter group by name."""
-        for group in self.policy_engine.optimizer.param_groups:
-            if group['name'] == name:
-                return group['lr']
-        return self.policy_engine.optimizer.param_groups[0]['lr']
-
-    def _get_common_stats(self) -> Dict:
-        """Get common statistics like learning rates."""
-        return {
-            'policy/learning_rate': self._get_lr_by_group_name('policy'),
-            'value/learning_rate': self._get_lr_by_group_name('value'),
-        }
-
     def _process_minibatch(self, mini_batch: PPOSample) -> Dict[str, np.array]:
         """Process a mini-batch and compute loss and metrics."""
         states, attn_mask = self._prepare_model_inputs(mini_batch.states)
@@ -256,30 +253,30 @@ class PPOLearner(BaseDeepSpeedClass):
 
         pi_logprobs = compute_logprobs_from_logits(pred_pi_logits, actions)
 
-        kl = (pi_logprobs - ref_logprobs) * loss_masks  # Compute KL and KL-based reward score
-        kl_score = -config.kl_coef * kl
+        # Compute KL using new method mentioned in GRPO paper
+        # http://joschu.net/blog/kl-approx.html
+        kl = (torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1) * loss_masks
 
-        if config.separate_advantages:
-            returns, advantages = self._compute_returns_and_gae_advantages(rewards=rewards, values=old_values, masks=loss_masks)
-            kl_returns = self._compute_mc_returns(rewards=kl_score, masks=loss_masks)
-            kl_advantages = kl_returns
-            advantages = advantages + kl_advantages
-        else:
-            mixed_rewards = (rewards + kl_score) * loss_masks
-            if self.train_cfg.normalize_rewards:  # Normalize rewards if configured
-                mixed_rewards = masked_normalize(mixed_rewards, loss_masks)
+        returns, advantages = self._compute_masked_returns_and_gae_advantages(
+            rewards=rewards, values=old_values, masks=loss_masks
+        )
 
-            returns, advantages = self._compute_returns_and_gae_advantages(
-                rewards=mixed_rewards, values=old_values, masks=loss_masks
-            )
+        # # Compute KL and KL-based reward score
+        # mixed_rewards = (rewards - config.kl_coef * kl) * loss_masks
+        # if self.train_cfg.normalize_rewards:
+        #     mixed_rewards = masked_normalize(mixed_rewards, loss_masks)
 
-        if self.train_cfg.normalize_advantages:  # Normalize advantages if configured
+        # returns, advantages = self._compute_masked_returns_and_gae_advantages(
+        #     rewards=mixed_rewards, values=old_values, masks=loss_masks
+        # )
+
+        if self.train_cfg.normalize_advantages:
             advantages = masked_normalize(advantages, loss_masks)
 
-        # PPO policy loss
+        # PPO clipped surrogate PG loss
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
         clipped_ratio = ratio.clamp(1 - config.policy_clip_eps, 1 + config.policy_clip_eps)
-        pg_losses = -torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
+        pg_losses = torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
         clipped = ratio.gt(1 + config.policy_clip_eps) | ratio.lt(1 - config.policy_clip_eps)
         pg_clipfrac = torch.as_tensor(clipped, dtype=ratio.dtype)
         approxkl = (pi_logprobs - behavior_logprobs).detach()
@@ -292,50 +289,40 @@ class PPOLearner(BaseDeepSpeedClass):
         vf_clipfrac = torch.gt(vf_losses2, vf_losses1)
         value_error = (pred_values - returns).pow(2).detach()
 
-        # Apply mask and mean
+        # Apply mask to get all data with shape: [batch_size]
         pg_losses = masked_mean(pg_losses, loss_masks, dim=1)
         value_losses = masked_mean(value_losses, loss_masks, dim=1)
-        value_error = masked_mean(value_error, loss_masks, dim=1)
         approxkl = masked_mean(approxkl, loss_masks, dim=1)
+        value_error = masked_mean(value_error, loss_masks, dim=1)
         pg_clipfrac = masked_mean(pg_clipfrac, loss_masks, dim=1)
         vf_clipfrac = masked_mean(vf_clipfrac, loss_masks, dim=1)
         returns = masked_mean(returns, loss_masks, dim=1)
-        # Sum rewards, kl, kl_score
+        summed_kl = masked_sum(kl, loss_masks, dim=1)
         rewards = masked_sum(rewards, loss_masks, dim=1)
-        kl = masked_sum(kl, loss_masks, dim=1)
-        kl_score = masked_sum(kl_score, loss_masks, dim=1)
+
         # Combined loss
-        total_losses = pg_losses + config.value_loss_coef * value_losses
+        kl_penalties = config.kl_loss_coef * masked_mean(kl, loss_masks, dim=1)
+        value_losses = config.value_loss_coef * value_losses
+        total_losses = -pg_losses + value_losses + kl_penalties
         loss = total_losses.mean()
 
         # Stats dictionary
         stats = {
             'loss/policy': pg_losses.detach().to(device=self.device, dtype=self.dtype),
             'loss/value': value_losses.detach().to(device=self.device, dtype=self.dtype),
+            'loss/kl_penalty': kl_penalties.detach().to(device=self.device, dtype=self.dtype),
             'loss/total': total_losses.detach().to(device=self.device, dtype=self.dtype),
             'policy/approxkl': approxkl.detach().to(device=self.device, dtype=self.dtype),
             'policy/clipfrac': pg_clipfrac.detach().to(device=self.device, dtype=self.dtype),
             'value/error': value_error.detach().to(device=self.device, dtype=self.dtype),
             'value/clipfrac': vf_clipfrac.detach().to(device=self.device, dtype=self.dtype),
-            'objective/kl': kl.detach().to(device=self.device, dtype=self.dtype),
-            'objective/kl_score': kl_score.detach().to(device=self.device, dtype=self.dtype),
+            'objective/kl': summed_kl.detach().to(device=self.device, dtype=self.dtype),
             'objective/rewards': rewards.detach().to(device=self.device, dtype=self.dtype),
             'objective/returns': returns.detach().to(device=self.device, dtype=self.dtype),
         }
         return loss, stats
 
-    def _compute_mc_returns(self, rewards: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
-        """Computes monte carlo returns."""
-        batch_size, max_seq_len = rewards.shape
-        device = rewards.device
-        returns = torch.zeros_like(rewards, device=device)
-
-        for i in range(batch_size):
-            assistant_returns = self._compute_mc_returns_for_single_episode(rewards=rewards[i], masks=masks[i])
-            returns[i] = assistant_returns
-        return returns
-
-    def _compute_returns_and_gae_advantages(
+    def _compute_masked_returns_and_gae_advantages(
         self, rewards: torch.Tensor, values: torch.Tensor, masks: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Computes returns and advantages using GAE."""
@@ -345,14 +332,14 @@ class PPOLearner(BaseDeepSpeedClass):
         advantages = torch.zeros_like(rewards, device=device)
 
         for i in range(batch_size):
-            assistant_returns, assistant_advantages = self._compute_returns_and_gae_advantages_for_single_episode(
+            assistant_returns, assistant_advantages = self._compute_masked_returns_and_gae_advantages_for_single_episode(
                 rewards=rewards[i], values=values[i], masks=masks[i]
             )
             returns[i] = assistant_returns
             advantages[i] = assistant_advantages
         return returns, advantages
 
-    def _compute_returns_and_gae_advantages_for_single_episode(
+    def _compute_masked_returns_and_gae_advantages_for_single_episode(
         self, rewards: torch.Tensor, values: torch.Tensor, masks: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Computes returns and advantages considering only assistant turns."""
@@ -360,7 +347,18 @@ class PPOLearner(BaseDeepSpeedClass):
         assistant_rewards = rewards[masks]
         assistant_values = values[masks]
 
-        gamma = self.train_cfg.gamma
+        seq_len = len(assistant_rewards)
+
+        gamma = (
+            self._compute_dynamic_discount(
+                seq_len,
+                max_length=self.train_cfg.max_expected_length,
+                min_discount=self.train_cfg.min_gamma,
+                max_disount=self.train_cfg.max_gamma,
+            )
+            if self.train_cfg.dynamic_discount
+            else self.train_cfg.gamma
+        )
         gae_lambda = self.train_cfg.gae_lambda
         last_gae = 0
         advantages_reversed = []
@@ -383,52 +381,32 @@ class PPOLearner(BaseDeepSpeedClass):
         advantages[masks] = assistant_advantages
         return returns, advantages
 
-    def _compute_mc_returns_for_single_episode(self, rewards: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
-        """Computes monte carlo returns considering only assistant turns."""
+    # def _compute_masked_mc_returns(self, rewards: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
+    #     """Computes monte carlo returns."""
+    #     batch_size, max_seq_len = rewards.shape
+    #     device = rewards.device
+    #     returns = torch.zeros_like(rewards, device=device)
 
-        gamma = self.train_cfg.gamma
-        assistant_rewards = rewards[masks]
-        assistant_returns = torch.zeros_like(assistant_rewards, dtype=self.dtype, device=self.device)
-        running_return = 0
-        # Reverse compute returns (like standard GAE-lambda but without baseline)
-        for t in reversed(range(len(assistant_rewards))):
-            running_return = assistant_rewards[t] + gamma * running_return
-            assistant_returns[t] = running_return
-
-        returns = torch.zeros_like(rewards, dtype=self.dtype, device=self.device)
-        returns[masks] = assistant_returns
-        return returns
-
-    # def _compute_mc_returns_for_episode(self, rewards: torch.Tensor) -> torch.Tensor:
-    #     """Computes monte carlo returns for a single episode."""
-    #     gamma = self.train_cfg.gamma
-    #     returns = torch.zeros_like(rewards)
-    #     running_return = 0
-
-    #     # Reverse compute returns (like standard GAE-lambda but without baseline)
-    #     for t in reversed(range(len(rewards))):
-    #         running_return = rewards[t] + gamma * running_return
-    #         returns[t] = running_return
-
+    #     for i in range(batch_size):
+    #         assistant_returns = self._compute_masked_mc_returns_for_single_episode(rewards=rewards[i], masks=masks[i])
+    #         returns[i] = assistant_returns
     #     return returns
 
-    # def _compute_gae_for_episode(self, rewards: torch.Tensor, values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     """Computes GAE for a single episode."""
+    # def _compute_masked_mc_returns_for_single_episode(self, rewards: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
+    #     """Computes monte carlo returns considering only assistant turns."""
+
     #     gamma = self.train_cfg.gamma
-    #     gae_lambda = self.train_cfg.gae_lambda
-    #     last_gae = 0
-    #     advantages_reversed = []
-    #     response_length = rewards.size(0)
+    #     assistant_rewards = rewards[masks]
+    #     assistant_returns = torch.zeros_like(assistant_rewards, dtype=self.dtype, device=self.device)
+    #     running_return = 0
+    #     # Reverse compute returns (like standard GAE-lambda but without baseline)
+    #     for t in reversed(range(len(assistant_rewards))):
+    #         running_return = assistant_rewards[t] + gamma * running_return
+    #         assistant_returns[t] = running_return
 
-    #     for t in reversed(range(response_length)):
-    #         next_values = values[t + 1] if t < response_length - 1 else 0.0
-    #         delta = rewards[t] + gamma * next_values - values[t]
-    #         last_gae = delta + gamma * gae_lambda * last_gae
-    #         advantages_reversed.append(last_gae)
-
-    #     advantages = torch.tensor(advantages_reversed[::-1], dtype=self.dtype, device=self.device)  # Reverse and create tensors
-    #     returns = advantages + values
-    #     return returns, advantages
+    #     returns = torch.zeros_like(rewards, dtype=self.dtype, device=self.device)
+    #     returns[masks] = assistant_returns
+    #     return returns
 
     @torch.no_grad()
     def _prepare_ppo_transitions(self, episodes: List[ProcessedEpisode]) -> List[PPOSample]:
@@ -442,13 +420,12 @@ class PPOLearner(BaseDeepSpeedClass):
         all_transitions: List[PPOSample] = []
 
         batch: PPOSample = None
-        for batch, lengths in tqdm(data_loader, desc='Processing PPO transitions'):
+        for batch, lengths in tqdm(data_loader, desc='Processing PPO transitions', disable=not self._is_rank0()):
             states = batch.states.to(self.device)
             actions = batch.actions.to(self.device)
-            temperatures = batch.temperatures.to(self.device)
             states, attn_mask = self._prepare_model_inputs(states)
 
-            model_outputs = self.policy_engine.forward(
+            pi_outputs = self.policy_engine.forward(
                 input_ids=states,
                 attention_mask=attn_mask,
                 return_dict=True,
@@ -456,16 +433,16 @@ class PPOLearner(BaseDeepSpeedClass):
                 return_values=True,  # compute values
             )
 
-            values = model_outputs.values.cpu()
-            pi_logits = self._apply_temperature_scale_to_logits(model_outputs.logits, temperatures)
+            values = pi_outputs.values.cpu()
+            pi_logits = pi_outputs.logits
             pi_logprobs = compute_logprobs_from_logits(pi_logits, actions).cpu()
-            del model_outputs, pi_logits
+            del pi_outputs, pi_logits
 
             ref_outputs = self.reference_engine.forward(
                 input_ids=states, attention_mask=attn_mask, return_dict=True, use_cache=False
-            )  # Reference forward pass
+            )
 
-            ref_logits = self._apply_temperature_scale_to_logits(ref_outputs.logits, temperatures)
+            ref_logits = ref_outputs.logits
             ref_logprobs = compute_logprobs_from_logits(ref_logits, actions).cpu()
             del ref_logits, ref_outputs
 
@@ -475,7 +452,6 @@ class PPOLearner(BaseDeepSpeedClass):
                     values=values[i, :ep_len].cpu(),
                     actions=actions[i, :ep_len].cpu(),
                     rewards=batch.rewards[i, :ep_len].cpu(),
-                    temperatures=batch.temperatures[i, :ep_len].cpu(),
                     pi_logprobs=pi_logprobs[i, :ep_len].cpu(),
                     ref_logprobs=ref_logprobs[i, :ep_len].cpu(),
                     loss_masks=batch.loss_masks[i, :ep_len].cpu(),
@@ -484,39 +460,6 @@ class PPOLearner(BaseDeepSpeedClass):
 
         del data_loader
         return all_transitions
-
-    @staticmethod
-    def _apply_temperature_scale_to_logits(logits: torch.Tensor, temperatures: torch.Tensor) -> torch.Tensor:
-        """
-        Safely scale logits by temperature, handling zero temperatures.
-
-        Args:
-            logits: tensor of shape [batch_size, sequence, vocab_size]
-            temperature: tensor of shape [batch_size, sequence]
-
-        Returns:
-            Scaled logits with same shape as input
-        """
-        assert logits.dim() == 3
-        assert temperatures.dim() == 2
-        assert logits.size(0) == temperatures.size(0)
-        assert logits.size(1) == temperatures.size(1)
-        eps = 1e-8
-        temp = temperatures.unsqueeze(-1)  # [batch_size, sequence, 1]
-        safe_temp = torch.clamp(temp, min=eps)
-
-        # Compute scaled logits
-        scaled_logits = logits.div(safe_temp)
-
-        # Create zero temperature mask without full expansion
-        zero_temp_mask = temp < eps  # Shape: [batch_size, sequence, 1]
-
-        # Use masked_fill_ which is more memory efficient than where
-        # This operates in-place and only on the affected elements
-        scaled_logits = scaled_logits.masked_fill_(zero_temp_mask, 0.0)
-
-        # Add back the original logits where temperature was zero
-        return scaled_logits.add_(logits.mul(zero_temp_mask))
 
     def _preprocess_collate_fn(self, batch: List[ProcessedEpisode]) -> Tuple[PPOSample, List[int]]:
         """Collate function for preprocessing episodes."""
@@ -528,19 +471,16 @@ class PPOLearner(BaseDeepSpeedClass):
         token_ids = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)  # Initialize tensors
         rewards = torch.zeros((batch_size, max_seq_len), dtype=dtype)
         loss_masks = torch.zeros((batch_size, max_seq_len), dtype=torch.bool)
-        temperatures = torch.zeros((batch_size, max_seq_len), dtype=dtype)
 
         for i, item in enumerate(batch):  # Fill tensors from batch data
             seq_len = len(item.token_ids)
             token_ids[i, :seq_len] = torch.from_numpy(item.token_ids).long()
             rewards[i, :seq_len] = torch.from_numpy(item.rewards).to(dtype)
             loss_masks[i, :seq_len] = torch.from_numpy(item.loss_masks).bool()
-            temperatures[i, :seq_len] = torch.from_numpy(item.temperatures).to(dtype)
 
         states = token_ids[..., :-1].clone()
         actions = token_ids[..., 1:].clone()  # Shift for states and actions
         rewards = rewards[..., 1:]
-        temperatures = temperatures[..., 1:]
         loss_masks = loss_masks[..., 1:]
         lengths = [len(item.token_ids) - 1 for item in batch]
 
@@ -551,7 +491,6 @@ class PPOLearner(BaseDeepSpeedClass):
                 pi_logprobs=None,
                 ref_logprobs=None,
                 rewards=rewards,
-                temperatures=temperatures,
                 loss_masks=loss_masks,
             ),
             lengths,
@@ -564,8 +503,6 @@ class PPOLearner(BaseDeepSpeedClass):
         pad_id = self.pad_token_id
         dtype = self.dtype
         max_seq_len = max([len(item.states) for item in batch])
-        if self.train_cfg.full_pad:
-            max_seq_len = max(max_seq_len, self.max_seq_len)
 
         states = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)  # Initialize tensors
         actions = torch.full((batch_size, max_seq_len), pad_id, dtype=torch.long)
@@ -573,7 +510,6 @@ class PPOLearner(BaseDeepSpeedClass):
         ref_logprobs = torch.full((batch_size, max_seq_len), 1e-8, dtype=dtype)
         values = torch.zeros((batch_size, max_seq_len), dtype=dtype)
         rewards = torch.zeros((batch_size, max_seq_len), dtype=dtype)
-        temperatures = torch.zeros((batch_size, max_seq_len), dtype=dtype)
         loss_masks = torch.zeros((batch_size, max_seq_len), dtype=torch.bool)
 
         for i, item in enumerate(batch):  # Fill tensors from batch data
@@ -584,7 +520,6 @@ class PPOLearner(BaseDeepSpeedClass):
             ref_logprobs[i, :seq_len] = item.ref_logprobs
             values[i, :seq_len] = item.values
             rewards[i, :seq_len] = item.rewards
-            temperatures[i, :seq_len] = item.temperatures
             loss_masks[i, :seq_len] = item.loss_masks
 
         return PPOSample(
@@ -594,19 +529,5 @@ class PPOLearner(BaseDeepSpeedClass):
             ref_logprobs=ref_logprobs,
             values=values,
             rewards=rewards,
-            temperatures=temperatures,
             loss_masks=loss_masks,
         )
-
-    def _log_batch_stats(self, batch_stats: Dict[str, Any]):
-        """Log batch statistics."""
-        batch_stats.update(self._get_common_stats())
-        if self.tracker:
-            Thread(target=self.tracker.log_learner_step_stats, args=(batch_stats,)).start()
-
-    def _log_iteration_stats(self, iter_stats: Dict[str, Any]):
-        """Log iteration statistics."""
-        iter_stats.update(self._get_common_stats())
-        self.logger.info(f"Learner stats: {iter_stats}")
-        if self.tracker:
-            self.tracker.log_learner_iteration_stats(iter_stats)

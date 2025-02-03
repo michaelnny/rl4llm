@@ -1,0 +1,85 @@
+datasets:
+- name: MATH-HARD-R1
+  path: ./data/sft_stage/math_hard_2k_r1_episodes.jsonl.gz
+  reward_scale: 1.0
+deepspeed:
+  bf16:
+    enabled: true
+  gradient_clipping: 1.0
+  optimizer:
+    params:
+      betas:
+      - 0.9
+      - 0.999
+      eps: 1.0e-08
+      lr: 1.0e-05
+      weight_decay: 0.0
+    type: Adam
+  prescale_gradients: false
+  scheduler:
+    params:
+      total_num_steps: 10000
+      warmup_max_lr:
+      - 5.0e-06
+      - 5.0e-06
+      - 5.0e-05
+      warmup_min_lr:
+      - 1.0e-07
+      - 1.0e-07
+      - 1.0e-06
+      warmup_num_steps: 10
+    type: WarmupDecayLR
+  steps_per_print: 10000
+  train_batch_size: 120
+  train_micro_batch_size_per_gpu: 5
+  wall_clock_breakdown: false
+  zero_optimization:
+    allgather_bucket_size: 500000.0
+    allgather_partitions: true
+    contiguous_gradients: true
+    overlap_comm: true
+    reduce_bucket_size: 500000.0
+    reduce_scatter: true
+    stage: 2
+job:
+  artifacts_path: ./runs
+  name: sft_run_qwen2.5-1.5b
+  seed: 117
+logging:
+  intervals:
+    learner: 1
+  level: INFO
+model:
+  activation_checkpoint: true
+  initialize_value_weights: true
+  load_in_4bit: false
+  max_seq_len: 4096
+  pretrained_model: Qwen/Qwen2.5-1.5B-Instruct
+prompt_templates:
+- state_id: reasoning
+  system_prompt: 'A conversation between User and Assistant. The user asks a question,
+    and the Assistant solves it.
+
+    The assistant first thinks about the reasoning process in the mind and then provides
+    the user
+
+    with the answer. Please put your final answer (e.g. numerical value or expression)
+    within \\boxed{}.
+
+    '
+  user_prompt: '{question}
+
+    '
+training_config:
+  augment_rate: 0.5
+  checkpoint_enabled: true
+  checkpoint_interval: 100
+  checkpoint_keep_n: 5
+  dynamic_discount: true
+  gamma: 1.0
+  max_expected_length: 10000
+  max_gamma: 0.9995
+  min_gamma: 0.9975
+  num_epochs: 2
+  policy_loss_coef: 1.0
+  value_loss_coef: 0.1

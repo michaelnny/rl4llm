@@ -105,7 +105,7 @@ logging:
   intervals:
     actor: 10
     evaluator: 10
-    learner: 5
+    learner: 1
   level: INFO
 model:
   activation_checkpoint: true
@@ -118,16 +118,15 @@ training_config:
   checkpoint_enabled: true
   checkpoint_interval: 200
   checkpoint_keep_n: 5
-  full_pad: false
   gae_lambda: 0.95
   gamma: 1.0
   kl_coef: 0.01
+  mix_kl_advantages: false
   normalize_advantages: true
   normalize_rewards: false
   num_epochs: 4
   policy_clip_eps: 0.2
-  rollout_episodes: 1024
+  rollout_episodes: 512
   rollout_iterations: 10000
-  separate_advantages: true
   value_clip_eps: 0.2
   value_loss_coef: 0.3

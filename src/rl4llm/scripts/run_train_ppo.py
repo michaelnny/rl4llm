@@ -7,6 +7,7 @@ from traceback import format_exc
 
 import deepspeed
 import torch
+import torch.distributed as dist
 
 from rl4llm.core.actor import Actor
 from rl4llm.core.ppo_learner import PPOLearner
@@ -60,7 +61,7 @@ def main(config_file=None):
         tracker.log_params(config)
 
     # Initialize DeepSpeed distributed environment
-    deepspeed.init_distributed()
+    deepspeed.init_distributed(verbose=False)
 
     # Set device for each process using local_rank
     torch.cuda.set_device(local_rank)
@@ -110,11 +111,12 @@ def main(config_file=None):
         while iter_c < num_iters:
             logger.info(f"Start iteration {iter_c}")
 
-            # move model to cpu for inference
+            # move training model to cpu for inference
             learner.offload_for_inference()
 
             if latest_state_dict is not None:
                 actor.sync_model_weights(latest_state_dict)
+                dist.barrier()
 
             episodes, _ = actor.generate_samples(
                 vector_env=train_env,
@@ -123,6 +125,8 @@ def main(config_file=None):
             )
 
             actor.offload_for_training()
+            dist.barrier()
+
             # step 2: Train on collected episodes
             learner.train(episodes)
 
@@ -131,7 +135,7 @@ def main(config_file=None):
             iter_c += 1
 
             # step 3: evaluation and checkpoint
-            if eval_enabled and iter_c >= 1 and iter_c % eval_interval == 0:
+            if eval_enabled and iter_c >= 1 and iter_c % eval_interval == 0 and local_rank == 0:
                 logger.info('Run evaluation')
 
                 if latest_state_dict is not None:

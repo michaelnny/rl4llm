@@ -36,7 +36,7 @@ def masked_normalize(values: torch.Tensor, mask: torch.Tensor, dim: int = 1, eps
     return mean_centered * var.clamp(min=eps).rsqrt()
 
 
-def compute_logprobs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def compute_logprobs_from_logits(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     """
     Computes log probabilities of the taken actions given the logits.
 
@@ -48,13 +48,11 @@ def compute_logprobs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> 
         torch.Tensor: Log probabilities of the actions, with shape (batch_size, ...).
     """
     assert logits.dim() == 3, 'Logits should have at least three dimensions (batch_size, seq_len, vocab_size)'
-    assert labels.dim() == 2, 'Targets should have at least two dimension (batch_size, seq_len)'
-    assert logits.shape[:-1] == labels.shape, f"Shape mismatch: logits shape {logits.shape} and labels shape {labels.shape}"
+    assert targets.dim() == 2, 'Targets should have at least two dimension (batch_size, seq_len)'
+    assert logits.shape[:2] == targets.shape, f"Shape mismatch: logits shape {logits.shape} and labels shape {targets.shape}"
 
-    logits_float = logits.float()
-    log_probs = F.log_softmax(logits_float.float(), dim=-1)
-    log_probs_labels = log_probs.gather(dim=-1, index=labels.unsqueeze(-1))
-    return log_probs_labels.squeeze(-1)
+    logprobs = torch.log_softmax(logits, dim=-1)
+    return torch.gather(logprobs, dim=2, index=targets.unsqueeze(2)).squeeze(2)
 
 
 def compute_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
@@ -69,7 +67,6 @@ def compute_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
     """
     assert logits.dim() == 3, 'Logits should have at least three dimensions (batch_size, seq_len, vocab_size)'
 
-    logits_float = logits.float()
-    pd = torch.softmax(logits_float, dim=-1)
-    entropy = torch.logsumexp(logits_float, dim=-1) - torch.sum(pd * logits_float, dim=-1)
+    pd = torch.softmax(logits, dim=-1)
+    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
     return entropy
