@@ -99,6 +99,8 @@ class PPOLearner(BaseDeepSpeedClass):
         self.policy_engine = self.policy_engine.to(self.device)  # Move engines to device
         self.reference_engine = self.reference_engine.to(self.device)
         torch.cuda.empty_cache()
+        self.policy_engine.eval()
+        self.reference_engine.eval()
         transitions = self._prepare_ppo_transitions(processed_episodes)
         dist.barrier()
         self.reference_engine = self.reference_engine.to('cpu')  # Offload ref engine after preparing transitions

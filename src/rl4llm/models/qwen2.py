@@ -23,36 +23,36 @@ class ExtendedModelOutput(CausalLMOutputWithPast):
     values: Optional[torch.Tensor] = None
 
 
-class ValueHead(nn.Module):
-    """Simplified value head with residual connection and dropout"""
+# class ValueHead(nn.Module):
+#     """Simplified value head with residual connection and dropout"""
 
-    def __init__(self, hidden_dim: int, scaling_factor: float = 0.75, dropout_prob: float = 0.2):
-        super().__init__()
+#     def __init__(self, hidden_dim: int, scaling_factor: float = 0.75, dropout_prob: float = 0.2):
+#         super().__init__()
 
-        assert scaling_factor >= 0.5 and scaling_factor <= 2.0
-        # Calculate scaled_dim and ensure it's a multiple of 256
-        base_dim = int(hidden_dim * scaling_factor)
-        scaled_dim = 256 * ((base_dim + 255) // 256)  # Round up to nearest multiple of 256
+#         assert scaling_factor >= 0.5 and scaling_factor <= 2.0
+#         # Calculate scaled_dim and ensure it's a multiple of 256
+#         base_dim = int(hidden_dim * scaling_factor)
+#         scaled_dim = 256 * ((base_dim + 255) // 256)  # Round up to nearest multiple of 256
 
-        self.w1 = nn.Linear(hidden_dim, scaled_dim, bias=False)
-        self.w2 = nn.Linear(scaled_dim, hidden_dim, bias=False)
-        self.w3 = nn.Linear(hidden_dim, scaled_dim, bias=False)
-        self.dropout = nn.Dropout(dropout_prob)
-        self.out = nn.Linear(hidden_dim, 1, bias=False)
+#         self.w1 = nn.Linear(hidden_dim, scaled_dim, bias=False)
+#         self.w2 = nn.Linear(scaled_dim, hidden_dim, bias=False)
+#         self.w3 = nn.Linear(hidden_dim, scaled_dim, bias=False)
+#         self.dropout = nn.Dropout(dropout_prob)
+#         self.out = nn.Linear(hidden_dim, 1, bias=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # residual = x
-        x = F.silu(self.w1(x)) * self.w3(x)  # SwiGLU
-        x = self.w2(x)
-        # x = self.dropout(x + residual)
-        x = self.dropout(x)
-        return self.out(x).squeeze(-1)
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         # residual = x
+#         x = F.silu(self.w1(x)) * self.w3(x)  # SwiGLU
+#         x = self.w2(x)
+#         # x = self.dropout(x + residual)
+#         x = self.dropout(x)
+#         return self.out(x).squeeze(-1)
 
 
 class AttentionValueHead(nn.Module):
     """Value head with a self-attention layer"""
 
-    def __init__(self, hidden_dim: int, num_attention_heads: int = 4, scaling_factor: float = 1.0, dropout_prob: float = 0.1):
+    def __init__(self, hidden_dim: int, num_attention_heads: int = 4, scaling_factor: float = 1.0, dropout_prob: float = 0.0):
         super().__init__()
 
         assert scaling_factor >= 0.5 and scaling_factor <= 2.0
@@ -69,7 +69,8 @@ class AttentionValueHead(nn.Module):
         )
 
         # Feed-Forward Network
-        self.ffn = nn.Sequential(nn.Linear(hidden_dim, scaled_dim), nn.GELU(), nn.Linear(scaled_dim, hidden_dim))
+        self.ffn_1 = nn.Linear(hidden_dim, scaled_dim)
+        self.ffn_2 = nn.Linear(scaled_dim, hidden_dim)
 
         # Output projection
         self.out = nn.Linear(hidden_dim, 1)
@@ -79,8 +80,9 @@ class AttentionValueHead(nn.Module):
         attn_output, _ = self.attention(x, x, x)
         x = x + attn_output
 
-        # FFN block with residual
-        x = x + self.ffn(x)
+        # FFN block
+        x = F.gelu(self.ffn_1(x))
+        x = F.gelu(self.ffn_2(x))
 
         return self.out(x).squeeze(-1)
 
@@ -91,7 +93,7 @@ class CustomQwen2Model(Qwen2ForCausalLM):
     def __init__(self, config, **kwargs):
         super().__init__(config, **kwargs)
 
-        self.value_head = AttentionValueHead(config.hidden_size, dropout_prob=0.1)
+        self.value_head = AttentionValueHead(config.hidden_size, dropout_prob=0.0)
 
     def forward(self, input_ids=None, attention_mask=None, return_values=False, **kwargs) -> ExtendedModelOutput:
         # Call the original model's forward method
@@ -105,7 +107,7 @@ class CustomQwen2Model(Qwen2ForCausalLM):
         # Compute state values
         values = None
         if return_values:
-            values = self.value_head(outputs.hidden_states[-1]).squeeze(-1)
+            values = self.value_head(outputs.hidden_states[-1].detach()).squeeze(-1)
 
         # Return ExtendedModelOutput with the computed state values
         return ExtendedModelOutput(

@@ -373,15 +373,21 @@ def try_compare_fractions_equal(input_str1: str, input_str2: str) -> bool:
 
         try:
             num, denom = frac_str.split('/')
-            return float(num) / float(denom)
-        except ValueError:
+            denom = float(denom)
+            if denom == 0:
+                raise ValueError("Denominator cannot be zero.")
+            return float(num) / denom
+        except Exception:
             pass
         return None
 
-    frac_1 = fraction_to_float(input_str1)
-    frac_2 = fraction_to_float(input_str2)
-    if frac_1 is not None and frac_2 is not None:
-        return math.isclose(frac_1, frac_2, rel_tol=1e-6)
+    try:
+        frac_1 = fraction_to_float(input_str1)
+        frac_2 = fraction_to_float(input_str2)
+        if frac_1 is not None and frac_2 is not None:
+            return math.isclose(frac_1, frac_2, rel_tol=1e-6)
+    except Exception:
+        pass
     return False
 
 
@@ -412,12 +418,15 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
         )
     except Exception:
         pass
-
-    # Try to evaluate the expressions as mathematical expressions
-    # example: '-\frac{1}{4}' vs '-0.25'
-    is_frac_equal = try_compare_fractions_equal(expression1, expression2)
-    if is_frac_equal:
-        return True
+    
+    try:
+        # Try to evaluate the expressions as mathematical expressions
+        # example: '-\frac{1}{4}' vs '-0.25'
+        is_frac_equal = try_compare_fractions_equal(expression1, expression2)
+        if is_frac_equal:
+            return True
+    except Exception:
+        pass
 
     # Fail back to string comparison
     return expression1 == expression2
@@ -447,13 +456,13 @@ def math_problem_grader(
             return 1.0, boxed_answer
         candidates.append(boxed_answer)
 
-    # # 2. Fallback to numerical values
-    # number_list = extract_last_n_numerical_values(full_answer, size=last_n)
-    # if number_list:
-    #     for num in number_list:
-    #         if check_expressions_equivalent(num, ground_truth):
-    #             return 1.0, num
-    #         candidates.append(num)
+    # 2. Fallback to last N numerical values
+    number_list = extract_last_n_numerical_values(full_answer, size=last_n)
+    if number_list:
+        for num in number_list:
+            if check_expressions_equivalent(num, ground_truth):
+                return 1.0, num
+            candidates.append(num)
 
     # Return the first extracted answer if we found any, or None
     return 0.0, candidates[0] if candidates else None

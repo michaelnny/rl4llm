@@ -6,21 +6,21 @@ job:
 
 model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
-  load_checkpoint: "./checkpoints/sft/checkpoint_step_100"
+  # load_checkpoint: "./checkpoints/sft/checkpoint_step_100"
   load_in_4bit: false
   activation_checkpoint: true
-  initialize_value_weights: false
+  initialize_value_weights: true
   max_seq_len: 4096
 
 training_config:
   rollout_iterations: 10000
   num_epochs: 4
   rollout_episodes: 1024
+  gamma: 1.0 # default fixed discount factor
+  dynamic_discount: false
   min_gamma: 0.9975 # for compute dynamic discount
   max_gamma: 0.9995 # for compute dynamic discount
   max_expected_length: 10000
-  gamma: 1.0 # default fixed discount factor
-  dynamic_discount: true
   policy_clip_eps: 0.2 # PPO policy clip parameter
   value_clip_eps: 0.2 # PPO value clip parameter
   gae_lambda: 0.95
@@ -32,8 +32,8 @@ training_config:
   checkpoint_keep_n: 5
 
 datasets: # List of tasks/datasets to load
-  # - "gsm"
-  - "math"
+  - "gsm"
+  # - "math"
 
 environment:
   num_envs: 8
@@ -45,7 +45,7 @@ environment:
     - state_id: reasoning
       system_prompt: |
         Think first about the reasoning process in your mind and then provides the user
-        with the answer. Please put your final answer (e.g. numerical value or expression) within \\boxed{}.
+        with the answer. Please put your final answer within $\boxed{}$.
       user_prompt: |
         {question}
       is_start: true

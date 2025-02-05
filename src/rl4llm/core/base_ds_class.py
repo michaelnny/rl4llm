@@ -17,8 +17,6 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer, BitsAndBytesConfig
 
 from rl4llm.models import CustomQwen2Model
-from rl4llm.envs import VectorEnvWrapper
-from rl4llm.types import DecodingConfig, EnvAction, EnvState, Episode, TokenUsage
 from rl4llm.utils import (
     TrainingTracker,
     load_yaml_config_file,
@@ -90,7 +88,7 @@ class BaseDeepSpeedClass:
             "pretrained_model_name_or_path": self.pretrained_model_name_or_path,
             "torch_dtype": self.dtype,
             "use_cache": False,
-            # "attn_implementation": model_config.get('attn_implementation', 'flash_attention_2'),
+            "attn_implementation": model_config.get('attn_implementation', 'flash_attention_2'),
         }
         if model_config['load_in_4bit']:
             nf4_config = BitsAndBytesConfig(
