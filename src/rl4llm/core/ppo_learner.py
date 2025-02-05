@@ -7,6 +7,7 @@ from collections import defaultdict
 from functools import partial
 from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple, Union
+import datetime
 
 import deepspeed
 import numpy as np
@@ -62,6 +63,13 @@ class PPOLearner(BaseDeepSpeedClass):
         """Compute the norm of the policy model's gradients."""
         return self._get_grad_norm(self.policy_engine)
 
+    def offload_for_inference(self) -> None:
+        """Offload the policy model to CPU for inference."""
+        if self.policy_engine is not None:
+            self.policy_engine = self.policy_engine.to('cpu')
+        if self.reference_engine is not None:
+            self.reference_engine = self.reference_engine.to('cpu')
+
     def save_policy_model(
         self,
         tag: Optional[str] = None,
@@ -109,10 +117,10 @@ class PPOLearner(BaseDeepSpeedClass):
         total_steps = math.ceil(self.train_cfg.num_epochs * len(episodes) / self.batch_size)
         pbar = tqdm(desc='Training steps', unit='batch', total=total_steps, disable=not self._is_rank0())
         accumulated_iter_stats = defaultdict(list)
+        accumulated_batch_stats = defaultdict(list)
 
         # with torch.autograd.set_detect_anomaly(True):
         for epoch in range(self.train_cfg.num_epochs):
-            accumulated_batch_stats = defaultdict(list)
             for mini_batch in data_loader:
                 metrics = self._process_minibatch(mini_batch)  # Process mini-batch
                 for name, values in metrics.items():
@@ -135,7 +143,6 @@ class PPOLearner(BaseDeepSpeedClass):
         pbar.close()
         self.iteration_count += 1
         self.episode_count += len(episodes)
-        self.logger.info('Aggregating iteration stats...')
         iter_stats = self._aggregate_stats(accumulated_iter_stats)
         iter_stats.update(
             {
@@ -145,20 +152,21 @@ class PPOLearner(BaseDeepSpeedClass):
                 'elapsed/episodes': self.episode_count,
             }
         )
-        self.logger.info('Logging iteration stats...')
         self._log_iteration_stats(iter_stats)  # Log iter stats
-        dist.barrier()
 
     def get_lasted_policy_weights(self) -> Dict[str, torch.Tensor]:
         """Retrieves consolidated 16-bit model state dict."""
-        return self._get_model_state_dict(self.policy_engine)
 
-    def offload_for_inference(self):
-        """Offload policy and reference models to CPU for inference."""
-        self.policy_engine = self.policy_engine.to('cpu')
-        self.reference_engine = self.reference_engine.to('cpu')
-        torch.cuda.empty_cache()
-        dist.barrier()
+        try:
+            # Get the underlying model
+            state_dict = self._get_model_state_dict(self.policy_engine)
+
+            # Create a CPU copy of the state dict
+            state_dict = {k: v.cpu().clone() for k, v in state_dict.items()}
+            return state_dict
+        except Exception as e:
+            self.logger.error(f"Error getting policy weights: {str(e)}")
+            raise
 
     def _calculate_batch_size(self) -> int:
         """Calculates the effective batch size."""
@@ -173,8 +181,7 @@ class PPOLearner(BaseDeepSpeedClass):
     def _init_policy_engine(self) -> deepspeed.DeepSpeedEngine:
         """Initializes the DeepSpeed policy training engine."""
         model = self._load_policy_model()
-        param_groups = self._get_params_groups(model, self.config['deepspeed']['optimizer'])
-        return self._create_deepspeed_training_engine(model, param_groups)
+        return self._create_deepspeed_training_engine(model)
 
     def _init_reference_engine(self) -> deepspeed.DeepSpeedEngine:
         """Initializes the DeepSpeed reference inference engine."""
@@ -213,11 +220,9 @@ class PPOLearner(BaseDeepSpeedClass):
             model=ref_model,
             model_parameters=None,
             config=ref_ds_config,
-            args={"local_rank": self.local_rank},
-            dist_init_required=True,
         )
 
-        return reference_engine.to('cpu')  # Default on CPU
+        return reference_engine
 
     def _process_minibatch(self, mini_batch: PPOSample) -> Dict[str, np.array]:
         """Process a mini-batch and compute loss and metrics."""
@@ -243,23 +248,21 @@ class PPOLearner(BaseDeepSpeedClass):
 
         actions = batch.actions.to(device)
         behavior_logprobs = batch.pi_logprobs.to(device)
-        ref_logprobs = batch.ref_logprobs.to(device)
-        old_values = batch.values.to(device)
+        # ref_logprobs = batch.ref_logprobs.to(device)
+        values = batch.values.to(device)
+        returns = batch.returns.to(device)
+        advantages = batch.advantages.to(device)
         rewards = batch.rewards.to(device)
+        kl = batch.kl.to(device)
         loss_masks = batch.loss_masks.bool().to(device)
 
+        # Apply loss masks
         rewards *= loss_masks
-        old_values *= loss_masks  # Apply loss masks
+        values *= loss_masks
+        returns *= loss_masks
+        advantages *= loss_masks
 
         pi_logprobs = compute_logprobs_from_logits(pred_pi_logits, actions)
-
-        # Compute KL using new method mentioned in GRPO paper
-        # http://joschu.net/blog/kl-approx.html
-        kl = (torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1) * loss_masks
-
-        returns, advantages = self._compute_masked_returns_and_gae_advantages(
-            rewards=rewards, values=old_values, masks=loss_masks
-        )
 
         # # Compute KL and KL-based reward score
         # mixed_rewards = (rewards - config.kl_coef * kl) * loss_masks
@@ -267,11 +270,19 @@ class PPOLearner(BaseDeepSpeedClass):
         #     mixed_rewards = masked_normalize(mixed_rewards, loss_masks)
 
         # returns, advantages = self._compute_masked_returns_and_gae_advantages(
-        #     rewards=mixed_rewards, values=old_values, masks=loss_masks
+        #     rewards=mixed_rewards, values=values, masks=loss_masks
         # )
 
-        if self.train_cfg.normalize_advantages:
-            advantages = masked_normalize(advantages, loss_masks)
+        # # Compute KL using new method mentioned in GRPO paper
+        # # http://joschu.net/blog/kl-approx.html
+        # kl = (torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1) * loss_masks
+
+        # returns, advantages = self._compute_masked_returns_and_gae_advantages(
+        #     rewards=rewards, values=values, masks=loss_masks
+        # )
+
+        # if self.train_cfg.normalize_advantages:
+        #     advantages = masked_normalize(advantages, loss_masks)
 
         # PPO clipped surrogate PG loss
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
@@ -282,7 +293,7 @@ class PPOLearner(BaseDeepSpeedClass):
         approxkl = (pi_logprobs - behavior_logprobs).detach()
 
         # Value loss
-        vpred_clipped = torch.clamp(pred_values, old_values - config.value_clip_eps, old_values + config.value_clip_eps)
+        vpred_clipped = torch.clamp(pred_values, values - config.value_clip_eps, values + config.value_clip_eps)
         vf_losses1 = torch.square(pred_values - returns)
         vf_losses2 = torch.square(vpred_clipped - returns)
         value_losses = 0.5 * torch.max(vf_losses1, vf_losses2).float()
@@ -410,7 +421,7 @@ class PPOLearner(BaseDeepSpeedClass):
 
     @torch.no_grad()
     def _prepare_ppo_transitions(self, episodes: List[ProcessedEpisode]) -> List[PPOSample]:
-        """Prepare PPO transitions by forward pass through policy and reference models."""
+        """Prepare PPO transitions by forward pass through policy and reference models and compute GAE advantages."""
         data_loader = DataLoader(  # Create DataLoader
             episodes,
             batch_size=self.batch_size_per_gpu,
@@ -433,7 +444,7 @@ class PPOLearner(BaseDeepSpeedClass):
                 return_values=True,  # compute values
             )
 
-            values = pi_outputs.values.cpu()
+            values = pi_outputs.values
             pi_logits = pi_outputs.logits
             pi_logprobs = compute_logprobs_from_logits(pi_logits, actions).cpu()
             del pi_outputs, pi_logits
@@ -446,6 +457,14 @@ class PPOLearner(BaseDeepSpeedClass):
             ref_logprobs = compute_logprobs_from_logits(ref_logits, actions).cpu()
             del ref_logits, ref_outputs
 
+            # Compute KL using new method mentioned in GRPO paper
+            # http://joschu.net/blog/kl-approx.html
+            kl = (torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1).cpu()
+
+            returns, advantages = self._compute_masked_returns_and_gae_advantages(
+                rewards=batch.rewards.to(self.device), values=values, masks=batch.loss_masks.to(self.device)
+            )
+
             for i, ep_len in enumerate(lengths):  # Create PPOSample transitions
                 transition = PPOSample(
                     states=states[i, :ep_len].cpu(),
@@ -454,9 +473,34 @@ class PPOLearner(BaseDeepSpeedClass):
                     rewards=batch.rewards[i, :ep_len].cpu(),
                     pi_logprobs=pi_logprobs[i, :ep_len].cpu(),
                     ref_logprobs=ref_logprobs[i, :ep_len].cpu(),
+                    kl=kl[i, :ep_len].cpu(),
+                    returns=returns[i, :ep_len].cpu(),
+                    advantages=advantages[i, :ep_len].cpu(),
                     loss_masks=batch.loss_masks[i, :ep_len].cpu(),
                 )
                 all_transitions.append(transition)
+
+        if self.train_cfg.normalize_advantages:
+            # normalize advantages across all transitions
+            full_size = len(all_transitions)
+            max_seq_len = max([len(transition.advantages) for transition in all_transitions])
+            all_advantages = torch.full((full_size, max_seq_len), 1e-8, dtype=self.dtype, device=self.device)
+            all_masks = torch.full((full_size, max_seq_len), 0, dtype=torch.bool, device=self.device)
+
+            for i, transition in enumerate(all_transitions):
+                seq_len = len(transition.advantages)
+                all_advantages[i, :seq_len] = transition.advantages.to(self.device)
+                all_masks[i, :seq_len] = transition.loss_masks.to(self.device)
+
+            # Normalize all advantages together using masked normalization
+            normalized_advantages = masked_normalize(all_advantages, all_masks)
+
+            assert normalized_advantages.shape == all_advantages.shape
+
+            # Update all transitions with normalized advantages
+            for i, transition in enumerate(all_transitions):
+                seq_len = len(transition.advantages)
+                transition.advantages = normalized_advantages[i, :seq_len].cpu()
 
         del data_loader
         return all_transitions
@@ -510,6 +554,9 @@ class PPOLearner(BaseDeepSpeedClass):
         ref_logprobs = torch.full((batch_size, max_seq_len), 1e-8, dtype=dtype)
         values = torch.zeros((batch_size, max_seq_len), dtype=dtype)
         rewards = torch.zeros((batch_size, max_seq_len), dtype=dtype)
+        kl = torch.zeros((batch_size, max_seq_len), dtype=dtype)
+        returns = torch.zeros((batch_size, max_seq_len), dtype=dtype)
+        advantages = torch.zeros((batch_size, max_seq_len), dtype=dtype)
         loss_masks = torch.zeros((batch_size, max_seq_len), dtype=torch.bool)
 
         for i, item in enumerate(batch):  # Fill tensors from batch data
@@ -520,6 +567,9 @@ class PPOLearner(BaseDeepSpeedClass):
             ref_logprobs[i, :seq_len] = item.ref_logprobs
             values[i, :seq_len] = item.values
             rewards[i, :seq_len] = item.rewards
+            kl[i, :seq_len] = item.kl
+            returns[i, :seq_len] = item.returns
+            advantages[i, :seq_len] = item.advantages
             loss_masks[i, :seq_len] = item.loss_masks
 
         return PPOSample(
@@ -529,5 +579,8 @@ class PPOLearner(BaseDeepSpeedClass):
             ref_logprobs=ref_logprobs,
             values=values,
             rewards=rewards,
+            kl=kl,
+            returns=returns,
+            advantages=advantages,
             loss_masks=loss_masks,
         )

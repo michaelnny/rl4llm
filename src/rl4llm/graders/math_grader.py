@@ -426,7 +426,7 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
 def math_problem_grader(
     full_answer: str,
     ground_truth: str,
-    last_n: int = 4,
+    last_n: int = 2,
 ) -> Tuple[float, Optional[str]]:
     """
     Enhanced grader that handles multiple answer formats and extraction methods.
@@ -447,13 +447,13 @@ def math_problem_grader(
             return 1.0, boxed_answer
         candidates.append(boxed_answer)
 
-    # 2. Fallback to numerical values
-    number_list = extract_last_n_numerical_values(full_answer, size=last_n)
-    if number_list:
-        for num in number_list:
-            if check_expressions_equivalent(num, ground_truth):
-                return 1.0, num
-            candidates.append(num)
+    # # 2. Fallback to numerical values
+    # number_list = extract_last_n_numerical_values(full_answer, size=last_n)
+    # if number_list:
+    #     for num in number_list:
+    #         if check_expressions_equivalent(num, ground_truth):
+    #             return 1.0, num
+    #         candidates.append(num)
 
     # Return the first extracted answer if we found any, or None
     return 0.0, candidates[0] if candidates else None

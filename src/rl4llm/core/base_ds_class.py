@@ -130,9 +130,9 @@ class BaseDeepSpeedClass:
         tp_size = dist.get_world_size() if self._is_zero3_enabled() else 1
         ds_infer_config = {
             "tensor_parallel": {"tp_size": tp_size},
-            "dtype": self.dtype,
+            "dtype": torch.half,
             "replace_with_kernel_inject": True,
-            "use_triton": True,
+            # "use_triton": True,
             "max_out_tokens": self.max_seq_len,
         }
 
@@ -149,26 +149,38 @@ class BaseDeepSpeedClass:
     def _create_deepspeed_training_engine(
         self,
         model: PreTrainedModel,
-        model_parameters: Optional[List[Dict]] = None,
     ) -> deepspeed.DeepSpeedEngine:
         """Creates DeepSpeed training engine."""
         if self.logger:
             self.logger.info("Creating training engine...")
 
-        if not model_parameters:
-            model_parameters = model.parameters()
+        ds_config = self.config['deepspeed']
+
+        # deepspeed's hybrid engine is a joke it's so slow with zero-3
+        # if enable_hybrid_engine:
+        #     if ds_config['zero_optimization']['stage'] != 3:
+        #         raise ValueError("Hybrid engine only works with ZeRO-3.")
+
+        #     self.logger.info("Enabling hybrid engine...")
+        #     ds_config["hybrid_engine"] = {
+        #         "enabled": enable_hybrid_engine,
+        #         "max_out_tokens": self.max_seq_len,
+        #         "inference_tp_size": dist.get_world_size(),
+        #         "release_inference_cache": True,
+        #         "pin_parameters": True,
+        #         "tp_gather_partition_size": 8,
+        #     }
+
+        model_parameters = self._get_params_groups(model, ds_config['optimizer'])
 
         engine: deepspeed.DeepSpeedEngine = None
         engine, _, _, _ = deepspeed.initialize(
             model=model,
             model_parameters=model_parameters,
-            config=self.config['deepspeed'],
+            config=ds_config,
             args={"local_rank": self.local_rank},
             dist_init_required=True,
         )
-
-        # if load_ckpt_dir:
-        #     _, checkpoint_state_dict = engine.load_checkpoint(load_ckpt_dir, load_ckpt_tag, load_module_only=True)
 
         return engine
 
@@ -301,8 +313,7 @@ class BaseDeepSpeedClass:
         attention_mask = (input_tokens != self.pad_token_id).bool()
         return input_tokens.to(self.device), attention_mask.to(self.device)
 
-    @staticmethod
-    def _get_grad_norm(engine: deepspeed.DeepSpeedEngine) -> float:
+    def _get_grad_norm(self, engine: deepspeed.DeepSpeedEngine) -> float:
         """Compute the norm of the model's gradients."""
         with torch.no_grad():
             total = 0.0
@@ -313,10 +324,9 @@ class BaseDeepSpeedClass:
 
         return total
 
-    @staticmethod
-    def _get_model_state_dict(engine: deepspeed.DeepSpeedEngine) -> Dict[str, torch.Tensor]:
+    def _get_model_state_dict(self, engine: deepspeed.DeepSpeedEngine) -> Dict[str, torch.Tensor]:
         """Retrieves the model state_dict from the engine."""
-        if engine.zero_optimization_partition_weights():  # check for zero3
+        if self._is_zero3_model(engine):  # check for zero3
             full_state_dict = engine._zero3_consolidated_16bit_state_dict()
         else:
             full_state_dict = {k: v.cpu() for k, v in engine.module.state_dict().items()}

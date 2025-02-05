@@ -71,10 +71,8 @@ def main(config_file=None):
     train_config = config['training_config']
     actor_config = config['actor']
     env_config = config['environment']
-    eval_config = config['evaluator']
 
     train_decoding = DecodingConfig(**actor_config['decoding'])
-    eval_decoding = DecodingConfig(**eval_config['decoding'])
 
     train_ds, test_ds = load_and_combine_datasets(config['datasets'])
 
@@ -84,22 +82,14 @@ def main(config_file=None):
         'datasets': train_ds,
         **env_kwargs,
     }
-    eval_env_kwargs = {
-        'datasets': test_ds,
-        **env_kwargs,
-    }
     train_env = VectorEnvWrapper(**train_env_kwargs)
-    eval_env = VectorEnvWrapper(**eval_env_kwargs)
 
-    actor = Actor(config=config, local_rank=local_rank, dtype=learner.dtype, tracker=tracker, logger=logger)
-
-    best_eval_accuracy = 0.0
+    actor = Actor(
+        config=config, local_rank=local_rank, dtype=learner.dtype, tracker=tracker, logger=logger
+    )
 
     train_rollout_episodes = train_config.get('rollout_episodes', 1024) // world_size
     num_iters = train_config.get('rollout_iterations', 10000)
-    eval_rollout_episodes = eval_config.get('rollout_episodes', 500)
-    eval_enabled = eval_config.get('enabled', False)
-    eval_interval = eval_config.get('interval', 100)
 
     def handle_exit():
         learner.on_exit()
@@ -111,49 +101,43 @@ def main(config_file=None):
         while iter_c < num_iters:
             logger.info(f"Start iteration {iter_c}")
 
-            # move training model to cpu for inference
             learner.offload_for_inference()
 
             if latest_state_dict is not None:
                 actor.sync_model_weights(latest_state_dict)
 
+            dist.barrier()
             episodes, _ = actor.generate_samples(
                 vector_env=train_env,
                 decoding=train_decoding,
                 max_episodes=train_rollout_episodes,
             )
+            dist.barrier()
 
-            actor.offload_for_training()
+            # make sure all ranks have the same number of episodes to avoid inconsistency in dataloader
+            local_num_episodes = len(episodes)
+            nums = torch.tensor([local_num_episodes, -local_num_episodes], device=torch.cuda.current_device())
+            dist.all_reduce(nums, op=dist.ReduceOp.MAX)
+            min_episodes, max_episodes = int(nums[1].item() * -1), int(nums[0].item())
+
+            if min_episodes != max_episodes:
+                logger.warning(f"Ranks had uneven episodes: min={min_episodes}, max={max_episodes}")
+                if local_num_episodes > min_episodes:
+                    episodes = episodes[:min_episodes]
 
             # step 2: Train on collected episodes
+            actor.offload_for_training()
             dist.barrier()
+
             learner.train(episodes)
-
-            # get latest weights to pass to actor for generation
-            latest_state_dict = learner.get_lasted_policy_weights()
             iter_c += 1
-
-            # step 3: evaluation and checkpoint
-            if eval_enabled and iter_c >= 1 and iter_c % eval_interval == 0 and local_rank == 0:
-                logger.info('Run evaluation')
-
-                if latest_state_dict is not None:
-                    actor.sync_model_weights(latest_state_dict)
-
-                _, eval_stats = actor.generate_samples(
-                    vector_env=eval_env,
-                    decoding=eval_decoding,
-                    max_episodes=min(eval_rollout_episodes, len(test_ds)),
-                    for_evaluator=True,
-                )
-
-                if 'accuracy' in eval_stats and eval_stats['accuracy'] > best_eval_accuracy:
-                    best_eval_accuracy = eval_stats['accuracy']
-                    logger.info(f"Best policy model with eval accuracy {best_eval_accuracy:.4f}")
-                    learner.save_policy_model(tag="best")
+            latest_state_dict = learner.get_lasted_policy_weights()
 
             # save data to external files
-            tracker.flush()
+            if tracker:
+                tracker.flush()
+
+            dist.barrier()
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
         handle_exit()

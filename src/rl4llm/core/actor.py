@@ -44,8 +44,9 @@ class Actor(BaseDeepSpeedClass):
 
     def _create_inference_engine(self) -> deepspeed.InferenceEngine:
         """Creates DeepSpeed inference engine and moves model to device."""
+        # TODO, something is wrong as this does not work with zero-3
         engine = self._create_deepspeed_inference_engine(self.cpu_model)
-        return engine.to(self.device)
+        return engine
 
     def sync_model_weights(self, model_state_dict: Dict) -> None:
         """Sync the model weights with the learner model."""
@@ -63,6 +64,8 @@ class Actor(BaseDeepSpeedClass):
         self.cpu_model = self.cpu_model.to('cpu')
         del self.inference_engine
         torch.cuda.empty_cache()
+
+        dist.barrier()
 
     @torch.inference_mode()
     def act(self, batch_states: List[EnvState], decoding: DecodingConfig) -> List[EnvAction]:
@@ -186,11 +189,11 @@ class Actor(BaseDeepSpeedClass):
         current_batch_size = len(batch_episodes)
         stats_tracker['total'] += current_batch_size
 
-        # if not for_evaluator:
-        #     filtered_episodes = [sample for sample in batch_episodes if self._is_valid_sample(sample)]  # Filter bad samples
-        #     bad_count = current_batch_size - len(filtered_episodes)
-        #     stats_tracker['skipped'] += bad_count
-        #     batch_episodes = filtered_episodes
+        if not for_evaluator:
+            filtered_episodes = [sample for sample in batch_episodes if self._is_valid_sample(sample)]  # Filter bad samples
+            bad_count = current_batch_size - len(filtered_episodes)
+            stats_tracker['skipped'] += bad_count
+            batch_episodes = filtered_episodes
 
         processed_episodes = []
         for episode in batch_episodes:

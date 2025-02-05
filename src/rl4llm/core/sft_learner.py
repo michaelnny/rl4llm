@@ -246,8 +246,7 @@ class SFTLearner(BaseDeepSpeedClass):
     def _init_policy_engine(self) -> deepspeed.DeepSpeedEngine:
         """Initializes the DeepSpeed policy training engine."""
         model = self._load_policy_model()
-        param_groups = self._get_params_groups(model, self.config['deepspeed']['optimizer'])
-        return self._create_deepspeed_training_engine(model, param_groups)
+        return self._create_deepspeed_training_engine(model, self.config['deepspeed']['optimizer'])
 
     def _load_and_prepare_sft_datasets(self) -> DataLoader:
         """Load and prepare datasets for SFT training."""

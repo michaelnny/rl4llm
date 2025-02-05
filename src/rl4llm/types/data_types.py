@@ -53,7 +53,7 @@ class StateNode(BaseModel):
 class EnvAction(BaseModel):
     """An action in the MDP environment"""
 
-    text: str = Field(..., min_length=10, description='The text of the action')
+    text: str = Field(..., min_length=2, description='The text of the action')
     reasoning: Optional[str] = Field(None, description='The reasoning tokens')
     exploring_steps: Optional[int] = Field(0, description='The number of starting steps for exploration')
     temperature: Optional[float] = Field(0.0, description='The temperature for decoding')
@@ -256,6 +256,9 @@ class PPOSample(BaseModel):
     ref_logprobs: Optional[torch.Tensor] = Field(
         None,
         description='A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T',
+    )
+    kl: Optional[torch.Tensor] = Field(
+        None, description='A float tensor for token-level KL estimate corresponding to token sequences from t=1, 2, ..., T-1, T'
     )
     values: Optional[torch.Tensor] = Field(
         None, description='A float tensor for state values estimate corresponding to token sequences from t=1, 2, ..., T-1, T'
