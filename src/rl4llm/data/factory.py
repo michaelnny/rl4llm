@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from datasets import Dataset, concatenate_datasets, load_dataset
 from tqdm import tqdm
 
-from rl4llm.graders.math_grader import extract_math_answer_from_last_boxed, fix_fractions, fix_sqrt_notation
+from rl4llm.graders.math_grader import extract_math_answer_from_last_boxed
 from rl4llm.utils import (
     is_texts_similar,
     load_from_jsonl_file,
@@ -697,7 +697,7 @@ def load_math_dataset(
         ground_truth = extract_math_answer_from_last_boxed(full_answer).strip()
 
         # the original MATH dataset has lots of incorrect fractions as in '\frac12' instead of '\frac{1}{2}'
-        ground_truth = fix_fractions(ground_truth)
+        # ground_truth = fix_fractions(ground_truth)
 
         return {
             'level': x['level'],

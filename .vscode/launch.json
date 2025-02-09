@@ -5,15 +5,15 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python Debugger: PPO Train Script",
+            "name": "Python Debugger: GRPO Train Script",
             "type": "debugpy",
             "request": "launch",
-            "module": "rl4llm.script.run_train",
+            "module": "rl4llm.scripts.run_rl_grpo",
             "justMyCode": false,
             "env": {
-                // "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
-                // "HTTPS_PROXY": "http://127.0.0.1:1081",
-                "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
+                "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
+                "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "PYTHONPATH": "/home/michael/projects/rl4llm/src",
                 "HF_TOKEN": "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",
             },
         },
@@ -25,8 +25,8 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                // "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
-                // "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
+                "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "HF_TOKEN": "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",
             },

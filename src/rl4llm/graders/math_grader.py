@@ -477,12 +477,12 @@ def math_problem_grader(
     full_answer: str,
     ground_truth: str,
     last_n: int = 2,
-) -> Tuple[float, Optional[str]]:
+) -> float:
     """
     Enhanced grader that handles multiple answer formats and extraction methods.
     """
     if full_answer is None or ground_truth is None:
-        return 0.0, None
+        return 0.0
 
     logger.debug(f"Processing answer: {full_answer}")
     logger.debug(f"Ground truth: {ground_truth}")
@@ -494,7 +494,7 @@ def math_problem_grader(
     if boxed_answer is not None:
         logger.debug(f"Found boxed answer: {boxed_answer}")
         if check_expressions_equivalent(boxed_answer, ground_truth):
-            return 1.0, boxed_answer
+            return 1.0
         candidates.append(boxed_answer)
 
     # 2. Try patterned answers
@@ -502,7 +502,7 @@ def math_problem_grader(
     if pattern_answer is not None:
         logger.debug(f"Found patterned answer: {pattern_answer}")
         if check_expressions_equivalent(pattern_answer, ground_truth):
-            return 1.0, pattern_answer
+            return 1.0
         candidates.append(pattern_answer)
 
     # 3. Fallback to last N numerical values
@@ -510,8 +510,7 @@ def math_problem_grader(
     if number_list:
         for num in number_list:
             if check_expressions_equivalent(num, ground_truth):
-                return 1.0, num
+                return 1.0
             candidates.append(num)
 
-    # Return the first extracted answer if we found any, or None
-    return 0.0, candidates[0] if candidates else None
+    return 0.0

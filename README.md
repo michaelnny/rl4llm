@@ -65,3 +65,15 @@ rsync -avz -e "ssh -p 37172" --exclude='.pt' --exclude='checkpoints' root@86.57.
 tensorboard --logdir ./rl4llm/runs --samples_per_plugin=text=1000
 
 ```
+
+
+
+
+
+
+
+
+
+```bash
+PYTHONPATH=src python -m rl4llm.scripts.rl_grpo
+```
