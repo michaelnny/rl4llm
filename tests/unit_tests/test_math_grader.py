@@ -44,7 +44,6 @@ def test_boxed_answers(answer, ground_truth, expected_score):
     """Test extraction and grading of boxed answers"""
     score, extracted = math_problem_grader(answer, ground_truth)
     assert score == expected_score
-    # assert extracted == expected_extracted
 
 
 # Test cases for LaTeX answers
@@ -81,8 +80,16 @@ def test_complex_latex_answers(answer, ground_truth, expected_score):
 @pytest.mark.parametrize(
     'answer, ground_truth, expected_score',
     [
-        ('Therefore, the final answer is $25. This solution is sound and clear to understand', '25', 1.0),
-        ('So, the final answer is 456.', '456', 1.0),
+        ('Therefore, the final answer is $25. This solution is sound and clear to understand for 4 and 5', '25', 1.0),
+        ('So, the final answer is 456, it is not 245 or 311.', '456', 1.0),
+        ("The answer is: 123,456.78", "123,456.78", 1.0),
+        ("The answer is: 456\tand more text", "456", 1.0),
+        ("The answer is: 456\nand more text", "456", 1.0),
+        ("The answer is: 456.", "456", 1.0),
+        ("The answer is: $456", "456", 1.0),
+        ("The answer is: 456%", "456%", 1.0),
+        ("The answer is: 456\tand more text", "444", 0.0),
+        ("The answer is: 456\nand more text", "333", 0.0),
     ],
 )
 def test_pattern_answers(answer, ground_truth, expected_score):

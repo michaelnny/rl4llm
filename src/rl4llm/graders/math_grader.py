@@ -46,25 +46,39 @@ NUMBER_PATTERN = re.compile(
 )
 
 
-def extract_math_answer_from_last_boxed(answer: str) -> Optional[str]:
+def extract_math_answer_from_last_boxed(answer_text: str) -> Optional[str]:
     """
     Extracts the content from the last boxed expression in a string.
     """
-    last_boxed = _last_boxed_only_string(answer)
+    last_boxed = _last_boxed_only_string(answer_text)
     if last_boxed:
         return _remove_boxed(last_boxed)
     return None
 
 
-def extract_last_n_numerical_values(text: str, size: int = 2) -> Optional[List[str]]:
+def extract_math_answer_from_patterned_text(answer_text: str) -> Optional[str]:
+    """
+    Extracts the answer from a string, handling various cases, including
+    text after the answer and removing trailing commas.
+    """
+    match = re.search(r'the\s+(final\s+)?answer\s+is:?\s*(.*?)(?:\.|\s+|$)', answer_text, re.IGNORECASE)
+    if match:
+        answer = match.group(2).strip()
+        if answer.endswith(',') or answer.endswith("."):
+            answer = answer[:-1].strip()
+        return answer if answer else None
+    return None
+
+
+def extract_last_n_numerical_values(answer_text: str, size: int = 2) -> Optional[List[str]]:
     """
     Extract a list of numerical values from the last N positions of a text string.
     """
-    if not text:
+    if not answer_text:
         return None
 
     # Split text into lines and process each line
-    lines = text.split("\n")
+    lines = answer_text.split("\n")
     valid_numbers = []
 
     for line in lines:
@@ -177,7 +191,7 @@ def _last_boxed_only_string(string: str) -> Optional[str]:
     return None
 
 
-def fix_fractions(input_string: str) -> str:
+def _fix_fractions(input_string: str) -> str:
     """
     Corrects the formatting of fraction expressions in a string.
     """
@@ -211,7 +225,7 @@ def fix_fractions(input_string: str) -> str:
     return new_string
 
 
-def fix_a_slash_b_notation(input_string: str) -> str:
+def _fix_a_slash_b_notation(input_string: str) -> str:
     """
     Converts simple division notation (e.g., "a/b") to LaTeX fraction format (e.g., "\\frac{a}{b}").
     """
@@ -231,7 +245,7 @@ def fix_a_slash_b_notation(input_string: str) -> str:
         return input_string
 
 
-def remove_right_side_units(input_string: str) -> str:
+def _remove_right_side_units(input_string: str) -> str:
     """
     Removes unit descriptions from the right side of a string.
     """
@@ -243,7 +257,7 @@ def remove_right_side_units(input_string: str) -> str:
         return input_string
 
 
-def fix_sqrt_notation(input_string: str) -> str:
+def _fix_sqrt_notation(input_string: str) -> str:
     """
     Corrects the formatting of square root expressions in a string.
     """
@@ -261,103 +275,130 @@ def fix_sqrt_notation(input_string: str) -> str:
     return new_string
 
 
-def has_numbers(text: str) -> bool:
+def _fix_tan_notation(input_string: str) -> str:
+    out_string = re.sub(r"\\tan(-?[0-9.a-zA-Z]+)", r"\\tan{\1}", input_string)
+    out_string = re.sub(r"\\tan\s+(\w+)$", r"\\tan{\1}", out_string)
+    return out_string
+
+
+def _has_numbers(text: str) -> bool:
     """Checks if the text contains any digits."""
     return bool(re.search(r"\d", text))
 
 
-def normalize_latex_string(input_string: str) -> str:
+def _normalize_latex_string(input_string: str) -> str:
     """
     Performs a series of cleaning and formatting operations on a string.
     """
     original_string = input_string
 
     # linebreaks
-    output_string = input_string.replace("\n", "")
+    string = input_string.replace("\n", "")
 
     # remove inverse spaces
-    output_string = output_string.replace("\\!", "")
-
-    # Remove unnecessary whitespace
-    output_string = re.sub(r"\s+", "", output_string)
+    string = string.replace("\\!", "")
 
     # replace \\ with \
-    output_string = output_string.replace("\\\\", "\\")
+    string = string.replace("\\\\", "\\")
 
     # replace tfrac and dfrac with frac
-    output_string = output_string.replace("tfrac", "frac")
-    output_string = output_string.replace("dfrac", "frac")
+    string = string.replace("tfrac", "frac")
+    string = string.replace("dfrac", "frac")
+    string = string.replace("cfrac", "frac")
 
     # remove \left and \right
-    output_string = output_string.replace("\\left", "")
-    output_string = output_string.replace("\\right", "")
+    string = string.replace("\\left", "")
+    string = string.replace("\\right", "")
 
     # Remove circ (degrees)
-    output_string = output_string.replace("^{\\circ}", "")
-    output_string = output_string.replace("^\\circ", "")
+    string = string.replace("^{\\circ}", "")
+    string = string.replace("^\\circ", "")
 
     # Remove \text{} wrappers
-    if has_numbers(original_string):  # Use the original latex to check for numbers
+    if _has_numbers(original_string):  # Use the original latex to check for numbers
         # Remove \text{} commands and their content
-        output_string = re.sub(r"\\text{.*?}", "", output_string)
-        output_string = re.sub(r"\text{.*?}", "", output_string)
+        string = re.sub(r"\\text{.*?}", "", string)
+        string = re.sub(r"\text{.*?}", "", string)
     else:
         # Remove \text{} commands
-        output_string = re.sub(r"\\text{([^}]*)}", r"\1", output_string)
-        output_string = re.sub(r"\text{([^}]*)}", r"\1", output_string)
+        string = re.sub(r"\\text{([^}]*)}", r"\1", string)
+        string = re.sub(r"\text{([^}]*)}", r"\1", string)
 
     # Remove empty {} block
-    output_string = re.sub(r"\{\}", "", output_string)
+    string = re.sub(r"\{\}", "", string)
+
+    # remove units
+    string = re.sub(r"\{(c|m)?m\}(\^(2|3))?", "", string).strip()
+    string = re.sub(r"p\.m\.$", "", string).strip()
+    string = re.sub(r"(\d)\s*t$", r"\1", string).strip()
 
     # remove dollar signs
-    output_string = output_string.replace("\\$", "")
+    string = string.replace("\\$", "")
+    string = string.replace("$", "")
 
     # remove units (on the right)
-    output_string = remove_right_side_units(output_string)
+    string = _remove_right_side_units(string)
 
     # remove percentage
-    output_string = output_string.replace("\\%", "")
-    output_string = output_string.replace(r"\%", "")
+    string = string.replace("\\%", "")
+    string = string.replace(r"\%", "")
 
     # " 0." equivalent to " ." and "{0." equivalent to "{." Alternatively, add "0" if "." is the start of the string
-    output_string = output_string.replace(" .", " 0.")
-    output_string = output_string.replace("{.", "{0.")
-    # if empty, return empty string
-    if len(output_string) == 0:
-        return output_string
-    if output_string[0] == ".":
-        output_string = "0" + output_string
+    string = string.replace(" .", " 0.")
+    string = string.replace("{.", "{0.")
 
-    # to consider: get rid of e.g. "k = " or "q = " at beginning
-    if len(output_string.split("=")) == 2:
-        if len(output_string.split("=")[0]) <= 2:
-            output_string = output_string.split("=")[1]
+    # remove \cdot
+    string = string.replace("\\cdot", "")
+
+    # normalize infinity
+    string = string.replace("infinity", "\\infty")
+    if "\\infty" not in string:
+        string = string.replace("inf", "\\infty")
+    string = string.replace("+\\inity", "\\infty")
+
+    string = string.replace("\\mathbf", "")
+    string = string.replace("\\mathrm", "")
+
+    # remove \mbox{...}
+    string = re.sub(r"\\mbox{.*?}", "", string)
+
+    # if empty, return empty string
+    if len(string) == 0:
+        return string
+    if string[0] == ".":
+        string = "0" + string
+
+    # # to consider: get rid of e.g. "k = " or "q = " at beginning
+    # if len(string.split("=")) == 2:
+    #     if len(string.split("=")[0]) <= 2:
+    #         string = string.split("=")[1]
 
     # fix sqrt3 --> sqrt{3}
-    output_string = fix_sqrt_notation(output_string)
+    string = _fix_sqrt_notation(string)
+    string = _fix_tan_notation(string)
 
-    # remove spaces
-    output_string = output_string.replace(" ", "")
+    # Remove unnecessary whitespace
+    string = re.sub(r"\s+", "", string)
 
     # \frac1b or \frac12 --> \frac{1}{b} and \frac{1}{2}, etc. Even works with \frac1{72} (but not \frac{72}1). Also does a/b --> \\frac{a}{b}
-    output_string = fix_fractions(output_string)
+    string = _fix_fractions(string)
 
     # manually change 0.5 --> \frac{1}{2}
-    if output_string == "0.5":
-        output_string = "\\frac{1}{2}"
+    if string == "0.5":
+        string = "\\frac{1}{2}"
 
     # NOTE: X/Y changed to \frac{X}{Y} in dataset, but in simple cases fix in case the model output is X/Y
-    output_string = fix_a_slash_b_notation(output_string)
+    string = _fix_a_slash_b_notation(string)
 
     # Remove ",!" from numbers, e.g., "1,!000" --> "1000"
-    output_string = re.sub(r'(\d),!(\d)', r'\1\2', output_string)
+    string = re.sub(r'(\d),!(\d)', r'\1\2', string)
 
     # Regex pattern to match valid numbers with commas as thousand separators
     pattern = r'^[+-]?(\d{1,3}(,\d{3})*|\d+)(\.\d+)?$'
-    if re.fullmatch(pattern, output_string):
-        output_string = output_string.replace(",", "")
+    if re.fullmatch(pattern, string):
+        string = string.replace(",", "")
 
-    return output_string
+    return string
 
 
 def try_compare_fractions_equal(input_str1: str, input_str2: str) -> bool:
@@ -410,15 +451,15 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
         return False
 
     try:
-        normalized_expression1 = normalize_latex_string(expression1)
-        normalized_expression2 = normalize_latex_string(expression2)
+        normalized_expression1 = _normalize_latex_string(expression1)
+        normalized_expression2 = _normalize_latex_string(expression2)
         logger.debug(normalized_expression1, normalized_expression2)
         return normalized_expression1 == normalized_expression2 or float(normalized_expression1) == float(
             normalized_expression2
         )
     except Exception:
         pass
-    
+
     try:
         # Try to evaluate the expressions as mathematical expressions
         # example: '-\frac{1}{4}' vs '-0.25'
@@ -456,7 +497,15 @@ def math_problem_grader(
             return 1.0, boxed_answer
         candidates.append(boxed_answer)
 
-    # 2. Fallback to last N numerical values
+    # 2. Try patterned answers
+    pattern_answer = extract_math_answer_from_patterned_text(full_answer)
+    if pattern_answer is not None:
+        logger.debug(f"Found patterned answer: {pattern_answer}")
+        if check_expressions_equivalent(pattern_answer, ground_truth):
+            return 1.0, pattern_answer
+        candidates.append(pattern_answer)
+
+    # 3. Fallback to last N numerical values
     number_list = extract_last_n_numerical_values(full_answer, size=last_n)
     if number_list:
         for num in number_list:
