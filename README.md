@@ -75,5 +75,5 @@ tensorboard --logdir ./rl4llm/runs --samples_per_plugin=text=1000
 
 
 ```bash
-PYTHONPATH=src python -m rl4llm.scripts.rl_grpo
+PYTHONPATH=src python -m rl4llm.scripts.run_rl_grpo
 ```

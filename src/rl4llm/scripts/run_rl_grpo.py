@@ -4,7 +4,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+import random
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -124,7 +124,8 @@ class GRPOTrainer:
 
         # Move optimizer states to CPU
         self.optimizer_to("cpu")
-
+        self.policy_model = self.policy_model.eval()
+        self.reference_model = self.reference_model.eval()
         # Ensure both models are on GPU for generation
         self.policy_model = self.policy_model.to(self.device)
         self.reference_model = self.reference_model.to(self.device)
@@ -149,6 +150,8 @@ class GRPOTrainer:
         # Move optimizer states back to original devices
         self.optimizer_to(self.policy_model.device)
 
+        self.policy_model = self.policy_model.train()
+
         torch.cuda.empty_cache()
         self.generation_mode = False
 
@@ -160,21 +163,35 @@ class GRPOTrainer:
         assert input_ids.shape == actions.shape
 
         attention_mask = (input_ids != self.pad_token_id).bool()
-
         logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
-        logprobs = torch.log_softmax(logits, dim=-1)
-        return torch.gather(logprobs, dim=2, index=actions.unsqueeze(2)).squeeze(2)
+        # this runs into CUDA OOM
+        # logprobs = torch.log_softmax(logits, dim=-1)
+        # return torch.gather(logprobs, dim=2, index=actions.unsqueeze(2)).squeeze(2)
+
+        # Process log_softmax and gather operations one sample at a time
+        batch_size = logits.shape[0]
+        sample_logprobs = []
+
+        for i in range(batch_size):
+            # Process single sample
+            sample_logits = logits[i : i + 1]  # Keep dim for proper broadcasting
+            sample_logprobs_all = torch.log_softmax(sample_logits, dim=-1)
+            sample_actions = actions[i : i + 1].unsqueeze(2)
+            sample_logprob = torch.gather(sample_logprobs_all, dim=2, index=sample_actions).squeeze(2)
+            sample_logprobs.append(sample_logprob)
+
+        # Concatenate results
+        return torch.cat(sample_logprobs, dim=0)
 
     @torch.no_grad()
-    def generate_group_samples(self, item: Dict, decoding_args: Dict, group_size: int, system_prompt: str) -> List[Dict]:
+    def generate_group_samples(
+        self, question: str, ground_truth: str, decoding_args: Dict, group_size: int, system_prompt: str
+    ) -> List[Dict]:
         """Generate responses for given states, handling None states."""
-
-        ground_truth = item["ground_truth"]
-
         if not system_prompt:
-            message = [{"role": "user", "content": item["question"]}]
+            message = [{"role": "user", "content": question.strip()}]
         else:
-            message = [{"role": "system", "content": system_prompt}, {"role": "user", "content": item["question"]}]
+            message = [{"role": "system", "content": system_prompt.strip()}, {"role": "user", "content": question.strip()}]
 
         # expand to have a batch dimension
         message = [message for _ in range(group_size)]
@@ -251,43 +268,6 @@ class GRPOTrainer:
         # Cut sequences to the first eos token in completion
         for i, cut_position in enumerate(cut_positions):
 
-            # print("\nDetailed analysis for sequence", i)
-            # print(f"1. Sequence structure:")
-            # print(f"   - Full sequence length: {actions.size(1)}")
-            # print(f"   - Prompt length: {prompt_length}")
-            # print(f"   - Cut position: {cut_position}")
-
-            # print(f"\n2. Token counts:")
-            # print(f"   - Completion tokens count: {completion_tokens_count[i]}")
-            # print(f"   - Loss mask sum (total): {loss_mask[i, ...].sum()}")
-            # print(f"   - Loss mask sum (up to cut): {loss_mask[i, :cut_position].sum()}")
-
-            # print(f"\n3. Token positions:")
-            # print(f"   - EOS token positions: {(actions[i] == self.eos_token_id).nonzero().flatten().tolist()}")
-            # print(f"   - PAD token positions: {(actions[i] == self.pad_token_id).nonzero().flatten().tolist()}")
-
-            # print(f"\n4. Loss mask values:")
-            # print(f"   - Around cut position: {loss_mask[i, max(0, cut_position-5):min(cut_position+5, actions.size(1))].tolist()}")
-
-            # # Check if there are any 1s in the loss mask after the cut position
-            # if cut_position < actions.size(1):
-            #     remaining_ones = loss_mask[i, cut_position:].sum()
-            #     print(f"\n5. Remaining ones after cut: {remaining_ones}")
-
-            # # First assertion (passing)
-            # total_sum = loss_mask[i, ...].sum()
-            # print(f"\n6. First assertion check:")
-            # print(f"   - loss_mask sum: {total_sum}")
-            # print(f"   - completion_tokens_count: {completion_tokens_count[i]}")
-            # print(f"   - Match: {total_sum == completion_tokens_count[i]}")
-
-            # # Second assertion (failing)
-            # cut_sum = loss_mask[i, :cut_position].sum()
-            # print(f"\n7. Second assertion check:")
-            # print(f"   - loss_mask sum up to cut: {cut_sum}")
-            # print(f"   - completion_tokens_count: {completion_tokens_count[i]}")
-            # print(f"   - Match: {cut_sum == completion_tokens_count[i]}")
-
             assert loss_mask[i, ...].sum() == completion_tokens_count[i]
             assert loss_mask[i, :cut_position].sum() == completion_tokens_count[i]
 
@@ -316,16 +296,15 @@ class GRPOTrainer:
             results.append(sample)
             self.episode_count += 1
 
-            if self.writer:
-                formatted_text = (
-                    f"**Question**: {item['question']}\n\n"
-                    f"**Ground Truth**: {item['ground_truth']}\n\n"
-                    f"**Graded Reward**: {sample['reward']}\n\n"
-                    f"**Full Answer**:\n```json\n{sample['completion_text']}\n```"
-                )
-                self.writer.add_text("sample", formatted_text, self.episode_count)
-                self.writer.add_scalar("sample/reward", sample['reward'], self.episode_count)
-                self.writer.add_scalar("sample/completion_length", sample['completion_length'], self.episode_count)
+        if self.writer:
+            sampled_item = random.choice(results)
+            formatted_text = (
+                f"**Question**: {question}\n\n"
+                f"**Ground Truth**: {ground_truth}\n\n"
+                f"**Graded Reward**: {sampled_item['reward']}\n\n"
+                f"**Full Answer**:\n```json\n{sampled_item['completion_text']}\n```"
+            )
+            self.writer.add_text("sample", formatted_text, self.episode_count)
 
         return results
 
@@ -356,14 +335,12 @@ class GRPOTrainer:
         assert max_episodes >= 128
 
         with self.generation_context():
-            self.policy_model.eval()
-            # self.reference_model.to(self.device)
-            self.policy_model.eval()
-            torch.cuda.empty_cache()
+            assert not self.policy_model.training
+            assert not self.reference_model.training
             collected_samples = []
-
             with tqdm(total=max_episodes, desc=f'Generating episodes', unit='episode') as pbar:
-                data_iter = iter(self.train_ds)  # Create the iterator once outside the loop
+                # Create the iterator once outside the loop
+                data_iter = iter(self.train_ds)
                 while len(collected_samples) < max_episodes:
                     try:
                         item = next(data_iter)  # Fetch the next batch
@@ -375,7 +352,9 @@ class GRPOTrainer:
 
                     assert "question" in item and "ground_truth" in item
 
-                    samples = self.generate_group_samples(item, decoding_args, group_size, system_prompt)
+                    samples = self.generate_group_samples(
+                        item['question'], item['ground_truth'], decoding_args, group_size, system_prompt
+                    )
 
                     collected_samples.extend(samples)
                     pbar.update(len(samples))
@@ -391,8 +370,6 @@ class GRPOTrainer:
         clip_eps: float = 0.2,
         kl_loss_coef: float = 0.02,
     ) -> None:
-
-        self._prepare_for_training()
 
         def _collate_function(batch: List[Dict]) -> Dict:
             max_seq_len = max([len(item['states']) for item in batch])
@@ -425,6 +402,8 @@ class GRPOTrainer:
                 "rewards": batch_rewards,
             }
 
+        random.shuffle(samples)
+
         data_loader = DataLoader(
             samples,
             batch_size=batch_size,
@@ -434,14 +413,15 @@ class GRPOTrainer:
             drop_last=False,
         )
 
-        total_steps = math.ceil(num_updates * len(samples) / batch_size * gradient_accumulate_steps)
+        total_steps = math.ceil(num_updates * len(samples) / (batch_size * gradient_accumulate_steps))
 
         pbar = tqdm(desc='Training steps', unit='batch', total=total_steps)
         # accumulated_iter_stats = defaultdict(list)
         accumulated_stats = defaultdict(list)
 
-        self.reference_model.to("cpu")
-        self.policy_model.train()
+        self.optimizer.zero_grad()
+
+        assert self.policy_model.training
 
         mini_steps = 0
         for epoch in range(num_updates):
@@ -462,15 +442,9 @@ class GRPOTrainer:
                 ratio = torch.exp(pi_logprobs - behavior_logprobs)
                 clipped_ratio = ratio.clamp(1 - clip_eps, 1 + clip_eps)
                 pg_losses = torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
-                clipped = ratio.gt(1 + clip_eps) | ratio.lt(1 - clip_eps)
-                pg_clipfrac = torch.as_tensor(clipped, dtype=ratio.dtype)
-                approxkl = (pi_logprobs - behavior_logprobs).detach()
 
                 pg_loss = pg_losses[loss_mask].mean()
-                approxkl = approxkl[loss_mask].mean()
-                pg_clipfrac = pg_clipfrac[loss_mask].mean()
                 kl_penalties = kl_loss_coef * per_token_kl[loss_mask].mean()
-
                 loss = -pg_loss + kl_penalties
 
                 if gradient_accumulate_steps > 0:
@@ -478,7 +452,10 @@ class GRPOTrainer:
 
                 loss.backward()
 
-                accumulated_stats['loss'].append(loss.detach().item())
+                accumulated_stats['loss/total'].append(loss.detach().item())
+                accumulated_stats['loss/policy'].append(pg_loss.detach().item())
+                accumulated_stats['loss/kl_penalty'].append(kl_penalties.detach().item())
+                accumulated_stats['others/kl'].append(per_token_kl[loss_mask].detach().sum(-1).mean().item())
 
                 mini_steps += 1
 
@@ -488,6 +465,13 @@ class GRPOTrainer:
                     self.scheduler.step()
                     self.optimizer.zero_grad()
                     self.update_count += 1
+                    mini_steps = 0
+
+        # if mini_steps > 0:
+        #     self.optimizer.step()
+        #     self.scheduler.step()
+        #     self.optimizer.zero_grad()
+        #     self.update_count += 1
 
         elapsed_time = pbar.format_dict.get('elapsed', 0)
         pbar.close()
@@ -495,46 +479,48 @@ class GRPOTrainer:
         self.iteration_count += 1
         stats = {
             'elapsed/time': round(elapsed_time, 4),
-            'elapsed/step_time': round(elapsed_time / max(pbar.total, 1) if pbar.total else 0, 4),
             'elapsed/updates': self.update_count,
             'elapsed/episodes': self.episode_count,
-            "reward": np.mean([d['reward'] for d in samples]),
-            "completion_length": np.mean([d['completion_length'] for d in samples]),
-            "loss": np.mean(accumulated_stats['loss']),
+            "objective/reward": np.mean([d['reward'] for d in samples]).item(),
+            "objective/reward_std": np.std([d['reward'] for d in samples]).item(),
+            "objective/completion_length": np.mean([d['completion_length'] for d in samples]).item(),
+            "others/learning_rate": self.optimizer.param_groups[0]['lr'],
         }
-        print(stats)
+
+        for k in accumulated_stats:
+            stats[k] = np.mean(accumulated_stats[k]).item()
 
         if self.writer:
             for name, value in stats.items():
                 if isinstance(value, (int, float)):
-                    self.writer.add_scalar(f"leaner/{name}", value, self.iteration_count)
+                    self.writer.add_scalar(f"{name}", value, self.iteration_count)
 
     def save_checkpoint(self, save_dir: str):
         self.policy_model.save_pretrained(save_dir)
 
 
 def main():
-    model_name = "Qwen/Qwen2.5-0.5B-Instruct"
-    load_in_4bit = True
-    optim_type = "AdamW_8bit"  # "AdamW"
+    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+    load_in_4bit = False
+    optim_type = "AdamW8bit"  # "AdamW"
     learning_rate = 1e-6
     weight_decay = 0.002
     eps = 1e-8
     betas = (0.9, 0.999)
     lr_decay_steps = 10000
-    kl_loss_coef = 0.04
+    kl_loss_coef = 0.05
     num_epochs = 1000
     num_updates = 1
     batch_size = 4
     gradient_accumulation_steps = 16
     group_size = 8
-    rollout_size = 128
-    decoding_args = {"do_sample": True, "temperature": 0.6, "max_new_tokens": 800}
+    rollout_size = 1024
+    decoding_args = {"do_sample": True, "temperature": 0.7, "max_new_tokens": 1024}
     system_prompt = """
 Think first about the reasoning process in your mind and then provides the user with the answer.
 """
     checkpoint_interval = 20
-    job_dir = "./runs/grpo_qwen_3b"
+    job_dir = "./runs/grpo_qwen_1.5b"
     tb_log_dir = f"{job_dir}/tb_logs"
     checkpoint_dir = f"{job_dir}/checkpoints"
 
@@ -567,6 +553,8 @@ Think first about the reasoning process in your mind and then provides the user 
 
     policy_model = AutoModelForCausalLM.from_pretrained(**model_args)
 
+    policy_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
     decay_params = []
     nodecay_params = []
     for name, param in policy_model.named_parameters():
@@ -583,10 +571,10 @@ Think first about the reasoning process in your mind and then provides the user 
 
     optim_kwargs = {'lr': learning_rate, 'eps': eps, 'betas': betas}
 
-    if optim_type == "AdamW_8bit":
+    if optim_type == "AdamW8bit":
         import bitsandbytes as bnb
 
-        optimizer = bnb.optim.PagedAdamW(optim_groups, **optim_kwargs)
+        optimizer = bnb.optim.AdamW8bit(optim_groups, **optim_kwargs)
     else:
         optimizer = torch.optim.AdamW(optim_groups, **optim_kwargs)
 
@@ -594,7 +582,7 @@ Think first about the reasoning process in your mind and then provides the user 
         optimizer,
         max_lr=learning_rate,
         total_steps=lr_decay_steps,
-        warmup_fraction=0.1,
+        warmup_fraction=100 / lr_decay_steps,
         initial_lr_fraction=0.1,
         final_lr_fraction=0.01,
     )
@@ -611,21 +599,22 @@ Think first about the reasoning process in your mind and then provides the user 
         writer=SummaryWriter(tb_log_dir),
     )
 
-    for epoch in range(1, num_epochs + 1):
-        samples = trainer.generate_samples(
-            decoding_args=decoding_args, system_prompt=system_prompt, group_size=group_size, max_episodes=rollout_size
-        )
+    with torch.autograd.set_detect_anomaly(True):
+        for epoch in range(1, num_epochs + 1):
+            samples = trainer.generate_samples(
+                decoding_args=decoding_args, system_prompt=system_prompt, group_size=group_size, max_episodes=rollout_size
+            )
 
-        trainer.train(
-            samples=samples,
-            num_updates=num_updates,
-            batch_size=batch_size,
-            gradient_accumulate_steps=gradient_accumulation_steps,
-            kl_loss_coef=kl_loss_coef,
-        )
+            trainer.train(
+                samples=samples,
+                num_updates=num_updates,
+                batch_size=batch_size,
+                gradient_accumulate_steps=gradient_accumulation_steps,
+                kl_loss_coef=kl_loss_coef,
+            )
 
-        if epoch > 1 and epoch & checkpoint_interval == 0:
-            trainer.save_checkpoint(f"{checkpoint_dir}/epoch_{epoch}")
+            if epoch > 1 and epoch & checkpoint_interval == 0:
+                trainer.save_checkpoint(f"{checkpoint_dir}/epoch_{epoch}")
 
 
 if __name__ == "__main__":
