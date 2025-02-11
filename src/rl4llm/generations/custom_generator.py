@@ -5,99 +5,52 @@ from typing import Any, Dict, List, Union, Optional
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers.generation.utils import GenerateDecoderOnlyOutput
 
-from rl4llm.types import DecodingConfig, TokenUsage, ChatTurn, EnvAction, EnvState
 
 logger = logging.getLogger(__name__)
 
 
-class LLMGenerator:
+class CustomLLMGenerator:
+    """Custom text generation for LLM"""
 
     def __init__(self, model: PreTrainedModel, tokenizer: PreTrainedTokenizer):
         self.model = model
         self.tokenizer = tokenizer
 
         if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-
-    def generate_actions_for_rl(self, batch_states: List[List[ChatTurn]], **kwargs) -> List[EnvAction]:
-        device = self.model.device
-        if self.model.training:
-            self.model.eval()
-
-        # Prepare batch messages and tokenize
-        batch_messages = []
-        for states in batch_states:
-            batch_messages.append([{'role': t.role, 'content': t.content} for t in states])
-
-        message_prompt = self.tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
-
-        inputs = self.tokenizer(
-            message_prompt,
-            return_tensors='pt',
-            truncation=True,
-            padding=True,
-            padding_side='left',
-            max_length=self.tokenizer.model_max_length,
-        ).to(device)
-
-        input_ids = inputs['input_ids']
-        attention_mask = inputs['attention_mask']
-        batch_size, seq_length = input_ids.shape
-        eos_token_id = self.tokenizer.eos_token_id
-        pad_token_id = self.tokenizer.pad_token_id
-
-        # Call the core generation method
-        temperature = kwargs.get('temperature', 1.0)
-        generated_sequences = self.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=kwargs.get('max_new_tokens', 512),
-            temperature=temperature,
-            top_p=kwargs.get('top_p', 0.95),
-            top_k=kwargs.get('top_k', 0),
-            do_sample=kwargs.get('do_sample', True),
-        )
-
-        # Extract completions and calculate token usage
-        prompt_length = seq_length
-        batch_completion_ids = generated_sequences[:, prompt_length:]
-
-        prompt_tokens_count = (inputs['input_ids'] != pad_token_id).sum(dim=1).cpu().tolist()
-        completion_tokens_count = (batch_completion_ids != pad_token_id).sum(dim=1).cpu().tolist()
-
-        # Create response objects
-        rollouts = []
-        for i in range(batch_size):
-            completion_ids = batch_completion_ids[i].tolist()
-            completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
-
-            rollouts.append(
-                EnvAction(
-                    text=completion_text,
-                    temperature=temperature,
-                    usage=TokenUsage(
-                        prompt_tokens=prompt_tokens_count[i],
-                        completion_tokens=completion_tokens_count[i],
-                        total_tokens=prompt_tokens_count[i] + completion_tokens_count[i],
-                    ),
-                )
-            )
-
-        return rollouts
 
     @torch.no_grad()
     def generate(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        max_new_tokens: int,
-        temperature: float,
-        top_p: float,
-        top_k: int,
-        do_sample: bool,
-    ) -> torch.Tensor:
-        """Core generation method with manual sampling and KV caching."""
+        temperature: torch.Tensor,
+        max_new_tokens: Optional[int] = 4096,
+        do_sample: Optional[bool] = True,
+        top_p: Optional[float] = 1.0,
+        top_k: Optional[int] = 0,
+    ) -> GenerateDecoderOnlyOutput:
+        """Core generation method with manual sampling (group temperatures) and KV caching.
+
+        Args:
+            input_ids (torch.Tensor): a 2D tensor contains prompt tokens.
+            attention_mask (torch.Tensor): a bool tensor for attention tokens.
+            temperature (torch.Tensor): a 1D tensor contains a group of temperatures for the group generation, where each item could have different temperature.
+            max_new_tokens (Optional[int]): maximum number of tokens to generate, default 4096.
+            do_sample (Optional[bool]): sampling tokens, default on.
+            top_p (Optional[float]): sampling top p, default 1.0.
+            top_k (Optional[int]): sampling top p, default 0.
+
+        Returns:
+            GenerateDecoderOnlyOutput: contains the generation sequence (prompt + generated)
+
+        """
+        assert temperature.dim() == 1
+        assert input_ids.size(0) == temperature.size(0)
+
         device = self.model.device
         eos_token_id = self.tokenizer.eos_token_id
         pad_token_id = self.tokenizer.pad_token_id
@@ -136,15 +89,15 @@ class LLMGenerator:
             if not active.any():
                 break
 
-        return generated_sequences
+        return GenerateDecoderOnlyOutput(sequences=generated_sequences)
 
     def _sample_next_token(
-        self, logits: torch.Tensor, temperature: float, top_p: float, top_k: int, do_sample: bool
+        self, logits: torch.Tensor, temperature: torch.Tensor, top_p: float, top_k: int, do_sample: bool
     ) -> torch.Tensor:
         """Apply temperature, top-p/k filtering and sampling."""
         if do_sample:
-            if temperature != 1.0:
-                logits = logits / temperature
+            temperature = temperature.to(logits.device)
+            logits = logits / temperature.unsqueeze(-1)
 
             # Top-k filtering
             if top_k > 0:

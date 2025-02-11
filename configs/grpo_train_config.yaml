@@ -1,0 +1,50 @@
+# RL GRPO config
+model:
+  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  load_in_4bit: false
+  activation_checkpoint: true
+
+datasets: # List of math datasets to load
+  - "gsm"
+  # - "math"
+
+grpo_config:
+  artifacts_path: "./runs/test_run_grpo_qwen2.5-0.5b"
+  seed: 117
+  max_iterations: 10000
+  rollout_size: 1024
+  num_updates: 2
+  batch_size: 8
+  gradient_accumulate_steps: 16
+  gamma: 1.0 # no discount
+  clip_eps: 0.2 # PPO policy clip parameter
+  normalize_group_rewards: true
+  group_size: 16 # GRPO specific
+  kl_loss_coef: 0.02
+  sync_reference_interval: 200
+
+  # for sample generation
+  system_prompt: |
+    Think first about the reasoning process in your mind and then provides the user with the answer
+  max_new_tokens: 1024
+  temperature: 0.9
+  do_sample: true
+  
+
+  # others
+  checkpoint_interval: 100 # every N updates
+
+optimizer:
+  type: AdamW8bit
+  params:
+    lr: 1.0e-6
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 0.001
+
+scheduler:
+  type: "OneCycleLR"
+  params:
+    warmup_fraction: 0.1
+    initial_lr_fraction: 0.1
+    final_lr_fraction: 0.1
