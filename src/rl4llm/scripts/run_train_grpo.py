@@ -1,3 +1,5 @@
+"""Script to run RL GRPO training loop."""
+
 import argparse
 import os
 import sys
@@ -7,17 +9,11 @@ from typing import Dict, Tuple
 import torch
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import OneCycleLR
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel, PreTrainedTokenizer, set_seed
 
 from rl4llm.core.grpo import GRPOConfig, GRPOTrainer
 from rl4llm.data import load_and_combine_datasets
-from rl4llm.utils import load_yaml_config_file, set_seed, setup_logger
+from rl4llm.utils import load_yaml_config_file, setup_logger
 
 
 def parse_args():
@@ -42,6 +38,7 @@ def parse_args():
 def create_optimizer_and_scheduler(
     policy_model: PreTrainedModel, optimizer_config: Dict, scheduler_config: Dict, total_steps: int
 ) -> Tuple[Optimizer, OneCycleLR]:
+    """Creates the optimizer and scheduler from the given configuration."""
 
     optim_type = optimizer_config['type']
     opt_params = optimizer_config['params']
@@ -115,6 +112,7 @@ def create_scheduler(
 
 
 def create_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
+    """Creates the model and tokenizer from the given configuration."""
 
     model_name = model_config['pretrained_model']
     load_in_4bit = model_config['load_in_4bit']
@@ -129,7 +127,7 @@ def create_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> 
         "pretrained_model_name_or_path": model_name,
         "torch_dtype": torch_dtype,
         "use_cache": False,
-        "attn_implementation": "flash_attention_2",
+        # "attn_implementation": "flash_attention_2",
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
     }
@@ -142,11 +140,11 @@ def create_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> 
             bnb_4bit_compute_dtype=torch_dtype,
         )
 
-    policy_model = AutoModelForCausalLM.from_pretrained(**model_args)
+    model = AutoModelForCausalLM.from_pretrained(**model_args)
     if activation_checkpoint:
-        policy_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
-    return policy_model, tokenizer
+    return model, tokenizer
 
 
 def main():
@@ -162,12 +160,14 @@ def main():
 
     train_ds, _ = load_and_combine_datasets(config['datasets'])
 
+    # torch_dtype = torch.bfloat16
+    # device = torch.device("cuda")
     torch_dtype = torch.bfloat16
-    device = torch.device("cuda")
+    device = torch.device("mps")
 
     policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
 
-    # compute the total update steps
+    # compute the total update steps for LR scheduler
     total_steps = int(
         grpo_config.max_iterations * grpo_config.rollout_size / (grpo_config.batch_size * grpo_config.gradient_accumulate_steps)
     )
@@ -187,11 +187,10 @@ def main():
         torch_dtype=torch_dtype,
     )
 
-    trainer.log_config_params(config)
+    trainer._log_hyper_params_to_tensorboard(config)
 
     try:
-        for iter in range(1, trainer.config.max_iterations + 1):
-            trainer.run_one_train_iteration()
+        trainer.train()
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
         sys.exit(0)

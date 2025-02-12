@@ -8,13 +8,14 @@
             "name": "Python Debugger: GRPO Train Script",
             "type": "debugpy",
             "request": "launch",
-            "module": "rl4llm.scripts.run_rl_grpo",
+            "module": "rl4llm.scripts.run_train_grpo",
             "justMyCode": false,
             "env": {
-                "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
-                "HTTPS_PROXY": "http://127.0.0.1:1081",
-                "PYTHONPATH": "/home/michael/projects/rl4llm/src",
+                // "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
+                // "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "HF_TOKEN": "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",
+                "PYTORCH_ENABLE_MPS_FALLBACK": "1",
             },
         },
         {
@@ -25,10 +26,11 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
-                "HTTPS_PROXY": "http://127.0.0.1:1081",
+                // "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
+                // "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "HF_TOKEN": "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",
+                "PYTORCH_ENABLE_MPS_FALLBACK": "1",
             },
         },
     ]

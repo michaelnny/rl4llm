@@ -12,14 +12,14 @@ grpo_config:
   artifacts_path: "./runs/test_run_grpo_qwen2.5-0.5b"
   seed: 117
   max_iterations: 10000
-  rollout_size: 1024
-  num_updates: 2
+  rollout_size: 64
+  num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
   gamma: 1.0 # no discount
   clip_eps: 0.2 # PPO policy clip parameter
   normalize_group_rewards: true
-  group_size: 16 # GRPO specific
+  group_size: 4 # GRPO specific
   kl_loss_coef: 0.02
   sync_reference_interval: 200
 
@@ -29,13 +29,19 @@ grpo_config:
   max_new_tokens: 1024
   temperature: 0.9
   do_sample: true
-  
+  # our enhancements
+  use_group_temperature: false
+  random_start_steps: 10
+  random_start_eps: 0.05
+  random_start_alpha: 0.01
+  explore_init_epsilon: 1.0
+  explore_min_epsilon: 0.1
 
   # others
   checkpoint_interval: 100 # every N updates
 
 optimizer:
-  type: AdamW8bit
+  type: AdamW   # AdamW8bit
   params:
     lr: 1.0e-6
     betas: [0.9, 0.999]
