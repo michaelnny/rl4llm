@@ -1,6 +1,6 @@
 # RL GRPO config
 model:
-  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
   load_in_4bit: false
   activation_checkpoint: true
 
@@ -9,19 +9,19 @@ datasets: # List of math datasets to load
   # - "math"
 
 grpo_config:
-  artifacts_path: "./runs/test_run_grpo_qwen2.5-0.5b"
+  artifacts_path: "./runs/second_run_explore_grpo_qwen2.5-1.5b"
   seed: 117
-  max_iterations: 10000
-  rollout_size: 64
+  max_iterations: 5000
+  rollout_size: 1024
   num_updates: 1
-  batch_size: 8
+  batch_size: 4
   gradient_accumulate_steps: 16
-  gamma: 1.0 # no discount
-  clip_eps: 0.2 # PPO policy clip parameter
+  gamma: 1.0      # no discount
+  clip_eps: 0.2   # PPO policy clip parameter
   normalize_group_rewards: true
-  group_size: 4 # GRPO specific
-  kl_loss_coef: 0.02
-  sync_reference_interval: 200
+  group_size: 8   # GRPO specific
+  kl_loss_coef: 0.04
+  sync_reference_interval: 100
 
   # for sample generation
   system_prompt: |
@@ -30,27 +30,27 @@ grpo_config:
   temperature: 0.9
   do_sample: true
   # our enhancements
-  use_group_temperature: false
-  random_start_steps: 10
-  random_start_eps: 0.05
-  random_start_alpha: 0.01
-  explore_init_epsilon: 1.0
+  group_temperature: true
+  explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
+  explore_decay_steps: 2000
+  random_start_steps: 5
+  random_start_top_k: 50
 
   # others
   checkpoint_interval: 100 # every N updates
 
 optimizer:
-  type: AdamW   # AdamW8bit
+  type: AdamW8bit
   params:
     lr: 1.0e-6
     betas: [0.9, 0.999]
     eps: 1.0e-8
-    weight_decay: 0.001
+    weight_decay: 0.002
 
 scheduler:
   type: "OneCycleLR"
   params:
-    warmup_fraction: 0.1
+    warmup_fraction: 0.01 # 0.1
     initial_lr_fraction: 0.1
     final_lr_fraction: 0.1

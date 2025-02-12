@@ -54,7 +54,7 @@ def create_optimizer_and_scheduler(
     nodecay_params = []
     for name, param in policy_model.named_parameters():
         if param.requires_grad:
-            if any(nd in name for nd in ["bias", "layer_norm.weight", "layernorm.weight", "norm.weight"]):
+            if any(nd in name for nd in ['bias', 'layer_norm.weight', 'layernorm.weight', 'norm.weight']):
                 nodecay_params.append(param)
             else:
                 decay_params.append(param)
@@ -66,7 +66,7 @@ def create_optimizer_and_scheduler(
 
     optim_kwargs = {'lr': lr, 'eps': eps, 'betas': betas}
 
-    if optim_type == "AdamW8bit":
+    if optim_type == 'AdamW8bit':
         import bitsandbytes as bnb
 
         optimizer = bnb.optim.AdamW8bit(optim_groups, **optim_kwargs)
@@ -103,7 +103,7 @@ def create_scheduler(
         optimizer,
         max_lr=max_lr,
         total_steps=int(total_steps),
-        pct_start=warmup_fraction if warmup_fraction * total_steps <= 200 else 200 / total_steps,
+        pct_start=warmup_fraction if warmup_fraction * total_steps <= 100 else 100 / total_steps,
         # pct_start=warmup_fraction,
         div_factor=1 / initial_lr_fraction,
         final_div_factor=1 / (initial_lr_fraction * final_lr_fraction),
@@ -124,25 +124,25 @@ def create_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> 
     assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id > 1
 
     model_args = {
-        "pretrained_model_name_or_path": model_name,
-        "torch_dtype": torch_dtype,
-        "use_cache": False,
-        # "attn_implementation": "flash_attention_2",
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
+        'pretrained_model_name_or_path': model_name,
+        'torch_dtype': torch_dtype,
+        'use_cache': False,
+        'attn_implementation': 'flash_attention_2',
+        'pad_token_id': tokenizer.pad_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
     }
 
     if load_in_4bit:
-        model_args["quantization_config"] = BitsAndBytesConfig(
+        model_args['quantization_config'] = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
+            bnb_4bit_quant_type='nf4',
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch_dtype,
         )
 
     model = AutoModelForCausalLM.from_pretrained(**model_args)
     if activation_checkpoint:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
 
     return model, tokenizer
 
@@ -160,20 +160,21 @@ def main():
 
     train_ds, _ = load_and_combine_datasets(config['datasets'])
 
-    # torch_dtype = torch.bfloat16
-    # device = torch.device("cuda")
     torch_dtype = torch.bfloat16
-    device = torch.device("mps")
+    device = torch.device('cuda')
 
     policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
 
-    # compute the total update steps for LR scheduler
-    total_steps = int(
-        grpo_config.max_iterations * grpo_config.rollout_size / (grpo_config.batch_size * grpo_config.gradient_accumulate_steps)
-    )
+    # # compute the total update steps for LR scheduler
+    # total_steps = int(
+    #     grpo_config.max_iterations * grpo_config.rollout_size / (grpo_config.batch_size * grpo_config.gradient_accumulate_steps)
+    # )
 
     optimizer, scheduler = create_optimizer_and_scheduler(
-        policy_model, optimizer_config=config['optimizer'], scheduler_config=config['scheduler'], total_steps=total_steps
+        policy_model,
+        optimizer_config=config['optimizer'],
+        scheduler_config=config['scheduler'],
+        total_steps=grpo_config.max_iterations,
     )
 
     trainer = GRPOTrainer(
@@ -187,10 +188,8 @@ def main():
         torch_dtype=torch_dtype,
     )
 
-    trainer._log_hyper_params_to_tensorboard(config)
-
     try:
-        trainer.train()
+        trainer.train(hyper_params=config)
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
         sys.exit(0)
@@ -202,5 +201,5 @@ def main():
         logger.info('Exiting main program.')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

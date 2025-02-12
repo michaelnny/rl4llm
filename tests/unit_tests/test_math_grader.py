@@ -12,13 +12,11 @@ def numeric_threshold():
 # Test cases for empty or None inputs
 def test_empty_inputs():
     """Test behavior with empty or None inputs"""
-    score, extracted = math_problem_grader('', '42')
+    score = math_problem_grader('', '42')
     assert score == 0.0
-    assert extracted is None
 
-    score, extracted = math_problem_grader('some answer', '')
+    score = math_problem_grader('some answer', '')
     assert score == 0.0
-    assert extracted is None
 
 
 # Test cases for boxed answers
@@ -42,7 +40,7 @@ def test_empty_inputs():
 )
 def test_boxed_answers(answer, ground_truth, expected_score):
     """Test extraction and grading of boxed answers"""
-    score, extracted = math_problem_grader(answer, ground_truth)
+    score = math_problem_grader(answer, ground_truth)
     assert score == expected_score
 
 
@@ -72,7 +70,7 @@ def test_boxed_answers(answer, ground_truth, expected_score):
 )
 def test_complex_latex_answers(answer, ground_truth, expected_score):
     """Test extraction and grading of LaTeX answers"""
-    score, extracted = math_problem_grader(answer, ground_truth)
+    score = math_problem_grader(answer, ground_truth)
     assert score == expected_score
 
 
@@ -82,19 +80,19 @@ def test_complex_latex_answers(answer, ground_truth, expected_score):
     [
         ('Therefore, the final answer is $25. This solution is sound and clear to understand for 4 and 5', '25', 1.0),
         ('So, the final answer is 456, it is not 245 or 311.', '456', 1.0),
-        ("The answer is: 123,456.78", "123,456.78", 1.0),
-        ("The answer is: 456\tand more text", "456", 1.0),
-        ("The answer is: 456\nand more text", "456", 1.0),
-        ("The answer is: 456.", "456", 1.0),
-        ("The answer is: $456", "456", 1.0),
-        ("The answer is: 456%", "456%", 1.0),
-        ("The answer is: 456\tand more text", "444", 0.0),
-        ("The answer is: 456\nand more text", "333", 0.0),
+        ('The answer is: 123,456.78', '123,456.78', 1.0),
+        ('The answer is: 456\tand more text', '456', 1.0),
+        ('The answer is: 456\nand more text', '456', 1.0),
+        ('The answer is: 456.', '456', 1.0),
+        ('The answer is: $456', '456', 1.0),
+        ('The answer is: 456%', '456%', 1.0),
+        ('The answer is: 456\tand more text', '444', 0.0),
+        ('The answer is: 456\nand more text', '333', 0.0),
     ],
 )
 def test_pattern_answers(answer, ground_truth, expected_score):
     """Test extraction and grading of patterned answers"""
-    score, extracted = math_problem_grader(answer, ground_truth)
+    score = math_problem_grader(answer, ground_truth)
     assert score == expected_score
 
 
@@ -122,5 +120,5 @@ def test_pattern_answers(answer, ground_truth, expected_score):
 )
 def test_last_numbers(answer, ground_truth, expected_score, last_n):
     """Test extraction and grading of last numbers in text"""
-    score, extracted = math_problem_grader(answer, ground_truth, last_n=last_n)
+    score = math_problem_grader(answer, ground_truth, last_n=last_n)
     assert score == expected_score

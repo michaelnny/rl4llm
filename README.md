@@ -1,3 +1,54 @@
+
+Preparation
+
+```bash
+
+# Install CUDA Toolkit and MPICH for deepspeed
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+sudo apt-get -y install cuda-toolkit-12-4 libmpich-dev
+
+
+# Install packages
+cd /project/rl4llm
+
+pip install -r requirements.txt
+
+```
+
+
+
+Start training job
+
+```bash
+
+PYTHONPATH=src python -m rl4llm.scripts.run_train_grpo
+
+```
+
+
+To monitoring the job, open tensorboard
+
+```bash
+
+tensorboard --logdir ./rl4llm/runs --bind_all --samples_per_plugin=text=1000
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ```bash
 
 # Login to remote server
@@ -53,27 +104,4 @@ pkill -f "src/rl4llm/scripts/run_train"
 
 pkill -f "python"
 
-```
-
-To monitoring the job, open tensorboard
-
-```bash
-
-rsync -avz -e "ssh -p 37172" --exclude='.pt' --exclude='checkpoints' root@86.57.175.52:/project/rl4llm/runs ./rl4llm
-
-
-tensorboard --logdir ./rl4llm/runs --samples_per_plugin=text=1000
-
-```
-
-
-
-
-
-
-
-
-
-```bash
-PYTHONPATH=src python -m rl4llm.scripts.run_rl_grpo
 ```
