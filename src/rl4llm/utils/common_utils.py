@@ -3,12 +3,12 @@ import gzip
 import json
 import logging
 import math
-from datetime import datetime
 import os
 import random
 import shutil
 import time
 from collections import defaultdict
+from datetime import datetime
 from difflib import SequenceMatcher
 from threading import Lock
 from typing import Dict, List, Tuple
@@ -16,7 +16,6 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 import yaml
-
 
 logger = logging.getLogger()
 
@@ -258,25 +257,3 @@ def clean_up_gpu_memory():
     """Clean up GPU memory"""
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
-
-class Timer:
-    """Context manager to measure elapsed"""
-
-    def __init__(self):
-        self.start_time = None
-        self.end_time = None
-        self.elapsed_time = None
-
-    def __enter__(self):
-        self.start_time = time.time()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.end_time = time.time()
-        self.elapsed_time = self.end_time - self.start_time
-
-    def get_elapsed_time(self):
-        if self.elapsed_time is None:
-            raise RuntimeError('Timer has not been stopped yet')
-        return self.elapsed_time

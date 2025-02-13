@@ -1,118 +1,28 @@
 """Implements RL GRPO algorithm to train LLM"""
 
 import logging
-import math
 import os
 import random
-from collections import defaultdict
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional
 
-import numpy as np
 import torch
 import yaml
 from datasets import Dataset
-from pydantic import BaseModel, Field, field_validator, model_validator, root_validator
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from transformers import PreTrainedModel, PreTrainedTokenizer, set_seed
+from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.generations import CustomLLMGenerator
 from rl4llm.graders import math_problem_grader
-from rl4llm.utils import Timer
+from rl4llm.utils import MetricsCollector
+
+from .data_types import GRPOConfig, GRPOSample
 
 logger = logging.getLogger(__name__)
-
-
-class GRPOConfig(BaseModel):
-    """GRPO training configuration"""
-
-    """For RL sample generation"""
-    system_prompt: Optional[str] = Field(None, description='System prompt for generation')
-    max_new_tokens: Optional[int] = Field(4096, ge=100, description='Maximum number of new tokens to generate')
-    temperature: Optional[float] = Field(0.9, gt=0.0, le=1.0, description='Sampling temperature for generation')
-    top_k: Optional[int] = Field(0, ge=0, le=50000, description='Sampling top-k for generation')
-    top_p: Optional[float] = Field(1.0, ge=0.0, le=1.0, description='Sampling top-p for generation')
-    do_sample: Optional[bool] = Field(True, description='Enable sampling for generation')
-    group_size: int = Field(8, ge=4, le=256, description='Number of group outcomes for single question')
-
-    # our enhancements to GRPO to encourage exploration
-    group_temperature: Optional[bool] = Field(False, description='Use group temperatures to sample tokens during generation')
-    explore_init_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Initial exploration epsilon')
-    explore_min_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Minimum exploration epsilon after decay')
-    explore_decay_steps: Optional[int] = Field(1000, ge=100, le=1000000, description='Exploration epsilon decay steps')
-    random_start_steps: Optional[int] = Field(
-        30, ge=1, le=128, description='Number of random start steps to randomly sample tokens'
-    )
-    random_start_top_k: Optional[int] = Field(200, ge=10, le=5000, description='Number of top-k to sample during random start')
-
-    """For RL GRPO training"""
-    max_iterations: int = Field(10000, ge=1, description='How long to run the training')
-    rollout_size: int = Field(1024, ge=1, le=5120, description='Number of samples to collect before update policy')
-    num_updates: int = Field(1, ge=1, le=4, description='GRPO update epochs for a collection of samples')
-    batch_size: int = Field(1, ge=1, le=256, description='Mini-batch size')
-    gradient_accumulate_steps: int = Field(1, ge=1, le=32, description='Gradient accumulation steps')
-    clip_eps: float = Field(0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon')
-    gamma: float = Field(1.0, ge=0.0, le=1.0, description='Fallback default discount factor for compute returns')
-    normalize_group_rewards: bool = Field(True, description='Normalized group rewards')
-    kl_loss_coef: float = Field(0.01, ge=0.0, le=1.0, description='KL penalty loss coefficient')
-    sync_reference_interval: int = Field(
-        0, ge=10, le=1000, description='Interval to update reference model using latest policy'
-    )
-
-    """Other configs"""
-    seed: int = Field(167, ge=1, description='Runtime seed')
-    checkpoint_interval: int = Field(0, ge=0, le=100, description='Interval to save policy model checkpoint')
-    artifacts_path: str = Field(None, description='Path to save artifacts like checkpoints, tensorboard logs')
-
-
-class SampleData(BaseModel):
-    """GPPO transition for training"""
-
-    states: torch.LongTensor = Field(..., description='A long tensor for token sequences from t=0, 1, ..., T-1')
-    actions: torch.LongTensor = Field(..., description='A long tensor for token sequences from t=1, 2, ..., T-1, T')
-    loss_mask: torch.BoolTensor = Field(
-        ...,
-        description='A boolean tensor (0s user tokens, 1s assistant tokens) corresponding to token sequences from t=1, 2, ..., T-1, T',
-    )
-    pi_logprobs: torch.Tensor = Field(
-        ..., description='A float tensor for action logprobs corresponding to token sequences from t=1, 2, ..., T-1, T'
-    )
-    ref_logprobs: torch.Tensor = Field(
-        ...,
-        description='A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T',
-    )
-    advantages: torch.Tensor = Field(
-        ..., description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T'
-    )
-
-    reward: torch.Tensor = Field(..., description='A scalar reward corresponding to terminal time step t=T')
-    completion_length: Optional[torch.Tensor] = Field(None, description='A integer to indicate completion sequence length')
-
-    @model_validator(mode='after')
-    def check_tensor_shapes(cls, values):
-        tensors = [
-            values.states,
-            values.actions,
-            values.loss_mask,
-            values.pi_logprobs,
-            values.ref_logprobs,
-            values.advantages,
-        ]
-
-        # Ensure all tensors are of the same shape
-        tensor_shapes = [tensor.shape if isinstance(tensor, torch.Tensor) else None for tensor in tensors]
-
-        if len(set(tensor_shapes)) > 1:
-            raise ValueError(f"Tensors have mismatched shapes: {tensor_shapes}")
-
-        return values
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class GRPOTrainer:
@@ -130,40 +40,45 @@ class GRPOTrainer:
         torch_dtype: torch.dtype,
     ):
         self.config = config
-
-        self.tb_log_dir = os.path.join(self.config.artifacts_path, 'tb_logs')
-        self.checkpoint_dir = os.path.join(self.config.artifacts_path, 'checkpoints')
-        for _path in [self.tb_log_dir, self.checkpoint_dir]:
-            if not os.path.exists(_path):
-                os.makedirs(_path, exist_ok=True)
-
-        set_seed(self.config.seed)
-
-        logger.info(f"Artifacts will be saved at: {self.config.artifacts_path}")
-
+        self._setup_directories()
         self.device = device
         self.torch_dtype = torch_dtype
-        self.policy_model = policy_model
+        self.policy_model = policy_model.to(device)
         self.reference_model = self._create_reference_model()
-        self.policy_model.to(self.device)
-        self.reference_model.to(self.device)
+        self.reference_model.to(device)
 
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.tokenizer = tokenizer
-        self.writer = SummaryWriter(self.tb_log_dir)
-        self.train_ds = train_ds
+
+        self.train_ds = train_ds.shuffle(seed=None)
+        self.train_iter = iter(self.train_ds)
 
         self.llm_generator = CustomLLMGenerator(self.policy_model)
 
+        # Special tokens
         self.pad_token_id = self.tokenizer.pad_token_id
         self.bos_token_id = self.tokenizer.bos_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
-        # self.stop_tokens = [self.tokenizer.eos_token, self.tokenizer.pad_token]
 
+        self.writer = SummaryWriter(self.tb_log_dir)
+        self.metrics = MetricsCollector()
+        self._initialize_counters()
+
+    def _setup_directories(self):
+        """Setup logging and checkpoint directories"""
+        self.tb_log_dir = os.path.join(self.config.artifacts_path, 'tb_logs')
+        self.checkpoint_dir = os.path.join(self.config.artifacts_path, 'checkpoints')
+
+        for path in [self.tb_log_dir, self.checkpoint_dir]:
+            os.makedirs(path, exist_ok=True)
+
+        logger.info(f"Artifacts will be saved at: {self.config.artifacts_path}")
+
+    def _initialize_counters(self):
+        """Initialize training progress counters"""
         self.generation_mode = False
         self.explore_epsilon = 0
-
         self.episode_count = 0
         self.update_count = 0
         self.iteration_count = 0
@@ -171,8 +86,8 @@ class GRPOTrainer:
 
     def _get_exploration_epsilon(self) -> float:
         """Computes exploration epsilon based on the current iteration step count."""
-        if self.iteration_count <= 0:
-            self.explore_epsilon = self.config.explore_init_epsilon
+        if self.config.explore_decay_steps == 0 or self.config.explore_init_epsilon == 0:
+            return 0.0
         else:
             # Calculate the decay rate
             decay_rate = (self.config.explore_init_epsilon - self.config.explore_min_epsilon) / self.config.explore_decay_steps
@@ -190,6 +105,56 @@ class GRPOTrainer:
             param.requires_grad = False
         ref_model = ref_model.eval()
         return ref_model
+
+    def _get_next_data_item(self) -> Dict:
+        """Fetches the next data item from the iterator, handles epoch reset."""
+        try:
+            item = next(self.train_iter)
+            return item
+        except StopIteration:
+            # Epoch finished! Reshuffle and recreate the iterator
+            self.train_ds = self.train_ds.shuffle(seed=None)
+            self.train_iter = iter(self.train_ds)
+            item = next(self.train_iter)  # Get the first item of the new epoch
+            return item
+
+    def train(self, hyper_params: Optional[Dict] = None):
+        """Train the model using RL GRPO"""
+
+        # log the params we use for this training run
+        if hyper_params:
+            self._log_hyper_params_to_tensorboard(hyper_params)
+
+        for _ in tqdm(range(self.config.max_iterations), desc='Training iterations'):
+            self.run_one_train_iteration()
+
+    def run_one_train_iteration(self) -> None:
+        """
+        Runs one iteration of the RL GRPO algorithm.
+
+        This method performs the following steps:
+        1. Samples a batch of data from the training dataset.
+        2. For each data point, generates a group of outcomes using the current policy.
+        3. Computes the reward for each outcome using a verifier function.
+        4. Updates the policy model using the collected samples.
+        5. Logs the iteration statistics.
+        6. Handles any post-training operations. Include checkpoint and optionally updates the reference policy.
+        """
+
+        self.metrics.reset()
+
+        with self.metrics.timer('step'):
+            samples = self.generate_samples()
+            with torch.autograd.set_detect_anomaly(True):
+                self.train_policy(samples)
+
+        self.iteration_count += 1
+
+        # Log all metrics
+        metrics_summary = self.metrics.get_summary()
+        self._log_stats_to_tensorboard(metrics_summary, self.iteration_count)
+
+        self._handle_post_train()
 
     @contextmanager
     def generation_context(self):
@@ -287,7 +252,7 @@ class GRPOTrainer:
         return torch.cat(sample_logprobs, dim=0)
 
     @torch.no_grad()
-    def generate_group_samples(self, question: str, ground_truth: str) -> List[SampleData]:
+    def generate_group_samples(self, question: str, ground_truth: str) -> List[GRPOSample]:
         """Generate responses for given question and ground truth answer
 
         Args:
@@ -419,26 +384,151 @@ class GRPOTrainer:
             # old_returns = loss_mask[i, :cut_position].float() * normalized_rewards[i]
             # torch.testing.assert_close(returns.float(), old_returns.float())
 
-            sample = SampleData(
+            sample = GRPOSample(
                 states=states[i, :cut_position].cpu(),
                 actions=actions[i, :cut_position].cpu(),
                 loss_mask=loss_mask[i, :cut_position].cpu(),
-                reward=rewards[i],
+                reward=rewards[i].cpu(),
                 advantages=returns.cpu(),
                 pi_logprobs=pi_logprobs[i, :cut_position].cpu(),
                 ref_logprobs=ref_logprobs[i, :cut_position].cpu(),
-                completion_length=completion_tokens_count[i].cpu(),
             )
 
             results.append(sample)
             self.episode_count += 1
 
-        # Randomly sample 2 items for logging
-        sampled_indices = random.sample(range(len(completion_texts)), 2)
+            self.metrics.add_metric('objective/reward', rewards[i].item())
+            self.metrics.add_metric('objective/completion_length', completion_tokens_count[i].item())
+
+        # Randomly sample 1 items for logging
+        sampled_indices = random.sample(range(len(completion_texts)), 1)
         for i in sampled_indices:
             self._log_sample_to_tensorboard(question, ground_truth, completion_texts[i], rewards[i].item())
 
         return results
+
+    def generate_samples(
+        self,
+    ) -> List[GRPOSample]:
+        """Generates samples using the current policy."""
+
+        with self.generation_context():
+            assert not self.policy_model.training
+            assert not self.reference_model.training
+            collected_samples: List[GRPOSample] = []
+
+            with self.metrics.timer('generation'):
+                while len(collected_samples) < self.config.rollout_size:
+                    item = self._get_next_data_item()
+                    assert 'question' in item and 'ground_truth' in item
+
+                    samples = self.generate_group_samples(item['question'], item['ground_truth'])
+
+                    collected_samples.extend(samples)
+
+            self.metrics.add_metric('elapsed/generation_episodes', self.episode_count)
+            self.metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
+
+            return collected_samples
+
+    def train_policy(self, samples: List[GRPOSample]) -> None:
+        random.shuffle(samples)
+
+        _collate_fn = partial(self._collate_function, pad_token_id=self.pad_token_id, torch_dtype=self.torch_dtype)
+
+        data_loader = DataLoader(
+            samples,
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            pin_memory=self.device.type == 'cuda',
+            collate_fn=_collate_fn,
+            drop_last=True,
+        )
+
+        self.optimizer.zero_grad()
+
+        assert self.policy_model.training
+
+        mini_steps = 0
+        mini_batch: GRPOSample = None
+
+        with self.metrics.timer('train'):
+            for _ in range(self.config.num_updates):
+                for mini_batch in data_loader:
+                    states = mini_batch.states.to(self.device)
+                    actions = mini_batch.actions.to(self.device)
+                    # correctness = mini_batch.reward.bool().to(self.device)
+
+                    pi_logprobs = self._compute_action_logprobs(self.policy_model, states, actions)
+
+                    behavior_logprobs = mini_batch.pi_logprobs.to(self.device)
+                    advantages = mini_batch.advantages.to(self.device)
+                    loss_mask = mini_batch.loss_mask.to(self.device)
+                    ref_logprobs = mini_batch.ref_logprobs.to(self.device)
+                    # Compute the KL divergence between the model and the reference model
+                    per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+
+                    # PPO clipped surrogate PG loss
+                    ratio = torch.exp(pi_logprobs - behavior_logprobs)
+                    clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
+                    pg_losses = torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
+
+                    pg_loss = pg_losses[loss_mask].mean()
+                    kl_loss = self.config.kl_loss_coef * per_token_kl[loss_mask].mean()
+                    loss = -pg_loss + kl_loss
+
+                    if self.config.gradient_accumulate_steps > 1:
+                        loss /= self.config.gradient_accumulate_steps
+
+                    loss.backward()
+
+                    # Record training metrics
+                    self.metrics.add_metric('train/total_loss', loss.detach().item())
+                    self.metrics.add_metric('train/pg_loss', pg_loss.detach().item())
+                    self.metrics.add_metric('train/kl_loss', kl_loss.detach().item())
+                    self.metrics.add_metric('train/kl', per_token_kl[loss_mask].detach().sum(-1).mean().item())
+
+                    mini_steps += 1
+
+                    if mini_steps % self.config.gradient_accumulate_steps == 0:
+                        self.optimizer.step()
+                        # self.scheduler.step()
+                        self.optimizer.zero_grad()
+                        self.update_count += 1
+                        mini_steps = 0
+
+        self.scheduler.step()
+
+        self.metrics.add_metric('elapsed/policy_update', self.update_count)
+        self.metrics.add_metric('elapsed/reference_update', self.ref_update_count)
+        self.metrics.add_metric('train/learning_rate', self.optimizer.param_groups[0]['lr'])
+
+    def save_checkpoint(self, save_dir: str):
+        """Save policy model checkpoint following HF conventions"""
+        self.policy_model.save_pretrained(save_dir)
+
+    def _handle_post_train(self):
+        """Handle post-training operations"""
+        if self.iteration_count < 1:
+            return
+
+        if self.iteration_count % self.config.sync_reference_interval == 0:
+            logger.info('Updating reference model...')
+            self._sync_reference_model()
+
+        if self.iteration_count % self.config.checkpoint_interval == 0:
+            logger.info('Saving policy model checkpoint...')
+            save_dir = os.path.join(self.checkpoint_dir, f"iteration_{self.iteration_count}")
+            self.save_checkpoint(save_dir)
+
+    def _sync_reference_model(self):
+        """Sync reference model by copying latest policy model weights"""
+        self.reference_model.load_state_dict(self.policy_model.state_dict())
+        for param in self.reference_model.parameters():
+            param.requires_grad = False
+        self.reference_model = self.reference_model.eval()
+        self.ref_update_count += 1
+        torch.cuda.empty_cache()
 
     @staticmethod
     def compute_masked_monte_carlo_returns(rewards: torch.Tensor, mask: torch.Tensor, gamma: float) -> torch.FloatTensor:
@@ -497,199 +587,8 @@ class GRPOTrainer:
         normalized_rewards = (rewards - mean_reward) / (std_reward + 1e-8)  # Add small value to avoid division by zero
         return normalized_rewards
 
-    def train(self, hyper_params: Optional[Dict] = None):
-        """Train the model using RL GRPO"""
-
-        # log the params we use for this training run
-        if hyper_params:
-            self._log_hyper_params_to_tensorboard(hyper_params)
-
-        for _ in tqdm(range(self.config.max_iterations), desc='Training iterations'):
-            self.run_one_train_iteration()
-
-    def run_one_train_iteration(self) -> None:
-        """
-        Runs one iteration of the RL GRPO algorithm.
-
-        This method performs the following steps:
-        1. Samples a batch of data from the training dataset.
-        2. For each data point, generates a group of outcomes using the current policy.
-        3. Computes the reward for each outcome using a verifier function.
-        4. Updates the policy model using the collected samples.
-        5. Logs the iteration statistics.
-        6. Handles any post-training operations. Include checkpoint and optionally updates the reference policy.
-        """
-
-        samples, generation_stats = self.generate_samples()
-        with torch.autograd.set_detect_anomaly(True):
-            train_stats = self.train_policy(samples)
-        self.iteration_count += 1
-        stats = {
-            **generation_stats,
-            **train_stats,
-        }
-
-        self._log_stats_to_tensorboard(stats, self.iteration_count)
-
-        self._handle_post_train()
-
-    def generate_samples(
-        self,
-    ) -> Tuple[List[SampleData], Dict]:
-        """Generates samples using the current policy."""
-
-        with self.generation_context():
-            assert not self.policy_model.training
-            assert not self.reference_model.training
-
-            collected_samples: List[SampleData] = []
-            with Timer() as timer:
-                # Create the iterator once outside the loop
-                data_iter = iter(self.train_ds)
-                while len(collected_samples) < self.config.rollout_size:
-                    try:
-                        item = next(data_iter)  # Fetch the next batch
-                    except StopIteration:
-                        # Restart the iterator if all data is exhausted
-                        self.train_ds = self.train_ds.shuffle(seed=None)
-                        data_iter = iter(self.train_ds)
-                        item = next(data_iter)
-
-                    assert 'question' in item and 'ground_truth' in item
-
-                    samples = self.generate_group_samples(item['question'], item['ground_truth'])
-
-                    collected_samples.extend(samples)
-
-            elapsed_time = timer.get_elapsed_time()
-
-            rollout_rewards = torch.stack([d.reward for d in collected_samples]).float()
-            rollout_completion_lengths = torch.stack([d.completion_length for d in collected_samples]).float()
-            stats = {
-                'elapsed/generation_time': elapsed_time,
-                'elapsed/time_per_episode': len(collected_samples) / elapsed_time,
-                'elapsed/generation_episodes': self.episode_count,
-                'elapsed/explore_epsilon': self.explore_epsilon,
-                'objective/reward': rollout_rewards.mean().item(),
-                'objective/reward_std': rollout_rewards.std().item(),
-                'objective/completion_length': rollout_completion_lengths.mean().item(),
-                'objective/completion_length_std': rollout_completion_lengths.std().item(),
-            }
-        return collected_samples, stats
-
-    def train_policy(self, samples: List[SampleData]) -> Dict:
-        random.shuffle(samples)
-
-        _collate_fn = partial(self._collate_function, pad_token_id=self.pad_token_id, torch_dtype=self.torch_dtype)
-
-        data_loader = DataLoader(
-            samples,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            pin_memory=self.device.type == 'cuda',
-            collate_fn=_collate_fn,
-            drop_last=True,
-        )
-
-        total_steps = math.ceil(
-            self.config.num_updates * len(samples) / (self.config.batch_size * self.config.gradient_accumulate_steps)
-        )
-
-        accumulated_stats = defaultdict(list)
-        self.optimizer.zero_grad()
-
-        assert self.policy_model.training
-
-        mini_steps = 0
-        mini_batch: SampleData = None
-
-        with Timer() as timer:
-            for _ in range(self.config.num_updates):
-                for mini_batch in data_loader:
-                    states = mini_batch.states.to(self.device)
-                    actions = mini_batch.actions.to(self.device)
-
-                    pi_logprobs = self._compute_action_logprobs(self.policy_model, states, actions)
-
-                    behavior_logprobs = mini_batch.pi_logprobs.to(self.device)
-                    advantages = mini_batch.advantages.to(self.device)
-                    loss_mask = mini_batch.loss_mask.to(self.device)
-                    ref_logprobs = mini_batch.ref_logprobs.to(self.device)
-                    # Compute the KL divergence between the model and the reference model
-                    per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
-
-                    # PPO clipped surrogate PG loss
-                    ratio = torch.exp(pi_logprobs - behavior_logprobs)
-                    clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
-                    pg_losses = torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
-
-                    pg_loss = pg_losses[loss_mask].mean()
-                    kl_loss = self.config.kl_loss_coef * per_token_kl[loss_mask].mean()
-                    loss = -pg_loss + kl_loss
-
-                    if self.config.gradient_accumulate_steps > 0:
-                        loss /= self.config.gradient_accumulate_steps
-
-                    loss.backward()
-
-                    accumulated_stats['train/total_loss'].append(loss.detach().item())
-                    accumulated_stats['train/pg_loss'].append(pg_loss.detach().item())
-                    accumulated_stats['train/kl_loss'].append(kl_loss.detach().item())
-                    accumulated_stats['train/kl'].append(per_token_kl[loss_mask].detach().sum(-1).mean().item())
-
-                    mini_steps += 1
-
-                    if mini_steps % self.config.gradient_accumulate_steps == 0:
-                        self.optimizer.step()
-                        # self.scheduler.step()
-                        self.optimizer.zero_grad()
-                        self.update_count += 1
-                        mini_steps = 0
-
-        self.scheduler.step()
-
-        elapsed_time = timer.get_elapsed_time()
-
-        stats = {
-            'elapsed/train_time': elapsed_time,
-            'elapsed/train_updates': self.update_count,
-            'elapsed/time_per_update': total_steps / elapsed_time,
-            'train/learning_rate': self.optimizer.param_groups[0]['lr'],
-        }
-
-        for k in accumulated_stats:
-            stats[k] = np.mean(accumulated_stats[k]).item()
-
-        return stats
-
-    def save_checkpoint(self, save_dir: str):
-        """Save policy model checkpoint following HF conventions"""
-        self.policy_model.save_pretrained(save_dir)
-
-    def _handle_post_train(self):
-        """Handle post-training operations"""
-        if self.iteration_count < 1:
-            return
-
-        if self.iteration_count % self.config.sync_reference_interval == 0:
-            logger.info('Updating reference model...')
-            self._sync_reference_model()
-
-        if self.iteration_count % self.config.checkpoint_interval == 0:
-            logger.info('Saving policy model checkpoint...')
-            save_dir = os.path.join(self.checkpoint_dir, f"iteration_{self.iteration_count}")
-            self.save_checkpoint(save_dir)
-
-    def _sync_reference_model(self):
-        """Sync reference model by copying latest policy model weights"""
-        self.reference_model.load_state_dict(self.policy_model.state_dict())
-        for param in self.reference_model.parameters():
-            param.requires_grad = False
-        self.reference_model = self.reference_model.eval()
-        self.ref_update_count += 1
-        torch.cuda.empty_cache()
-
-    def _collate_function(self, batch: List[SampleData], pad_token_id: int, torch_dtype: torch.dtype) -> SampleData:
+    @staticmethod
+    def _collate_function(batch: List[GRPOSample], pad_token_id: int, torch_dtype: torch.dtype) -> GRPOSample:
         """Collate function for DataLoader during training"""
         batch_size = len(batch)
         max_seq_len = max([len(item.states) for item in batch])
@@ -706,13 +605,13 @@ class GRPOTrainer:
             seq_len = len(item.states)
             batch_state_ids[i, :seq_len] = item.states.to(dtype=torch.long)
             batch_action_ids[i, :seq_len] = item.actions.to(dtype=torch.long)
-            batch_advantages[i, :seq_len] = item.advantages.to(dtype=self.torch_dtype)
-            batch_pi_logprobs[i, :seq_len] = item.pi_logprobs.to(dtype=self.torch_dtype)
-            batch_ref_logprobs[i, :seq_len] = item.ref_logprobs.to(dtype=self.torch_dtype)
+            batch_advantages[i, :seq_len] = item.advantages.to(dtype=torch_dtype)
+            batch_pi_logprobs[i, :seq_len] = item.pi_logprobs.to(dtype=torch_dtype)
+            batch_ref_logprobs[i, :seq_len] = item.ref_logprobs.to(dtype=torch_dtype)
             batch_loss_mask[i, :seq_len] = item.loss_mask.to(dtype=torch.bool)
             batch_reward[i] = item.reward
 
-        return SampleData(
+        return GRPOSample(
             states=batch_state_ids,
             actions=batch_action_ids,
             advantages=batch_advantages,

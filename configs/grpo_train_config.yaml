@@ -1,6 +1,6 @@
 # RL GRPO config
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
   load_in_4bit: false
   activation_checkpoint: true
 
@@ -9,32 +9,34 @@ datasets: # List of math datasets to load
   # - "math"
 
 grpo_config:
-  artifacts_path: "./runs/second_run_explore_grpo_qwen2.5-1.5b"
+  artifacts_path: "./runs/grpo_qwen2.5_0.5b_2nd_run"
   seed: 117
-  max_iterations: 5000
-  rollout_size: 1024
+  max_iterations: 2000
+  rollout_size: 2048
   num_updates: 1
-  batch_size: 4
+  batch_size: 8
   gradient_accumulate_steps: 16
   gamma: 1.0      # no discount
   clip_eps: 0.2   # PPO policy clip parameter
   normalize_group_rewards: true
-  group_size: 8   # GRPO specific
+  group_size: 16   # GRPO specific
   kl_loss_coef: 0.04
   sync_reference_interval: 100
 
   # for sample generation
   system_prompt: |
-    Think first about the reasoning process in your mind and then provides the user with the answer
+    Think first about the reasoning process in your mind and then provides the user with the answer. Reflect on your thoughts to further improve your reasoning.
   max_new_tokens: 1024
   temperature: 0.9
   do_sample: true
   # our enhancements
+  # group temperature where some are more 'exploitive'
   group_temperature: true
-  explore_init_epsilon: 0.9
+  # random start exploration
+  explore_init_epsilon: 0.6
   explore_min_epsilon: 0.1
-  explore_decay_steps: 2000
-  random_start_steps: 5
+  explore_decay_steps: 1000
+  random_start_steps: 3
   random_start_top_k: 50
 
   # others
@@ -51,6 +53,6 @@ optimizer:
 scheduler:
   type: "OneCycleLR"
   params:
-    warmup_fraction: 0.01 # 0.1
+    warmup_fraction: 0.02 # 0.1
     initial_lr_fraction: 0.1
     final_lr_fraction: 0.1
