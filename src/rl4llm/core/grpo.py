@@ -21,6 +21,7 @@ from rl4llm.graders import math_problem_grader
 from rl4llm.utils import MetricsCollector
 
 from .data_types import GRPOConfig, GRPOSample
+from .helper import masked_whiten
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +337,10 @@ class GRPOTrainer:
             [math_problem_grader(completion, ground_truth) for completion in completion_texts], dtype=self.torch_dtype
         )
 
+        if self.config.zero_based_reward:
+            # now we use 0 for correct answer, -1 for incorrect answer
+            rewards = rewards - 1.0
+
         # Normalize rewards
         if self.config.normalize_group_rewards:
             normalized_rewards = self.normalize_group_rewards(rewards)
@@ -467,6 +472,9 @@ class GRPOTrainer:
                     ref_logprobs = mini_batch.ref_logprobs.to(self.device)
                     # Compute the KL divergence between the model and the reference model
                     per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+
+                    if self.config.normalize_advantages:
+                        advantages = masked_whiten(advantages, loss_mask)
 
                     # PPO clipped surrogate PG loss
                     ratio = torch.exp(pi_logprobs - behavior_logprobs)

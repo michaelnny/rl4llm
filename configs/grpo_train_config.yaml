@@ -9,23 +9,26 @@ datasets: # List of math datasets to load
   # - "math"
 
 grpo_config:
-  artifacts_path: "./runs/grpo_qwen2.5_0.5b_2nd_run"
+  artifacts_path: "./runs/grpo_qwen2.5_0.5b_1st_run"
   seed: 117
   max_iterations: 2000
   rollout_size: 2048
   num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
-  gamma: 1.0      # no discount
-  clip_eps: 0.2   # PPO policy clip parameter
-  normalize_group_rewards: true
-  group_size: 16   # GRPO specific
+  gamma: 1.0                        # no discount
+  clip_eps: 0.2                     # PPO policy clip parameter
+  zero_based_reward: false          # use 0 for correct answer, -1 for incorrect answer
+  normalize_group_rewards: false    # no need to normalize for binary rewards
+  normalize_advantages: true
+  group_size: 16                    # GRPO specific
   kl_loss_coef: 0.04
-  sync_reference_interval: 100
+  sync_reference_interval: 100      # every N iteration
 
   # for sample generation
   system_prompt: |
-    Think first about the reasoning process in your mind and then provides the user with the answer. Reflect on your thoughts to further improve your reasoning.
+    Before generating a solution, engage in a deliberate and thorough thinking process.
+    Explore those "Wait", "Aha", "Hmm" moments and demonstrate self-reflection by reviewing your thinking and refining your approach as needed.
   max_new_tokens: 1024
   temperature: 0.9
   do_sample: true
@@ -33,14 +36,14 @@ grpo_config:
   # group temperature where some are more 'exploitive'
   group_temperature: true
   # random start exploration
-  explore_init_epsilon: 0.6
+  explore_init_epsilon: 0.5
   explore_min_epsilon: 0.1
   explore_decay_steps: 1000
   random_start_steps: 3
-  random_start_top_k: 50
+  random_start_top_k: 30
 
   # others
-  checkpoint_interval: 100 # every N updates
+  checkpoint_interval: 100          # every N iteration
 
 optimizer:
   type: AdamW8bit
@@ -53,6 +56,6 @@ optimizer:
 scheduler:
   type: "OneCycleLR"
   params:
-    warmup_fraction: 0.02 # 0.1
+    warmup_fraction: 0.015 # 0.1
     initial_lr_fraction: 0.1
     final_lr_fraction: 0.1

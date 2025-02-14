@@ -5,8 +5,19 @@ import torch
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-class GRPOConfig(BaseModel):
-    """GRPO training configuration"""
+class BasicTrainConfig(BaseModel):
+    """Basic Training Config"""
+
+    seed: int = Field(167, ge=1, description='Runtime seed')
+    checkpoint_interval: int = Field(0, ge=0, le=100, description='Interval to save policy model checkpoint')
+    artifacts_path: str = Field(None, description='Path to save artifacts like checkpoints, tensorboard logs')
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class GRPOConfig(BasicTrainConfig):
+    """GRPO Training Configuration"""
 
     """For RL sample generation"""
     system_prompt: Optional[str] = Field(None, description='System prompt for generation')
@@ -35,16 +46,13 @@ class GRPOConfig(BaseModel):
     gradient_accumulate_steps: int = Field(1, ge=1, le=32, description='Gradient accumulation steps')
     clip_eps: float = Field(0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon')
     gamma: float = Field(1.0, ge=0.0, le=1.0, description='Fallback default discount factor for compute returns')
-    normalize_group_rewards: bool = Field(True, description='Normalized group rewards')
+    zero_based_reward: bool = Field(False, description='Use 0 for correct answer, -1 for incorrect answer')
+    normalize_group_rewards: bool = Field(True, description='Normalized rewards for the group outcomes')
+    normalize_advantages: bool = Field(False, description='Normalized advantages before compute PG loss')
     kl_loss_coef: float = Field(0.01, ge=0.0, le=1.0, description='KL penalty loss coefficient')
     sync_reference_interval: int = Field(
         0, ge=10, le=1000, description='Interval to update reference model using latest policy'
     )
-
-    """Other configs"""
-    seed: int = Field(167, ge=1, description='Runtime seed')
-    checkpoint_interval: int = Field(0, ge=0, le=100, description='Interval to save policy model checkpoint')
-    artifacts_path: str = Field(None, description='Path to save artifacts like checkpoints, tensorboard logs')
 
 
 class GRPOSample(BaseModel):
@@ -66,9 +74,7 @@ class GRPOSample(BaseModel):
     advantages: torch.Tensor = Field(
         ..., description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T'
     )
-
     reward: Optional[torch.Tensor] = Field(..., description='A scalar reward corresponding to terminal time step t=T')
-    # completion_length: Optional[torch.Tensor] = Field(None, description='A integer to indicate completion sequence length')
 
     @model_validator(mode='after')
     def check_tensor_shapes(cls, values):

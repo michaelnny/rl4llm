@@ -1,4 +1,6 @@
 import torch
+from trl import GRPOTrainer
+from vllm import LLM
 
 group_size = 4
 
