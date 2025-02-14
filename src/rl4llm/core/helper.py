@@ -3,6 +3,27 @@ from typing import Optional, Tuple, Union
 import torch
 
 
+def masked_sum(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[int, Tuple]] = None) -> torch.Tensor:
+    assert torch.is_tensor(mask) and mask.dtype == torch.bool
+    assert torch.is_tensor(values) and values.shape == mask.shape
+
+    if dim is not None:
+        return (values * mask).sum(dim=dim, keepdim=True)
+    else:
+        return (values * mask).sum()
+
+
+def masked_mean(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[int, Tuple]] = None) -> torch.Tensor:
+    """Compute mean of tensor with a masked values."""
+    assert torch.is_tensor(mask) and mask.dtype == torch.bool
+    assert torch.is_tensor(values) and values.shape == mask.shape
+
+    if dim is not None:
+        return (values * mask).sum(dim=dim, keepdim=True) / (mask.sum(dim=dim, keepdim=True) + 1e-8)
+    else:
+        return (values * mask).sum() / (mask.sum() + 1e-8)
+
+
 def whiten(values: torch.FloatTensor, shift_mean: bool = True, dim: int = -1) -> torch.Tensor:
     # Compute the mean and variance along the specified dimension
     mean = values.mean(dim=dim, keepdim=True)

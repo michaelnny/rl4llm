@@ -21,7 +21,7 @@ from rl4llm.graders import math_problem_grader
 from rl4llm.utils import MetricsCollector
 
 from .data_types import GRPOConfig, GRPOSample
-from .helper import masked_whiten
+from .helper import masked_sum, masked_whiten
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,6 @@ class GRPOTrainer:
         torch_dtype: torch.dtype,
     ):
         self.config = config
-        self._setup_directories()
         self.device = device
         self.torch_dtype = torch_dtype
         self.policy_model = policy_model.to(device)
@@ -52,21 +51,14 @@ class GRPOTrainer:
         self.scheduler = scheduler
         self.tokenizer = tokenizer
 
+        self.llm_generator = CustomLLMGenerator(self.policy_model)
+
         self.train_ds = train_ds.shuffle(seed=None)
         self.train_iter = iter(self.train_ds)
 
-        self.llm_generator = CustomLLMGenerator(self.policy_model)
+        self._initialize()
 
-        # Special tokens
-        self.pad_token_id = self.tokenizer.pad_token_id
-        self.bos_token_id = self.tokenizer.bos_token_id
-        self.eos_token_id = self.tokenizer.eos_token_id
-
-        self.writer = SummaryWriter(self.tb_log_dir)
-        self.metrics = MetricsCollector()
-        self._initialize_counters()
-
-    def _setup_directories(self):
+    def _initialize(self):
         """Setup logging and checkpoint directories"""
         self.tb_log_dir = os.path.join(self.config.artifacts_path, 'tb_logs')
         self.checkpoint_dir = os.path.join(self.config.artifacts_path, 'checkpoints')
@@ -76,48 +68,20 @@ class GRPOTrainer:
 
         logger.info(f"Artifacts will be saved at: {self.config.artifacts_path}")
 
-    def _initialize_counters(self):
-        """Initialize training progress counters"""
+        self.writer = SummaryWriter(self.tb_log_dir)
+        self.metrics = MetricsCollector()
+
+        # Special tokens
+        self.pad_token_id = self.tokenizer.pad_token_id
+        self.bos_token_id = self.tokenizer.bos_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id
+
         self.generation_mode = False
         self.explore_epsilon = 0
         self.episode_count = 0
         self.update_count = 0
         self.iteration_count = 0
         self.ref_update_count = 0
-
-    def _get_exploration_epsilon(self) -> float:
-        """Computes exploration epsilon based on the current iteration step count."""
-        if self.config.explore_decay_steps == 0 or self.config.explore_init_epsilon == 0:
-            return 0.0
-        else:
-            # Calculate the decay rate
-            decay_rate = (self.config.explore_init_epsilon - self.config.explore_min_epsilon) / self.config.explore_decay_steps
-
-            # Apply decay, ensuring epsilon doesn't go below the minimum
-            self.explore_epsilon = max(
-                self.config.explore_min_epsilon, self.config.explore_init_epsilon - decay_rate * self.iteration_count
-            )
-        return self.explore_epsilon
-
-    def _create_reference_model(self) -> PreTrainedModel:
-        """Create a reference model from the policy model"""
-        ref_model = deepcopy(self.policy_model)
-        for param in ref_model.parameters():
-            param.requires_grad = False
-        ref_model = ref_model.eval()
-        return ref_model
-
-    def _get_next_data_item(self) -> Dict:
-        """Fetches the next data item from the iterator, handles epoch reset."""
-        try:
-            item = next(self.train_iter)
-            return item
-        except StopIteration:
-            # Epoch finished! Reshuffle and recreate the iterator
-            self.train_ds = self.train_ds.shuffle(seed=None)
-            self.train_iter = iter(self.train_ds)
-            item = next(self.train_iter)  # Get the first item of the new epoch
-            return item
 
     def train(self, hyper_params: Optional[Dict] = None):
         """Train the model using RL GRPO"""
@@ -157,6 +121,277 @@ class GRPOTrainer:
 
         self._handle_post_train()
 
+    @torch.no_grad()
+    def generate_group_samples(self, sample: Dict[str, str]) -> List[GRPOSample]:
+        """Generate responses for a batch of questions and ground truth answers
+
+        Args:
+            sample: Dictionary containing 'question' and 'ground_truth'
+
+        Returns:
+            List[Dict]: List of samples for all groups in the batch
+        """
+
+        # Prepare messages for the entire batch
+        question = sample['question']
+        ground_truth = sample['ground_truth']
+        task_type = sample['task_type'].upper()
+
+        if not self.config.system_prompt:
+            sample_message = [{'role': 'user', 'content': question.strip()}]
+        else:
+            sample_message = [
+                {'role': 'system', 'content': self.config.system_prompt.strip()},
+                {'role': 'user', 'content': question.strip()},
+            ]
+        # Expand each question to group_size
+        group_messages = [sample_message for _ in range(self.config.group_size)]
+
+        # Tokenize all messages at once
+        message_prompts = self.tokenizer.apply_chat_template(group_messages, tokenize=False, add_generation_prompt=True)
+
+        inputs = self.tokenizer(
+            message_prompts,
+            return_tensors='pt',
+            truncation=True,
+            padding=True,
+            padding_side='left',
+            max_length=self.tokenizer.model_max_length,
+        ).to(self.device)
+
+        input_ids = inputs.input_ids
+        attention_mask = inputs.attention_mask
+
+        if self.config.group_temperature:
+            # Spread temperature values according to self.config.group_size, where 0.0 means greedy sampling
+            # this idea is similar how we do it in distributed RL training in classical RL
+            # where we have multiple agents running in parallel, some agents are more exploratory than others
+            temperature = torch.linspace(
+                0.0, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
+            )
+            # temperature = (
+            #     torch.pow(torch.linspace(0.0, 1.0, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device), 2)
+            #     * self.config.temperature
+            # )
+        else:
+            # make code compatible
+            temperature = torch.tensor(
+                [self.config.temperature] * self.config.group_size, dtype=self.torch_dtype, device=self.device
+            )
+
+        random_start_steps = 0
+        explore_epsilon = self._get_exploration_epsilon()
+        if explore_epsilon is not None and explore_epsilon > 0 and random.random() < explore_epsilon:
+            random_start_steps = self.config.random_start_steps
+
+        generation_kwargs = {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'eos_token_id': self.eos_token_id,
+            'pad_token_id': self.pad_token_id,
+            # 'temperature': self.config.temperature,
+            'max_new_tokens': self.config.max_new_tokens,
+            'temperature': temperature,
+            'random_start_steps': random_start_steps,
+            'random_start_top_k': self.config.random_start_top_k,
+            # 'top_p': self.config.top_p,
+            # 'top_k': self.config.top_k,
+            'do_sample': True,
+            'use_cache': True,
+            'output_scores': False,
+            'output_logits': False,
+            'return_dict_in_generate': True,
+            'return_legacy_cache': False,
+        }
+
+        outputs = self.llm_generator.generate(**generation_kwargs)
+
+        full_sequences = outputs.sequences
+        prompt_length = input_ids.size(1)
+        completion_ids = full_sequences[:, prompt_length:]
+        completion_tokens_count = (completion_ids != self.pad_token_id).sum(dim=1).cpu()
+        completion_texts = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
+
+        # Compute rewards for group outcomes
+        # TODO: add other grader functions
+        grader_fn = math_problem_grader if task_type.upper() in ['GSM', 'MATH'] else lambda x, y: x.lower() == y.lower()
+        rewards = torch.tensor([grader_fn(completion, ground_truth) for completion in completion_texts], dtype=self.torch_dtype)
+
+        # Normalize rewards
+        if self.config.normalize_group_rewards:
+            normalized_rewards = self.normalize_group_rewards(rewards)
+        else:
+            normalized_rewards = rewards
+
+        states = full_sequences[:, :-1]
+        actions = full_sequences[:, 1:]
+        pi_logprobs = self._compute_action_logprobs(self.policy_model, states, actions).cpu()
+        ref_logprobs = self._compute_action_logprobs(self.reference_model, states, actions).cpu()
+
+        # Do not include the prompt or pad tokens in the loss
+        # for example, if we have a sequence token ids: [1, 2, 3, 4, 5, 6, 7, -1, -1]
+        # where [1, 2, 3, 4] are the prompt tokens
+        # and [5, 6, 7] are the completion tokens
+        # -1 is the pad token
+        # the, the loss mask will be [0, 0, 0, 1, 1, 1, 0, 0, 0]
+        loss_mask = (actions != self.pad_token_id).bool()
+        loss_mask[:, : prompt_length - 1] = 0  # this will exclude prompt tokens up until the first completion token
+
+        # construct a list of samples by trim the sequence to the first EOS token
+        results = []
+        eos_mask = actions == self.eos_token_id
+        eos_mask[:, :prompt_length] = False  # Ignore EOS tokens in the prompt
+
+        # Calculate cut positions starting from completion
+        cut_positions = torch.where(
+            eos_mask.any(dim=1),
+            eos_mask.float().argmax(dim=1) + 1,
+            actions.size(1) + 1,  # use full sequence length if no EOS token found
+        )
+
+        # Cut sequences to the first eos token in completion
+        for i, cut_position in enumerate(cut_positions):
+            assert loss_mask[i, ...].sum().item() == completion_tokens_count[i]
+            assert loss_mask[i, :cut_position].sum().item() == completion_tokens_count[i]
+
+            # the GRPO advantages is essentially non-discounted monte carlo returns
+            # with normalized reward at terminal time step, and all zero for non-terminal time step
+            seq_rewards = torch.zeros_like(actions[i, :cut_position], dtype=self.torch_dtype)
+            seq_rewards[-1] = normalized_rewards[i]
+
+            if self.config.dynamic_discount:
+                gamma = self.compute_dynamic_discount(
+                    completion_tokens_count[i].item(), min_gamma=self.config.min_gamma, max_gamma=self.config.max_gamma
+                )
+            else:
+                gamma = self.config.gamma
+            returns = self.compute_masked_monte_carlo_returns(
+                rewards=seq_rewards, mask=loss_mask[i, :cut_position], gamma=gamma
+            )
+
+            sample = GRPOSample(
+                states=states[i, :cut_position].cpu(),
+                actions=actions[i, :cut_position].cpu(),
+                loss_mask=loss_mask[i, :cut_position].cpu(),
+                reward=rewards[i].cpu(),
+                advantages=returns.cpu(),
+                pi_logprobs=pi_logprobs[i, :cut_position].cpu(),
+                ref_logprobs=ref_logprobs[i, :cut_position].cpu(),
+            )
+
+            results.append(sample)
+            self.episode_count += 1
+
+            self.metrics.add_metric('objective/reward', rewards[i].item())
+            self.metrics.add_metric('objective/completion_length', completion_tokens_count[i].item())
+
+        # Randomly sample 1 items for logging
+        sampled_indices = random.sample(range(len(completion_texts)), 1)
+        for i in sampled_indices:
+            self._log_sample_to_tensorboard(task_type, question, ground_truth, completion_texts[i], rewards[i].item())
+
+        return results
+
+    def generate_samples(
+        self,
+    ) -> List[GRPOSample]:
+        """Generates samples using the current policy."""
+
+        with self.generation_context():
+            assert not self.policy_model.training
+            assert not self.reference_model.training
+            collected_samples: List[GRPOSample] = []
+
+            with self.metrics.timer('generation'):
+                while len(collected_samples) < self.config.rollout_size:
+                    item = self._get_next_data_item()
+                    samples = self.generate_group_samples(item)
+                    collected_samples.extend(samples)
+
+            self.metrics.add_metric('elapsed/generation_episodes', self.episode_count)
+            self.metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
+
+            return collected_samples
+
+    def train_policy(self, samples: List[GRPOSample]) -> None:
+        random.shuffle(samples)
+
+        _collate_fn = partial(self._collate_function, pad_token_id=self.pad_token_id, torch_dtype=self.torch_dtype)
+
+        data_loader = DataLoader(
+            samples,
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            pin_memory=self.device.type == 'cuda',
+            collate_fn=_collate_fn,
+            drop_last=True,
+        )
+
+        self.optimizer.zero_grad()
+
+        assert self.policy_model.training
+
+        mini_steps = 0
+        mini_batch: GRPOSample = None
+
+        with self.metrics.timer('train'):
+            for _ in range(self.config.num_updates):
+                for mini_batch in data_loader:
+                    states = mini_batch.states.to(self.device)
+                    actions = mini_batch.actions.to(self.device)
+
+                    pi_logprobs = self._compute_action_logprobs(self.policy_model, states, actions)
+
+                    behavior_logprobs = mini_batch.pi_logprobs.to(self.device)
+                    advantages = mini_batch.advantages.to(self.device)
+                    loss_mask = mini_batch.loss_mask.to(self.device)
+                    ref_logprobs = mini_batch.ref_logprobs.to(self.device)
+                    # Compute the KL divergence between the model and the reference model
+                    per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+
+                    if self.config.normalize_advantages:
+                        advantages = masked_whiten(advantages, loss_mask)
+
+                    # PPO clipped surrogate PG loss
+                    ratio = torch.exp(pi_logprobs - behavior_logprobs)
+                    clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
+                    pg_losses = torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
+
+                    pg_loss = masked_sum(pg_losses, loss_mask, dim=1).mean()
+
+                    kl = masked_sum(per_token_kl, loss_mask, dim=1)
+
+                    # Only compute KL loss for incorrect samples
+                    # correctness_mask = (mini_batch.reward >= 1).to(self.device)  # Correct if reward >= 1
+                    # incorrect_mask = ~correctness_mask
+                    # kl_loss = self.config.kl_loss_coef * (kl * incorrect_mask).mean()
+
+                    kl_loss = self.config.kl_loss_coef * kl.mean()
+
+                    loss = -pg_loss + kl_loss
+                    loss.backward()
+
+                    # Record training metrics
+                    self.metrics.add_metric('train/total_loss', loss.detach().item())
+                    self.metrics.add_metric('train/pg_loss', pg_loss.detach().item())
+                    self.metrics.add_metric('train/kl_loss', kl_loss.detach().item())
+                    self.metrics.add_metric('train/kl', kl.mean().item())
+
+                    mini_steps += 1
+
+                    if mini_steps % self.config.gradient_accumulate_steps == 0:
+                        self.optimizer.step()
+                        # self.scheduler.step()
+                        self.optimizer.zero_grad()
+                        self.update_count += 1
+                        mini_steps = 0
+
+        self.scheduler.step()
+
+        self.metrics.add_metric('elapsed/policy_update', self.update_count)
+        self.metrics.add_metric('elapsed/reference_update', self.ref_update_count)
+        self.metrics.add_metric('train/learning_rate', self.optimizer.param_groups[0]['lr'])
+
     @contextmanager
     def generation_context(self):
         """Context manager for handling model and optimizer states during generation"""
@@ -165,6 +400,10 @@ class GRPOTrainer:
             yield
         finally:
             self._prepare_for_training()
+
+    def save_checkpoint(self, save_dir: str):
+        """Save policy model checkpoint following HF conventions"""
+        self.policy_model.save_pretrained(save_dir)
 
     def _optimizer_to(self, device: str):
         """Move pytorch optimizer to some device
@@ -252,268 +491,43 @@ class GRPOTrainer:
         # Concatenate results
         return torch.cat(sample_logprobs, dim=0)
 
-    @torch.no_grad()
-    def generate_group_samples(self, question: str, ground_truth: str) -> List[GRPOSample]:
-        """Generate responses for given question and ground truth answer
-
-        Args:
-            question (str): Question prompt
-            ground_truth (str): Ground truth answer
+    def _get_next_data_item(self) -> Dict:
+        """Fetches the next sample using, handles epoch reset.
 
         Returns:
-            List[Dict]: List of samples for the group
+            Dict: A batch of items containing questions and ground truths
         """
-        if not self.config.system_prompt:
-            message = [{'role': 'user', 'content': question.strip()}]
+        try:
+            item = next(self.train_iter)
+            return item
+        except StopIteration:
+            # Epoch finished! Reshuffle and recreate the iterator
+            self.train_ds = self.train_ds.shuffle(seed=None)
+            self.train_iter = iter(self.train_ds)
+            item = next(self.train_iter)  # Get the first item of the new epoch
+            return item
+
+    def _get_exploration_epsilon(self) -> float:
+        """Computes exploration epsilon based on the current iteration step count."""
+        if self.config.explore_decay_steps == 0 or self.config.explore_init_epsilon == 0:
+            return 0.0
         else:
-            message = [
-                {'role': 'system', 'content': self.config.system_prompt.strip()},
-                {'role': 'user', 'content': question.strip()},
-            ]
+            # Calculate the decay rate
+            decay_rate = (self.config.explore_init_epsilon - self.config.explore_min_epsilon) / self.config.explore_decay_steps
 
-        # expand to have a batch dimension
-        message = [message for _ in range(self.config.group_size)]
-
-        message_prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
-
-        inputs = self.tokenizer(
-            message_prompt,
-            return_tensors='pt',
-            truncation=True,
-            padding=True,
-            padding_side='left',
-            max_length=self.tokenizer.model_max_length,
-        ).to(self.device)
-
-        input_ids = inputs.input_ids
-        attention_mask = inputs.attention_mask
-
-        if self.config.group_temperature:
-            # Spread temperature values according to self.config.group_size, where 0.0 means greedy sampling
-            # this idea is similar how we do it in distributed RL training in classical RL
-            # where we have multiple agents running in parallel, some agents are more exploratory than others
-            temperature = torch.linspace(
-                0.0, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
+            # Apply decay, ensuring epsilon doesn't go below the minimum
+            self.explore_epsilon = max(
+                self.config.explore_min_epsilon, self.config.explore_init_epsilon - decay_rate * self.iteration_count
             )
-        else:
-            # make code compatible
-            temperature = torch.tensor(
-                [self.config.temperature] * self.config.group_size, dtype=self.torch_dtype, device=self.device
-            )
+        return self.explore_epsilon
 
-        random_start_steps = 0
-        explore_epsilon = self._get_exploration_epsilon()
-        if explore_epsilon is not None and explore_epsilon > 0 and random.random() < explore_epsilon:
-            random_start_steps = self.config.random_start_steps
-
-        generation_kwargs = {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'eos_token_id': self.eos_token_id,
-            'pad_token_id': self.pad_token_id,
-            'temperature': temperature,
-            'random_start_steps': random_start_steps,
-            'random_start_top_k': self.config.random_start_top_k,
-            'max_new_tokens': self.config.max_new_tokens,
-            # 'top_p': self.config.top_p,
-            # 'top_k': self.config.top_k,
-            'use_cache': True,
-            'output_scores': False,
-            'output_logits': False,
-            'return_dict_in_generate': True,
-            'return_legacy_cache': False,
-        }
-
-        outputs = self.llm_generator.generate(**generation_kwargs)
-
-        full_sequences = outputs.sequences
-        prompt_length = input_ids.size(1)
-        completion_ids = full_sequences[:, prompt_length:]
-        completion_tokens_count = (completion_ids != self.pad_token_id).sum(dim=1).cpu()
-        completion_texts = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
-
-        # Compute rewards for group outcomes
-        rewards = torch.tensor(
-            [math_problem_grader(completion, ground_truth) for completion in completion_texts], dtype=self.torch_dtype
-        )
-
-        if self.config.zero_based_reward:
-            # now we use 0 for correct answer, -1 for incorrect answer
-            rewards = rewards - 1.0
-
-        # Normalize rewards
-        if self.config.normalize_group_rewards:
-            normalized_rewards = self.normalize_group_rewards(rewards)
-        else:
-            normalized_rewards = rewards
-
-        states = full_sequences[:, :-1]
-        actions = full_sequences[:, 1:]
-        pi_logprobs = self._compute_action_logprobs(self.policy_model, states, actions).cpu()
-        ref_logprobs = self._compute_action_logprobs(self.reference_model, states, actions).cpu()
-
-        # Do not include the prompt or pad tokens in the loss
-        # for example, if we have a sequence token ids: [1, 2, 3, 4, 5, 6, 7, -1, -1]
-        # where [1, 2, 3, 4] are the prompt tokens
-        # and [5, 6, 7] are the completion tokens
-        # -1 is the pad token
-        # the, the loss mask will be [0, 0, 0, 1, 1, 1, 0, 0, 0]
-        loss_mask = (actions != self.pad_token_id).bool()
-        loss_mask[:, : prompt_length - 1] = 0  # this will exclude prompt tokens up until the first completion token
-
-        # construct a list of samples by trim the sequence to the first EOS token
-        results = []
-        eos_mask = actions == self.eos_token_id
-        eos_mask[:, :prompt_length] = False  # Ignore EOS tokens in the prompt
-
-        # Calculate cut positions starting from completion
-        cut_positions = torch.where(
-            eos_mask.any(dim=1),
-            eos_mask.float().argmax(dim=1) + 1,
-            actions.size(1) + 1,  # use full sequence length if no EOS token found
-        )
-
-        # Cut sequences to the first eos token in completion
-        for i, cut_position in enumerate(cut_positions):
-            assert loss_mask[i, ...].sum().item() == completion_tokens_count[i]
-            assert loss_mask[i, :cut_position].sum().item() == completion_tokens_count[i]
-
-            # the GRPO advantages is essentially non-discounted monte carlo returns
-            # with normalized reward at terminal time step, and all zero for non-terminal time step
-            seq_rewards = torch.zeros_like(actions[i, :cut_position], dtype=self.torch_dtype)
-            seq_rewards[-1] = normalized_rewards[i]
-            returns = self.compute_masked_monte_carlo_returns(
-                rewards=seq_rewards, mask=loss_mask[i, :cut_position], gamma=self.config.gamma
-            )
-
-            # old_returns = loss_mask[i, :cut_position].float() * normalized_rewards[i]
-            # torch.testing.assert_close(returns.float(), old_returns.float())
-
-            sample = GRPOSample(
-                states=states[i, :cut_position].cpu(),
-                actions=actions[i, :cut_position].cpu(),
-                loss_mask=loss_mask[i, :cut_position].cpu(),
-                reward=rewards[i].cpu(),
-                advantages=returns.cpu(),
-                pi_logprobs=pi_logprobs[i, :cut_position].cpu(),
-                ref_logprobs=ref_logprobs[i, :cut_position].cpu(),
-            )
-
-            results.append(sample)
-            self.episode_count += 1
-
-            self.metrics.add_metric('objective/reward', rewards[i].item())
-            self.metrics.add_metric('objective/completion_length', completion_tokens_count[i].item())
-
-        # Randomly sample 1 items for logging
-        sampled_indices = random.sample(range(len(completion_texts)), 1)
-        for i in sampled_indices:
-            self._log_sample_to_tensorboard(question, ground_truth, completion_texts[i], rewards[i].item())
-
-        return results
-
-    def generate_samples(
-        self,
-    ) -> List[GRPOSample]:
-        """Generates samples using the current policy."""
-
-        with self.generation_context():
-            assert not self.policy_model.training
-            assert not self.reference_model.training
-            collected_samples: List[GRPOSample] = []
-
-            with self.metrics.timer('generation'):
-                while len(collected_samples) < self.config.rollout_size:
-                    item = self._get_next_data_item()
-                    assert 'question' in item and 'ground_truth' in item
-
-                    samples = self.generate_group_samples(item['question'], item['ground_truth'])
-
-                    collected_samples.extend(samples)
-
-            self.metrics.add_metric('elapsed/generation_episodes', self.episode_count)
-            self.metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
-
-            return collected_samples
-
-    def train_policy(self, samples: List[GRPOSample]) -> None:
-        random.shuffle(samples)
-
-        _collate_fn = partial(self._collate_function, pad_token_id=self.pad_token_id, torch_dtype=self.torch_dtype)
-
-        data_loader = DataLoader(
-            samples,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            pin_memory=self.device.type == 'cuda',
-            collate_fn=_collate_fn,
-            drop_last=True,
-        )
-
-        self.optimizer.zero_grad()
-
-        assert self.policy_model.training
-
-        mini_steps = 0
-        mini_batch: GRPOSample = None
-
-        with self.metrics.timer('train'):
-            for _ in range(self.config.num_updates):
-                for mini_batch in data_loader:
-                    states = mini_batch.states.to(self.device)
-                    actions = mini_batch.actions.to(self.device)
-                    # correctness = mini_batch.reward.bool().to(self.device)
-
-                    pi_logprobs = self._compute_action_logprobs(self.policy_model, states, actions)
-
-                    behavior_logprobs = mini_batch.pi_logprobs.to(self.device)
-                    advantages = mini_batch.advantages.to(self.device)
-                    loss_mask = mini_batch.loss_mask.to(self.device)
-                    ref_logprobs = mini_batch.ref_logprobs.to(self.device)
-                    # Compute the KL divergence between the model and the reference model
-                    per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
-
-                    if self.config.normalize_advantages:
-                        advantages = masked_whiten(advantages, loss_mask)
-
-                    # PPO clipped surrogate PG loss
-                    ratio = torch.exp(pi_logprobs - behavior_logprobs)
-                    clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
-                    pg_losses = torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
-
-                    pg_loss = pg_losses[loss_mask].mean()
-                    kl_loss = self.config.kl_loss_coef * per_token_kl[loss_mask].mean()
-                    loss = -pg_loss + kl_loss
-
-                    if self.config.gradient_accumulate_steps > 1:
-                        loss /= self.config.gradient_accumulate_steps
-
-                    loss.backward()
-
-                    # Record training metrics
-                    self.metrics.add_metric('train/total_loss', loss.detach().item())
-                    self.metrics.add_metric('train/pg_loss', pg_loss.detach().item())
-                    self.metrics.add_metric('train/kl_loss', kl_loss.detach().item())
-                    self.metrics.add_metric('train/kl', per_token_kl[loss_mask].detach().sum(-1).mean().item())
-
-                    mini_steps += 1
-
-                    if mini_steps % self.config.gradient_accumulate_steps == 0:
-                        self.optimizer.step()
-                        # self.scheduler.step()
-                        self.optimizer.zero_grad()
-                        self.update_count += 1
-                        mini_steps = 0
-
-        self.scheduler.step()
-
-        self.metrics.add_metric('elapsed/policy_update', self.update_count)
-        self.metrics.add_metric('elapsed/reference_update', self.ref_update_count)
-        self.metrics.add_metric('train/learning_rate', self.optimizer.param_groups[0]['lr'])
-
-    def save_checkpoint(self, save_dir: str):
-        """Save policy model checkpoint following HF conventions"""
-        self.policy_model.save_pretrained(save_dir)
+    def _create_reference_model(self) -> PreTrainedModel:
+        """Create a reference model from the policy model"""
+        ref_model = deepcopy(self.policy_model)
+        for param in ref_model.parameters():
+            param.requires_grad = False
+        ref_model = ref_model.eval()
+        return ref_model
 
     def _handle_post_train(self):
         """Handle post-training operations"""
@@ -630,17 +644,31 @@ class GRPOTrainer:
             completion_length=None,
         )
 
+    @staticmethod
+    def compute_dynamic_discount(
+        episode_length: int, min_gamma: float = 0.999, max_gamma: float = 0.9998, max_length: int = 8000
+    ) -> float:
+        """Compute dynamic discount factor."""
+        assert episode_length > 0, 'Episode length must be greater than 0.'
+        assert max_length > 1000, 'Max length must be greater than 1000.'
+        assert 0.0 < min_gamma and min_gamma < 1.0, 'Min discount must be in the range (0, 1).'
+        assert 0.0 < max_gamma and max_gamma < 1.0, 'Max discount must be in the range (0, 1).'
+        assert min_gamma < max_gamma, 'Min discount must be less than max discount.'
+        scaled_length = min(episode_length / max_length, 1.0)
+        gamma = min_gamma + (max_gamma - min_gamma) * scaled_length
+        return gamma
+
     def _log_hyper_params_to_tensorboard(self, config: Dict[str, Any]):
         """Log hyper parameters used for the job"""
         if self.writer:
             config_str = yaml.dump(config, sort_keys=False, indent=4)
             self.writer.add_text('config/parameters', f"```yaml\n{config_str}\n```", 0)
 
-    def _log_sample_to_tensorboard(self, question: str, ground_truth: str, completion_text: str, reward: float):
+    def _log_sample_to_tensorboard(self, task: str, question: str, ground_truth: str, completion_text: str, reward: float):
         """Log a sample text to tensorboard"""
         if self.writer:
             formatted_text = (
-                f"**Question**: {question}\n\n"
+                f"**Question [{task}]**: {question}\n\n"
                 f"**Ground Truth**: {ground_truth}\n\n"
                 f"**Graded Reward**: {reward}\n\n"
                 f"**Full Answer**:\n```json\n{completion_text}\n```"

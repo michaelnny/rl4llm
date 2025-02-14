@@ -115,7 +115,7 @@ def create_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> 
 
     model_name = model_config['pretrained_model']
     load_in_4bit = model_config['load_in_4bit']
-    activation_checkpoint = model_config['activation_checkpoint']
+    gradient_checkpointing = model_config['gradient_checkpointing']
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -140,7 +140,7 @@ def create_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> 
         )
 
     model = AutoModelForCausalLM.from_pretrained(**model_args)
-    if activation_checkpoint:
+    if gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
 
     return model, tokenizer

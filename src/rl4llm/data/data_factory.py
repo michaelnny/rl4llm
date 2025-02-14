@@ -185,7 +185,7 @@ def load_gsm_dataset(
         item = {
             'question': x['question'],
             'ground_truth': ground_truth,
-            'task_type': 'gsm',
+            'task_type': 'GSM',
         }
         return item
 
@@ -229,14 +229,11 @@ def load_math_dataset(
         full_answer = x['solution']
         ground_truth = extract_math_answer_from_last_boxed(full_answer).strip()
 
-        # the original MATH dataset has lots of incorrect fractions as in '\frac12' instead of '\frac{1}{2}'
-        # ground_truth = fix_fractions(ground_truth)
-
         return {
             'level': x['level'],
             'question': x['problem'],
             'ground_truth': ground_truth,
-            'task_type': 'math',
+            'task_type': 'MATH',
         }
 
     ds = ds.map(extract_math_ground_truth)
@@ -334,13 +331,6 @@ def is_valid_math_sample(sample: Dict) -> bool:
                 'Which of the following',  # skip multi-choice questions
                 'Which is the correct',
                 'Enter the letter of the correct',
-                # '&&&&&',
-                # r'$\$$',
-                # '{tabular',
-                # 'f(f(f(',
-                # '((((',
-                # '))))',
-                # '[asy]',
                 'graph(',  # skip graph or drawings
                 'draw(',
                 'linewidth(',

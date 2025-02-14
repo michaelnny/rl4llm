@@ -1,46 +1,46 @@
 # RL GRPO config
 model:
-  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
   load_in_4bit: false
-  activation_checkpoint: true
+  gradient_checkpointing: true
 
 datasets: # List of math datasets to load
   - "gsm"
   # - "math"
 
 grpo_config:
-  artifacts_path: "./runs/grpo_qwen2.5_0.5b_1st_run"
+  artifacts_path: "./runs/grpo_qwen2.5_1.5b_1st_run"
   seed: 117
   max_iterations: 2000
-  rollout_size: 2048
+  rollout_size: 1024
   num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
-  gamma: 1.0                        # no discount
+  dynamic_discount: false           # compute dynamic discount based on completion length
+  min_gamma: 0.999                  # for compute dynamic discount
+  max_gamma: 0.9998                 # for compute dynamic discount
+  gamma: 1.0                        # fixed discount
   clip_eps: 0.2                     # PPO policy clip parameter
-  zero_based_reward: false          # use 0 for correct answer, -1 for incorrect answer
-  normalize_group_rewards: false    # no need to normalize for binary rewards
+  normalize_group_rewards: true     # no need to normalize for binary rewards
   normalize_advantages: true
-  group_size: 16                    # GRPO specific
-  kl_loss_coef: 0.04
+  kl_loss_coef: 0.01
   sync_reference_interval: 100      # every N iteration
 
   # for sample generation
   system_prompt: |
-    Before generating a solution, engage in a deliberate and thorough thinking process.
-    Explore those "Wait", "Aha", "Hmm" moments and demonstrate self-reflection by reviewing your thinking and refining your approach as needed.
+    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "Wait", "Aha", "Hmm" moments.
+    Present your final answer in a \boxed{}
   max_new_tokens: 1024
-  temperature: 0.9
-  do_sample: true
-  # our enhancements
+  temperature: 0.7
+  group_size: 8                     # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   group_temperature: true
-  # random start exploration
-  explore_init_epsilon: 0.5
-  explore_min_epsilon: 0.1
-  explore_decay_steps: 1000
-  random_start_steps: 3
-  random_start_top_k: 30
+  # # random start exploration
+  # explore_init_epsilon: 0.0
+  # explore_min_epsilon: 0.0
+  # explore_decay_steps: 0
+  # random_start_steps: 3
+  # random_start_top_k: 10
 
   # others
   checkpoint_interval: 100          # every N iteration
