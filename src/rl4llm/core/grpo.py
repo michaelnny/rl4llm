@@ -6,7 +6,7 @@ import random
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import yaml
@@ -17,11 +17,11 @@ from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.generations import CustomLLMGenerator
-from rl4llm.graders import math_problem_grader
+from rl4llm.graders import general_rule_grader, math_problem_grader
 from rl4llm.utils import MetricsCollector
 
 from .data_types import GRPOConfig, GRPOSample
-from .helper import masked_sum, masked_whiten
+from .helper import masked_mean, masked_sum, masked_whiten
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ class GRPOTrainer:
         train_ds: Dataset,
         device: torch.device,
         torch_dtype: torch.dtype,
+        artifacts_path: str,
     ):
         self.config = config
         self.device = device
@@ -56,17 +57,18 @@ class GRPOTrainer:
         self.train_ds = train_ds.shuffle(seed=None)
         self.train_iter = iter(self.train_ds)
 
+        self.artifacts_path = artifacts_path
         self._initialize()
 
     def _initialize(self):
         """Setup logging and checkpoint directories"""
-        self.tb_log_dir = os.path.join(self.config.artifacts_path, 'tb_logs')
-        self.checkpoint_dir = os.path.join(self.config.artifacts_path, 'checkpoints')
+        self.tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
+        self.checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
 
         for path in [self.tb_log_dir, self.checkpoint_dir]:
             os.makedirs(path, exist_ok=True)
 
-        logger.info(f"Artifacts will be saved at: {self.config.artifacts_path}")
+        logger.info(f"Artifacts will be saved at: {self.artifacts_path}")
 
         self.writer = SummaryWriter(self.tb_log_dir)
         self.metrics = MetricsCollector()
@@ -90,7 +92,7 @@ class GRPOTrainer:
         if hyper_params:
             self._log_hyper_params_to_tensorboard(hyper_params)
 
-        for _ in tqdm(range(self.config.max_iterations), desc='Training iterations'):
+        for _ in tqdm(range(self.config.max_steps), desc='Training steps'):
             self.run_one_train_iteration()
 
     def run_one_train_iteration(self) -> None:
@@ -122,45 +124,45 @@ class GRPOTrainer:
         self._handle_post_train()
 
     @torch.no_grad()
-    def generate_group_samples(self, sample: Dict[str, str]) -> List[GRPOSample]:
+    def generate_group_samples(
+        self,
+    ) -> List[GRPOSample]:
         """Generate responses for a batch of questions and ground truth answers
 
         Args:
-            sample: Dictionary containing 'question' and 'ground_truth'
+            None
 
         Returns:
             List[Dict]: List of samples for all groups in the batch
         """
 
+        sample: Dict[str, Union[str, torch.Tensor]] = self._get_next_data_item()
         # Prepare messages for the entire batch
         question = sample['question']
         ground_truth = sample['ground_truth']
         task_type = sample['task_type'].upper()
 
-        if not self.config.system_prompt:
+        # Create the basic message template
+        system_prompt = self.config.system_prompt
+        if not system_prompt:
             sample_message = [{'role': 'user', 'content': question.strip()}]
         else:
             sample_message = [
-                {'role': 'system', 'content': self.config.system_prompt.strip()},
+                {'role': 'system', 'content': system_prompt.strip()},
                 {'role': 'user', 'content': question.strip()},
             ]
-        # Expand each question to group_size
-        group_messages = [sample_message for _ in range(self.config.group_size)]
 
-        # Tokenize all messages at once
-        message_prompts = self.tokenizer.apply_chat_template(group_messages, tokenize=False, add_generation_prompt=True)
-
+        batch_messages = [sample_message for _ in range(self.config.group_size)]
+        # Tokenize single message
+        message_prompt = self.tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer(
-            message_prompts,
+            message_prompt,
             return_tensors='pt',
             truncation=True,
-            padding=True,
+            padding=False,
             padding_side='left',
             max_length=self.tokenizer.model_max_length,
         ).to(self.device)
-
-        input_ids = inputs.input_ids
-        attention_mask = inputs.attention_mask
 
         if self.config.group_temperature:
             # Spread temperature values according to self.config.group_size, where 0.0 means greedy sampling
@@ -179,23 +181,23 @@ class GRPOTrainer:
                 [self.config.temperature] * self.config.group_size, dtype=self.torch_dtype, device=self.device
             )
 
-        random_start_steps = 0
+        enable_exploration = 0
         explore_epsilon = self._get_exploration_epsilon()
         if explore_epsilon is not None and explore_epsilon > 0 and random.random() < explore_epsilon:
-            random_start_steps = self.config.random_start_steps
+            enable_exploration = True
 
         generation_kwargs = {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
+            'input_ids': inputs.input_ids,
+            'attention_mask': inputs.attention_mask,
             'eos_token_id': self.eos_token_id,
             'pad_token_id': self.pad_token_id,
-            # 'temperature': self.config.temperature,
             'max_new_tokens': self.config.max_new_tokens,
             'temperature': temperature,
-            'random_start_steps': random_start_steps,
-            'random_start_top_k': self.config.random_start_top_k,
-            # 'top_p': self.config.top_p,
-            # 'top_k': self.config.top_k,
+            'enable_exploration': enable_exploration,
+            'random_start_steps': self.config.random_start_steps,
+            'uncertainty_threshold': self.config.uncertainty_threshold,
+            'exploration_top_k': self.config.exploration_top_k,
+            'exploration_beta': self.config.exploration_beta,
             'do_sample': True,
             'use_cache': True,
             'output_scores': False,
@@ -207,7 +209,7 @@ class GRPOTrainer:
         outputs = self.llm_generator.generate(**generation_kwargs)
 
         full_sequences = outputs.sequences
-        prompt_length = input_ids.size(1)
+        prompt_length = inputs.input_ids.size(1)
         completion_ids = full_sequences[:, prompt_length:]
         completion_tokens_count = (completion_ids != self.pad_token_id).sum(dim=1).cpu()
         completion_texts = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
@@ -215,7 +217,20 @@ class GRPOTrainer:
         # Compute rewards for group outcomes
         # TODO: add other grader functions
         grader_fn = math_problem_grader if task_type.upper() in ['GSM', 'MATH'] else lambda x, y: x.lower() == y.lower()
-        rewards = torch.tensor([grader_fn(completion, ground_truth) for completion in completion_texts], dtype=self.torch_dtype)
+
+        outcome_rewards = []
+        other_rewards = []
+        for completion, completion_len in zip(completion_texts, completion_tokens_count.tolist()):
+            # Check for correctness
+            outcome_rewards.append(grader_fn(completion, ground_truth))
+
+            # Check for general rules like format, size etc
+            other_rewards.append(general_rule_grader(completion))
+
+        outcome_rewards = torch.tensor(outcome_rewards, dtype=self.torch_dtype)
+        other_rewards = torch.tensor(other_rewards, dtype=self.torch_dtype)
+
+        rewards = outcome_rewards + other_rewards
 
         # Normalize rewards
         if self.config.normalize_group_rewards:
@@ -251,6 +266,7 @@ class GRPOTrainer:
 
         # Cut sequences to the first eos token in completion
         for i, cut_position in enumerate(cut_positions):
+            assert completion_tokens_count[i] > 0
             assert loss_mask[i, ...].sum().item() == completion_tokens_count[i]
             assert loss_mask[i, :cut_position].sum().item() == completion_tokens_count[i]
 
@@ -282,7 +298,9 @@ class GRPOTrainer:
             results.append(sample)
             self.episode_count += 1
 
-            self.metrics.add_metric('objective/reward', rewards[i].item())
+            self.metrics.add_metric('objective/outcome_reward', outcome_rewards[i].item())
+            self.metrics.add_metric('objective/other_reward', other_rewards[i].item())
+            self.metrics.add_metric('objective/total_rewards', rewards[i].item())
             self.metrics.add_metric('objective/completion_length', completion_tokens_count[i].item())
 
         # Randomly sample 1 items for logging
@@ -304,8 +322,7 @@ class GRPOTrainer:
 
             with self.metrics.timer('generation'):
                 while len(collected_samples) < self.config.rollout_size:
-                    item = self._get_next_data_item()
-                    samples = self.generate_group_samples(item)
+                    samples = self.generate_group_samples()
                     collected_samples.extend(samples)
 
             self.metrics.add_metric('elapsed/generation_episodes', self.episode_count)
@@ -314,7 +331,6 @@ class GRPOTrainer:
             return collected_samples
 
     def train_policy(self, samples: List[GRPOSample]) -> None:
-        random.shuffle(samples)
 
         _collate_fn = partial(self._collate_function, pad_token_id=self.pad_token_id, torch_dtype=self.torch_dtype)
 
@@ -346,8 +362,14 @@ class GRPOTrainer:
                     advantages = mini_batch.advantages.to(self.device)
                     loss_mask = mini_batch.loss_mask.to(self.device)
                     ref_logprobs = mini_batch.ref_logprobs.to(self.device)
+
                     # Compute the KL divergence between the model and the reference model
-                    per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+                    # per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+
+                    # Avoid NaNs
+                    per_token_log_diff = ref_logprobs - pi_logprobs
+                    per_token_log_diff = torch.clamp(per_token_log_diff, min=-10, max=10)
+                    per_token_kl = torch.exp(per_token_log_diff) - per_token_log_diff - 1
 
                     if self.config.normalize_advantages:
                         advantages = masked_whiten(advantages, loss_mask)
@@ -355,38 +377,37 @@ class GRPOTrainer:
                     # PPO clipped surrogate PG loss
                     ratio = torch.exp(pi_logprobs - behavior_logprobs)
                     clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
-                    pg_losses = torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
+                    pg_losses = -torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
 
-                    pg_loss = masked_sum(pg_losses, loss_mask, dim=1).mean()
-
-                    kl = masked_sum(per_token_kl, loss_mask, dim=1)
+                    pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
+                    kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
 
                     # Only compute KL loss for incorrect samples
                     # correctness_mask = (mini_batch.reward >= 1).to(self.device)  # Correct if reward >= 1
                     # incorrect_mask = ~correctness_mask
                     # kl_loss = self.config.kl_loss_coef * (kl * incorrect_mask).mean()
 
-                    kl_loss = self.config.kl_loss_coef * kl.mean()
-
-                    loss = -pg_loss + kl_loss
+                    kl_loss = self.config.kl_loss_coef * kl
+                    loss = pg_loss + kl_loss
                     loss.backward()
 
-                    # Record training metrics
                     self.metrics.add_metric('train/total_loss', loss.detach().item())
                     self.metrics.add_metric('train/pg_loss', pg_loss.detach().item())
                     self.metrics.add_metric('train/kl_loss', kl_loss.detach().item())
-                    self.metrics.add_metric('train/kl', kl.mean().item())
+                    self.metrics.add_metric('train/kl', kl.detach().item())
 
                     mini_steps += 1
 
                     if mini_steps % self.config.gradient_accumulate_steps == 0:
                         self.optimizer.step()
-                        # self.scheduler.step()
+                        # if self.scheduler is not None:
+                        #     self.scheduler.step()
                         self.optimizer.zero_grad()
                         self.update_count += 1
                         mini_steps = 0
 
-        self.scheduler.step()
+        if self.scheduler is not None:
+            self.scheduler.step()
 
         self.metrics.add_metric('elapsed/policy_update', self.update_count)
         self.metrics.add_metric('elapsed/reference_update', self.ref_update_count)
@@ -405,32 +426,11 @@ class GRPOTrainer:
         """Save policy model checkpoint following HF conventions"""
         self.policy_model.save_pretrained(save_dir)
 
-    def _optimizer_to(self, device: str):
-        """Move pytorch optimizer to some device
-
-        Code copied from
-        https://discuss.pytorch.org/t/moving-optimizer-from-cpu-to-gpu/96068/3
-        """
-        for param in self.optimizer.state.values():
-            # Not sure there are any global tensors in the state dict
-            if isinstance(param, torch.Tensor):
-                param.data = param.data.to(device)
-                if param._grad is not None:
-                    param._grad.data = param._grad.data.to(device)
-            elif isinstance(param, dict):
-                for subparam in param.values():
-                    if isinstance(subparam, torch.Tensor):
-                        subparam.data = subparam.data.to(device)
-                        if subparam._grad is not None:
-                            subparam._grad.data = subparam._grad.data.to(device)
-
     def _prepare_for_generation(self):
         """Move unnecessary components to CPU during generation"""
         if self.generation_mode:
             return
 
-        # Move optimizer states to CPU
-        self._optimizer_to('cpu')
         self.policy_model = self.policy_model.eval()
         self.reference_model = self.reference_model.eval()
         # Ensure both models are on GPU for generation
@@ -453,9 +453,6 @@ class GRPOTrainer:
 
         # Ensure policy model is on GPU for training
         self.policy_model = self.policy_model.to(self.device)
-
-        # Move optimizer states back to original devices
-        self._optimizer_to(self.policy_model.device)
 
         self.policy_model = self.policy_model.train()
 
@@ -482,14 +479,14 @@ class GRPOTrainer:
 
         for i in range(batch_size):
             # Process single sample
-            sample_logits = logits[i : i + 1]  # Keep dim for proper broadcasting
+            sample_logits = logits[i, ...]
             sample_logprobs_all = torch.log_softmax(sample_logits, dim=-1)
-            sample_actions = actions[i : i + 1].unsqueeze(2)
-            sample_logprob = torch.gather(sample_logprobs_all, dim=2, index=sample_actions).squeeze(2)
+            sample_actions = actions[i, ...].unsqueeze(1)
+            sample_logprob = torch.gather(sample_logprobs_all, dim=1, index=sample_actions).squeeze(1)
             sample_logprobs.append(sample_logprob)
 
         # Concatenate results
-        return torch.cat(sample_logprobs, dim=0)
+        return torch.stack(sample_logprobs, dim=0)
 
     def _get_next_data_item(self) -> Dict:
         """Fetches the next sample using, handles epoch reset.
@@ -618,30 +615,29 @@ class GRPOTrainer:
         batch_action_ids = torch.full((batch_size, max_seq_len), pad_token_id, dtype=torch.long)
         batch_loss_mask = torch.full((batch_size, max_seq_len), 0, dtype=torch.bool)
 
-        batch_advantages = torch.full((batch_size, max_seq_len), 0, dtype=torch_dtype)
-        batch_pi_logprobs = torch.full((batch_size, max_seq_len), 0, dtype=torch_dtype)
-        batch_ref_logprobs = torch.full((batch_size, max_seq_len), 0, dtype=torch_dtype)
-        batch_reward = torch.full((batch_size,), 0, dtype=torch_dtype)
+        batch_advantages = torch.full((batch_size, max_seq_len), 0.0, dtype=torch_dtype)
+        batch_pi_logprobs = torch.full((batch_size, max_seq_len), 0.0, dtype=torch_dtype)
+        batch_ref_logprobs = torch.full((batch_size, max_seq_len), 0.0, dtype=torch_dtype)
+        batch_reward = torch.full((batch_size,), 0.0, dtype=torch_dtype)
 
         for i, item in enumerate(batch):
             seq_len = len(item.states)
             batch_state_ids[i, :seq_len] = item.states.to(dtype=torch.long)
             batch_action_ids[i, :seq_len] = item.actions.to(dtype=torch.long)
+            batch_loss_mask[i, :seq_len] = item.loss_mask.to(dtype=torch.bool)
             batch_advantages[i, :seq_len] = item.advantages.to(dtype=torch_dtype)
             batch_pi_logprobs[i, :seq_len] = item.pi_logprobs.to(dtype=torch_dtype)
             batch_ref_logprobs[i, :seq_len] = item.ref_logprobs.to(dtype=torch_dtype)
-            batch_loss_mask[i, :seq_len] = item.loss_mask.to(dtype=torch.bool)
             batch_reward[i] = item.reward
 
         return GRPOSample(
             states=batch_state_ids,
             actions=batch_action_ids,
-            advantages=batch_advantages,
+            loss_mask=batch_loss_mask,
             pi_logprobs=batch_pi_logprobs,
             ref_logprobs=batch_ref_logprobs,
-            loss_mask=batch_loss_mask,
+            advantages=batch_advantages,
             reward=batch_reward,
-            completion_length=None,
         )
 
     @staticmethod

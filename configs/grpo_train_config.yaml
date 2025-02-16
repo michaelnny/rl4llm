@@ -1,4 +1,9 @@
 # RL GRPO config
+job:
+  seed: 117
+  artifacts_path: "./runs/grpo_qwen2.5_1.5b_1st_run_explore"
+  max_samples: 5000
+
 model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
   load_in_4bit: false
@@ -9,38 +14,37 @@ datasets: # List of math datasets to load
   # - "math"
 
 grpo_config:
-  artifacts_path: "./runs/grpo_qwen2.5_1.5b_1st_run"
-  seed: 117
-  max_iterations: 2000
+  max_steps: 1000
   rollout_size: 1024
-  num_updates: 1
+  num_updates: 2
   batch_size: 8
   gradient_accumulate_steps: 16
-  dynamic_discount: false           # compute dynamic discount based on completion length
-  min_gamma: 0.999                  # for compute dynamic discount
-  max_gamma: 0.9998                 # for compute dynamic discount
+  # dynamic_discount: false           # compute dynamic discount based on completion length
+  # min_gamma: 0.999                  # for compute dynamic discount
+  # max_gamma: 0.9998                 # for compute dynamic discount
   gamma: 1.0                        # fixed discount
   clip_eps: 0.2                     # PPO policy clip parameter
   normalize_group_rewards: true     # no need to normalize for binary rewards
   normalize_advantages: true
-  kl_loss_coef: 0.01
+  kl_loss_coef: 0.001
   sync_reference_interval: 100      # every N iteration
 
   # for sample generation
   system_prompt: |
-    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "Wait", "Aha", "Hmm" moments.
-    Present your final answer in a \boxed{}
+    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your thoughts. Present your final answer in a \boxed{}.
   max_new_tokens: 1024
-  temperature: 0.7
-  group_size: 8                     # for each sample we generate a group of answers
+  temperature: 0.9
+  group_size: 16                     # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   group_temperature: true
-  # # random start exploration
-  # explore_init_epsilon: 0.0
-  # explore_min_epsilon: 0.0
-  # explore_decay_steps: 0
-  # random_start_steps: 3
-  # random_start_top_k: 10
+  # random start exploration
+  explore_init_epsilon: 0.9
+  explore_min_epsilon: 0.1
+  explore_decay_steps: 500
+  random_start_steps: 5
+  uncertainty_threshold: 0.0        # entropy threshold for exploration
+  exploration_top_k: 20
+  exploration_beta: 0.5             # Square root of probabilities
 
   # others
   checkpoint_interval: 100          # every N iteration
@@ -49,13 +53,13 @@ optimizer:
   type: AdamW8bit
   params:
     lr: 1.0e-6
-    betas: [0.9, 0.999]
+    betas: [0.9, 0.95]
     eps: 1.0e-8
     weight_decay: 0.002
 
-scheduler:
-  type: "OneCycleLR"
-  params:
-    warmup_fraction: 0.015 # 0.1
-    initial_lr_fraction: 0.1
-    final_lr_fraction: 0.1
+# scheduler:
+#   type: "OneCycleLR"
+#   params:
+#     warmup_fraction: 0.02
+#     initial_lr_fraction: 0.1
+#     final_lr_fraction: 0.1

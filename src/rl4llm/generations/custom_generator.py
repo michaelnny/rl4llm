@@ -1,9 +1,12 @@
+import logging
 from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from transformers.generation.utils import GenerateDecoderOnlyOutput
+
+logger = logging.getLogger(__name__)
 
 
 class CustomLLMGenerator:
@@ -13,90 +16,6 @@ class CustomLLMGenerator:
 
     def __init__(self, model: PreTrainedModel):
         self.model = model
-
-    # def _add_dirichlet_noise(self, probs: torch.Tensor, eps: float = 0.05, alpha: float = 0.03) -> torch.Tensor:
-    #     """
-    #     Add Dirichlet noise to probability distribution.
-
-    #     Args:
-    #         probs: Token probability distribution
-    #         eps: Weight of noise vs original probabilities
-    #         alpha: Concentration parameter for Dirichlet distribution
-    #     """
-    #     assert eps > 0
-    #     assert alpha > 0
-    #     # Store the original dtype
-    #     orig_dtype = probs.dtype
-
-    #     # Convert probs to float (if not already) for numerical stability
-    #     probs = probs.float()
-
-    #     # Create an alpha vector for the Dirichlet distribution with the same shape as probs
-    #     alphas = torch.full_like(probs, fill_value=alpha)
-
-    #     # Instantiate a Dirichlet distribution and sample noise
-    #     dirichlet_dist = torch.distributions.Dirichlet(alphas)
-    #     noise = dirichlet_dist.sample()
-
-    #     # Combine the original probabilities with the noise
-    #     noisy_probs = (1 - eps) * probs + eps * noise
-
-    #     # Re-normalize to ensure the probabilities sum to 1
-    #     # noisy_probs = noisy_probs / noisy_probs.sum()
-
-    #     # Convert the result back to the original dtype
-    #     return noisy_probs.to(orig_dtype)
-
-    def _sample_next_token(
-        self,
-        logits: torch.Tensor,  # Single item logits
-        temperature: float,
-        top_p: float,
-        random_sample: bool = False,
-        random_top_k: int = 0,
-    ) -> torch.Tensor:
-        """Sample next token for a single item in the batch."""
-        if temperature == 0:
-            return logits.argmax(dim=-1, keepdim=True)
-
-        if random_sample and random_top_k > 1:
-            top_m_values, top_m_indices = torch.topk(logits, k=random_top_k, dim=-1)
-            # Create uniform probabilities for top K candidates
-            probs = torch.ones_like(top_m_values) / random_top_k
-            # Sample from the top M indices using the uniform probabilities
-            sampled_indices = torch.multinomial(probs, num_samples=1)
-            return torch.gather(top_m_indices, -1, sampled_indices)
-        else:
-            logits = logits / temperature
-
-            if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-                sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
-                sorted_indices_to_remove[0] = 0
-
-                logits[sorted_indices[sorted_indices_to_remove]] = float('-inf')
-
-            probs = F.softmax(logits, dim=-1)
-
-            return torch.multinomial(probs, num_samples=1)
-
-    def _sample_next_tokens(
-        self,
-        token_logits: torch.Tensor,
-        temperature: torch.Tensor,
-        top_p: float,
-        random_sample: bool = False,
-        random_top_k: int = 0,
-    ) -> torch.Tensor:
-        """Sample next tokens for the entire batch."""
-        next_tokens = []
-        for logits, temp in zip(token_logits, temperature):
-            next_token = self._sample_next_token(logits, temp.item(), top_p, random_sample, random_top_k)
-            next_tokens.append(next_token)
-        return torch.cat(next_tokens, dim=0)
 
     def _update_sequences(
         self,
@@ -117,6 +36,76 @@ class CustomLLMGenerator:
 
         return input_ids, attention_mask, unfinished_sequences
 
+    def _calculate_entropy(self, logits: torch.Tensor) -> torch.Tensor:
+        """Calculates entropy for each item in the batch of logits."""
+        probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        entropy = -torch.sum(probs * log_probs, dim=-1)  # Calculate entropy for each batch item
+        return entropy
+
+    def _sample_next_token(
+        self,
+        logits: torch.Tensor,  # Single item logits
+        temperature: float,
+        top_p: float,
+        do_exploration: bool = False,
+        exploration_top_k: int = 0,
+        exploration_beta: float = 0.5,
+    ) -> torch.Tensor:
+        """Sample next token for a single item in the batch."""
+        if temperature == 0:
+            return logits.argmax(dim=-1, keepdim=True)
+
+        if do_exploration and exploration_top_k > 1:
+            top_k_values, top_k_indices = torch.topk(logits, k=exploration_top_k, dim=-1)
+
+            # Convert to probabilities
+            probs = F.softmax(top_k_values, dim=-1)
+
+            # Simple but effective: raise probabilities to a power < 1
+            # This flattens the distribution, giving lower-probability tokens more chance
+            probs = probs.pow(exploration_beta)
+            probs = probs / probs.sum()
+
+            # # Uniform sampling within top-k (original behavior if temp is 1.0)
+            # probs = torch.ones_like(top_k_values) / exploration_top_k
+
+            sampled_indices = torch.multinomial(probs, num_samples=1)
+            return torch.gather(top_k_indices, -1, sampled_indices)
+        else:
+            logits = logits / temperature
+
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+                sorted_indices_to_remove[0] = 0
+
+                logits[sorted_indices[sorted_indices_to_remove]] = float('-inf')
+
+            probs = F.softmax(logits, dim=-1)
+            return torch.multinomial(probs, num_samples=1)
+
+    def _sample_next_tokens(
+        self,
+        token_logits: torch.Tensor,
+        temperature: torch.Tensor,
+        top_p: float,
+        do_exploration: bool = False,
+        exploration_top_k: int = 0,
+        exploration_beta: float = 1.0,
+    ) -> torch.Tensor:
+        """Sample next tokens for the entire batch."""
+        next_tokens = []
+        for logits, temp in zip(token_logits, temperature):
+            next_token = self._sample_next_token(
+                logits, temp.item(), top_p, do_exploration, exploration_top_k, exploration_beta
+            )
+            next_tokens.append(next_token)
+        return torch.cat(next_tokens, dim=0)
+
     def generate(
         self,
         input_ids: torch.Tensor,
@@ -126,8 +115,11 @@ class CustomLLMGenerator:
         eos_token_id: int,
         top_p: float = 1.0,
         max_new_tokens: int = 50,
+        enable_exploration: bool = False,
         random_start_steps: int = 0,
-        random_start_top_k: int = 0,
+        uncertainty_threshold: float = 0.5,
+        exploration_top_k: int = 5,
+        exploration_beta: float = 0.5,
         **kwargs,
     ) -> GenerateDecoderOnlyOutput:
         """Generate text with batch-specific temperatures."""
@@ -136,6 +128,8 @@ class CustomLLMGenerator:
         cur_len = input_ids.shape[1]
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         past_key_values = None
+
+        seq_entropies = []
 
         while cur_len < max_new_tokens:
             # Get next token logits
@@ -149,16 +143,29 @@ class CustomLLMGenerator:
             next_token_logits = outputs.logits[:, -1, :].float()
             past_key_values = outputs.past_key_values
 
-            # Determine if we should apply noise based on current position
-            random_sample = False
-            if random_start_steps is not None and random_start_steps > 0:
-                random_sample = (cur_len - prompt_len) < random_start_steps
+            do_exploration = False
+            if enable_exploration:
+                # 1. Initial Random Start Exploration
+                if random_start_steps is not None and random_start_steps > 0 and (cur_len - prompt_len) < random_start_steps:
+                    do_exploration = True
 
-            # print(f"Cur Len: {cur_len}, Apply random sample: {random_sample}")
+                # 2. Uncertainty-Based Exploration
+                elif uncertainty_threshold is not None and exploration_top_k > 0:
+                    entropy_values = self._calculate_entropy(next_token_logits)
+                    avg_entropy = torch.mean(entropy_values).item()
+                    seq_entropies.append(avg_entropy)
+                    if avg_entropy < uncertainty_threshold:
+                        do_exploration = True
 
             # Sample next tokens
-            next_tokens = self._sample_next_tokens(next_token_logits, temperature, top_p, random_sample, random_start_top_k)
-
+            next_tokens = self._sample_next_tokens(
+                next_token_logits,
+                temperature,
+                top_p,
+                do_exploration,
+                exploration_top_k,
+                exploration_beta,
+            )
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(
                 input_ids,
@@ -174,6 +181,13 @@ class CustomLLMGenerator:
 
             cur_len = input_ids.shape[1]
 
+        # for debugging
+        if seq_entropies:
+            entropies = torch.tensor(seq_entropies)
+            logger.debug(f"Mean entropy: {entropies.mean().item()}")
+            logger.debug(f"Median entropy: {entropies.median().item()}")
+            logger.debug(f"P90 entropy: {torch.quantile(entropies, 0.90).item()}")
+            logger.debug(f"P95 entropy: {torch.quantile(entropies, 0.95).item()}")
         return GenerateDecoderOnlyOutput(sequences=input_ids)
 
 

@@ -486,15 +486,14 @@ def math_problem_grader(
     logger.debug(f"Processing answer: {full_answer}")
     logger.debug(f"Ground truth: {ground_truth}")
 
-    candidates = []
-
     # 1. Try boxed answers
     boxed_answer = extract_math_answer_from_last_boxed(full_answer)
     if boxed_answer is not None:
         logger.debug(f"Found boxed answer: {boxed_answer}")
         if check_expressions_equivalent(boxed_answer, ground_truth):
             return 1.0
-        candidates.append(boxed_answer)
+        else:
+            return 0.0
 
     # 2. Try patterned answers
     pattern_answer = extract_math_answer_from_patterned_text(full_answer)
@@ -502,7 +501,8 @@ def math_problem_grader(
         logger.debug(f"Found patterned answer: {pattern_answer}")
         if check_expressions_equivalent(pattern_answer, ground_truth):
             return 1.0
-        candidates.append(pattern_answer)
+        else:
+            return 0.0
 
     # 3. Fallback to last N numerical values
     number_list = extract_last_n_numerical_values(full_answer, size=last_n)
@@ -510,6 +510,5 @@ def math_problem_grader(
         for num in number_list:
             if check_expressions_equivalent(num, ground_truth):
                 return 1.0
-            candidates.append(num)
 
     return 0.0

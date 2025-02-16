@@ -24,9 +24,11 @@ def test_empty_inputs():
     'answer, ground_truth, expected_score',
     [
         (r'The answer is \boxed{42.5}', '42.5', 1.0),
+        (r'The answer is \boxed{42.5}', '41.5', 0.0),
         (r'First step: \boxed{21.25} Final: \boxed{42.5}', '42.5', 1.0),
         (r"Difference = 6 (Caleb's dad's catch) - 2 (Caleb's catch) = 88\nThe final answer is: $\boxed{4}$", '4', 1.0),
         (r'The final answer is: $\boxed{\sqrt{80}}$', r'\sqrt{80}', 1.0),
+        (r'The final answer is: $\boxed{\sqrt{80}}$', r'\sqrt{81}', 0.0),
         (r'The final answer is: $\boxed{\frac{2}{4}}$', r'\frac{2}{4}', 1.0),
         (r'The final answer is: $\boxed{\\frac{2}{4}}$', r'\frac{2}{4}', 1.0),
         (
@@ -36,6 +38,23 @@ def test_empty_inputs():
         ),
         (r'The final answer is: $\boxed{(\pi)}$', '\text{(E)}', 0.0),
         (r'The final answer is: $\boxed{3.92}$', '3', 0.0),
+        (
+            r"""Finally, we subtract the total gallons used from the original amount of paint:
+        \[
+        4 - 4 = 0 \text{ liters}
+        \]
+        So, the number of liters of paint left is \(\boxed{0}\).""",
+            '4',
+            0.0,
+        ),
+        (
+            r"""So, the difference between her average speed when there is heavy traffic and when there is no traffic is:
+        \[
+        \boxed{-10}
+        \]""",
+            '10',
+            0.0,
+        ),
     ],
 )
 def test_boxed_answers(answer, ground_truth, expected_score):

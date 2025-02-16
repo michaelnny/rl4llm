@@ -5,18 +5,7 @@ import torch
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-class BasicTrainConfig(BaseModel):
-    """Basic Training Config"""
-
-    seed: int = Field(167, ge=1, description='Runtime seed')
-    checkpoint_interval: int = Field(0, ge=0, le=100, description='Interval to save policy model checkpoint')
-    artifacts_path: str = Field(None, description='Path to save artifacts like checkpoints, tensorboard logs')
-
-    class Config:
-        arbitrary_types_allowed = True
-
-
-class GRPOConfig(BasicTrainConfig):
+class GRPOConfig(BaseModel):
     """GRPO Training Configuration"""
 
     """For RL sample generation"""
@@ -32,17 +21,21 @@ class GRPOConfig(BasicTrainConfig):
     explore_init_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Initial exploration epsilon')
     explore_min_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Minimum exploration epsilon after decay')
     explore_decay_steps: Optional[int] = Field(0, ge=0, le=1000000, description='Exploration epsilon decay steps')
-    random_start_steps: Optional[int] = Field(
-        10, ge=0, le=128, description='Number of random start steps to randomly sample tokens'
+    random_start_steps: Optional[int] = Field(3, ge=0, le=128, description='Number of random start steps to do exploration')
+    uncertainty_threshold: Optional[float] = Field(
+        0.5, ge=0.0, le=1.0, description='Entropy threshold for uncertainty exploration'
     )
-    random_start_top_k: Optional[int] = Field(20, ge=10, le=200, description='Number of top-k to sample during random start')
+    exploration_top_k: Optional[int] = Field(10, ge=10, le=200, description='Unified top-k for both exploration')
+    exploration_beta: Optional[float] = Field(
+        0.5, ge=0.0, le=1.0, description='Square root of probabilities during exploration'
+    )
 
     """For RL GRPO training"""
-    max_iterations: int = Field(10000, ge=1, description='How long to run the training')
+    max_steps: int = Field(10000, ge=1, description='How long to run the training')
     rollout_size: int = Field(1024, ge=1, le=5120, description='Number of samples to collect before update policy')
     num_updates: int = Field(1, ge=1, le=4, description='GRPO update epochs for a collection of samples')
     batch_size: int = Field(1, ge=1, le=1024, description='Mini-batch size for training')
-    gradient_accumulate_steps: int = Field(1, ge=1, le=32, description='Gradient accumulation steps')
+    gradient_accumulate_steps: int = Field(1, ge=1, description='Gradient accumulation steps')
     clip_eps: float = Field(0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon')
     gamma: float = Field(1.0, ge=0.0, le=1.0, description='Default discount factor for compute returns')
     normalize_group_rewards: bool = Field(True, description='Normalized rewards for the group outcomes')
@@ -54,6 +47,11 @@ class GRPOConfig(BasicTrainConfig):
     sync_reference_interval: int = Field(
         0, ge=10, le=1000, description='Interval to update reference model using latest policy'
     )
+
+    checkpoint_interval: int = Field(0, ge=0, le=100, description='Interval to save policy model checkpoint')
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class GRPOSample(BaseModel):
@@ -75,9 +73,7 @@ class GRPOSample(BaseModel):
     advantages: torch.Tensor = Field(
         ..., description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T'
     )
-    reward: Optional[torch.Tensor] = Field(
-        ..., description='A scalar reward (not normalized) corresponding to terminal time step t=T'
-    )
+    reward: torch.Tensor = Field(..., description='A scalar reward (not normalized) corresponding to terminal time step t=T')
 
     @model_validator(mode='after')
     def check_tensor_shapes(cls, values):

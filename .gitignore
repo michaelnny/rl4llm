@@ -1,12 +1,10 @@
 # Mac/OSX
 .DS_Store
 
-data/processed*
 runs/test*
 # runs/*/samples/*.jsonl
 runs/*/checkpoints/*
-__core__
-
+old_runs/
 
 
 # Byte-compiled / optimized / DLL files
