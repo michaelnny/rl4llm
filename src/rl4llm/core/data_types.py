@@ -44,10 +44,10 @@ class GRPOConfig(BaseModel):
     dynamic_discount: bool = Field(False, description='Use dynamic discount based on sequence length')
     min_gamma: float = Field(0.999, ge=0.0, le=1.0, description='Min value of dynamic discount for compute returns')
     max_gamma: float = Field(0.9999, ge=0.0, le=1.0, description='Max value of dynamic discount for compute returns')
+
     sync_reference_interval: int = Field(
         0, ge=10, le=1000, description='Interval to update reference model using latest policy'
     )
-
     checkpoint_interval: int = Field(0, ge=0, le=100, description='Interval to save policy model checkpoint')
 
     class Config:

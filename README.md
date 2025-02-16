@@ -32,7 +32,7 @@ To monitoring the job, open tensorboard
 
 ```bash
 
-tensorboard --logdir ./rl4llm/runs --bind_all --samples_per_plugin=text=1000
+tensorboard --logdir ./runs --bind_all --samples_per_plugin=text=10000
 
 ```
 

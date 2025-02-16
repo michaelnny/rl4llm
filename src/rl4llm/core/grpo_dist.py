@@ -1,4 +1,4 @@
-"""Implements RL GRPO algorithm to train LLM"""
+"""Implements RL GRPO algorithm to train LLM on multiple GPUs using DeepSpeed"""
 
 import logging
 import os
@@ -8,9 +8,14 @@ from copy import deepcopy
 from functools import partial
 from typing import Any, Dict, List, Optional, Union
 
+import deepspeed
 import torch
+import torch.distributed as dist
 import yaml
 from datasets import Dataset
+from deepspeed import DeepSpeedEngine
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -26,30 +31,34 @@ from .helper import masked_mean, masked_sum, masked_whiten
 logger = logging.getLogger(__name__)
 
 
-class GRPOTrainer:
-    """RL GRPO for training LLMs"""
+class DistGRPOTrainer:
+    """RL GRPO for training LLMs on multiple GPUs"""
 
     def __init__(
         self,
         config: GRPOConfig,
-        policy_model: PreTrainedModel,
+        policy_engine: DeepSpeedEngine,
+        ref_engine: DeepSpeedEngine,
         tokenizer: PreTrainedTokenizer,
-        optimizer: torch.optim.AdamW,
-        scheduler: torch.optim.lr_scheduler.LRScheduler,
         train_ds: Dataset,
-        device: torch.device,
         torch_dtype: torch.dtype,
         artifacts_path: str,
     ):
-        self.config = config
-        self.device = device
-        self.torch_dtype = torch_dtype
-        self.policy_model = policy_model.to(device)
-        self.reference_model = self._create_reference_model()
-        self.reference_model.to(device)
 
-        self.optimizer = optimizer
-        self.scheduler = scheduler
+        assert policy_engine.zero_optimization_stage() <= 2, 'Zero-3 for generation is not support yet'
+
+        self.world_size = dist.get_world_size()
+        self.global_rank = dist.get_global_rank()
+        self.local_rank = dist.get_rank()
+        self.device = torch.device(f"cuda:{self.local_rank}")
+
+        self.config = config
+        self.torch_dtype = torch_dtype
+        self.policy_engine = policy_engine
+        self.policy_model = self.policy_engine.modules
+        self.ref_engine = ref_engine
+        self.reference_model = self.ref_engine.modules
+
         self.tokenizer = tokenizer
 
         self.llm_generator = CustomLLMGenerator(self.policy_model)
@@ -59,6 +68,14 @@ class GRPOTrainer:
 
         self.artifacts_path = artifacts_path
         self._initialize()
+
+    def is_master(self) -> bool:
+        """Returns true if this is the global master rank (rank=0)"""
+        return self.global_rank == 0
+
+    def is_rank0(self) -> bool:
+        """Returns true if this is the local master rank"""
+        return self.local_rank == 0
 
     def _initialize(self):
         """Setup logging and checkpoint directories"""
@@ -367,6 +384,7 @@ class GRPOTrainer:
         assert input_ids.dim() == actions.dim() == 2
         assert input_ids.shape == actions.shape
 
+        # TODO: handle zero-3???
         attention_mask = (input_ids != self.pad_token_id).bool()
         logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
         # this runs into CUDA OOM
@@ -659,13 +677,13 @@ class GRPOTrainer:
 
     def _log_hyper_params_to_tensorboard(self, config: Dict[str, Any]):
         """Log hyper parameters used for the job"""
-        if self.writer:
+        if self.is_master() and self.writer:
             config_str = yaml.dump(config, sort_keys=False, indent=4)
             self.writer.add_text('config/parameters', f"```yaml\n{config_str}\n```", 0)
 
     def _log_sample_to_tensorboard(self, task: str, question: str, ground_truth: str, completion_text: str, reward: float):
         """Log a sample text to tensorboard"""
-        if self.writer:
+        if self.is_master() and self.writer:
             formatted_text = (
                 f"**Question [{task}]**: {question}\n\n"
                 f"**Ground Truth**: {ground_truth}\n\n"
@@ -676,7 +694,7 @@ class GRPOTrainer:
 
     def _log_stats_to_tensorboard(self, stats: Dict[str, Any], step: int):
         """Log stats to tensorboard"""
-        if self.writer:
+        if self.is_master() and self.writer:
             for name, value in stats.items():
                 if isinstance(value, (int, float)):
                     self.writer.add_scalar(f"{name}", value, step)

@@ -1,4 +1,4 @@
-"""Script to run RL GRPO training on multiple GPUs using DeepSpeed."""
+"""Script to run RL GRPO fine-tuning on multiple GPUs using DeepSpeed."""
 
 import argparse
 import os
@@ -17,7 +17,7 @@ from rl4llm.utils import load_yaml_config_file, set_seed, setup_logger
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='RL PPO fine-tuning')
+    parser = argparse.ArgumentParser(description='RL GRPO fine-tuning')
     parser.add_argument(
         '--config-file',
         type=str,

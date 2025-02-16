@@ -1,4 +1,4 @@
-"""Script to run RL GRPO training on a single GPU."""
+"""Script to run RL GRPO fine-tuning on a single GPU."""
 
 import argparse
 import sys
@@ -53,15 +53,10 @@ def main():
 
     policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
 
-    # # compute the total update steps for LR scheduler
-    # total_steps = int(
-    #     grpo_config.max_steps * grpo_config.rollout_size / (grpo_config.batch_size * grpo_config.gradient_accumulate_steps)
-    # )
-
     optimizer, scheduler = create_optimizer_and_scheduler(
         policy_model,
         optimizer_config=config['optimizer'],
-        scheduler_config=config['scheduler'] if 'scheduler' in config else None,  # don't use LR scheduler
+        scheduler_config=config.get('scheduler', None),
         total_steps=grpo_config.max_steps,
     )
 
