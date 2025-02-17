@@ -21,7 +21,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from rl4llm.core.base_ds_class import BaseDeepSpeedClass
 from rl4llm.core.episode_processor import EpisodeProcessor
-from rl4llm.core.helper import (
+from rl4llm.utils.train_utils import (
     compute_entropy_from_logits,
     compute_logprobs_from_logits,
     masked_mean,

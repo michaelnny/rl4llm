@@ -8,6 +8,7 @@ model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
+  flash_attention: true
 
 datasets: # List of math datasets to load
   - "gsm"
@@ -31,7 +32,7 @@ grpo_config:
 
   # for sample generation
   system_prompt: |
-    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your thoughts. Present your final answer in a \boxed{}.
+    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your thoughts. Present your final answer in \boxed{}.
   max_new_tokens: 1024
   temperature: 0.9
   group_size: 16                     # for each sample we generate a group of answers

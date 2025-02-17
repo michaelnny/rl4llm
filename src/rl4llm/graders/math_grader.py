@@ -60,7 +60,7 @@ def extract_math_answer_from_patterned_text(answer_text: str) -> Optional[str]:
     Extracts the answer from a string, handling various cases, including
     text after the answer and removing trailing commas.
     """
-    match = re.search(r'the\s+(final\s+)?answer\s+is:?\s*(.*?)(?:\.|\s+|$)', answer_text, re.IGNORECASE)
+    match = re.search(r'the\s+(final\s+)?answer\s+is:?\s*([\d,\.]+)(?:\.|\s+|$)', answer_text, re.IGNORECASE)
     if match:
         answer = match.group(2).strip()
         if answer.endswith(',') or answer.endswith('.'):

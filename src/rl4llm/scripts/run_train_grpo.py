@@ -7,12 +7,14 @@ from traceback import format_exc
 import torch
 
 from rl4llm.core.grpo import GRPOConfig, GRPOTrainer
-from rl4llm.core.helper import (
+from rl4llm.data import load_and_combine_datasets
+from rl4llm.utils import (
     create_model_and_tokenizer,
     create_optimizer_and_scheduler,
+    load_yaml_config_file,
+    set_seed,
+    setup_logger,
 )
-from rl4llm.data import load_and_combine_datasets
-from rl4llm.utils import load_yaml_config_file, set_seed, setup_logger
 
 
 def parse_args():
@@ -29,6 +31,8 @@ def parse_args():
 
 def main():
     """Starts RL GRPO training loop."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("This script is designed to run on a single GPU.")
 
     args = parse_args()
 
@@ -42,14 +46,14 @@ def main():
     logger = setup_logger()
     grpo_config = GRPOConfig(**config['grpo_config'])
 
-    train_ds, _ = load_and_combine_datasets(config['datasets'])
+    train_ds, test_ds = load_and_combine_datasets(config['datasets'])
 
     if max_samples is not None and max_samples < len(train_ds):
         logger.info(f"Randomly select {max_samples} training samples")
         train_ds = train_ds.shuffle().select(range(max_samples))
 
-    torch_dtype = torch.bfloat16
     device = torch.device('cuda')
+    torch_dtype = torch.bfloat16
 
     policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
 
@@ -70,6 +74,7 @@ def main():
         device=device,
         torch_dtype=torch_dtype,
         artifacts_path=artifacts_path,
+        logger=logger,
     )
 
     try:

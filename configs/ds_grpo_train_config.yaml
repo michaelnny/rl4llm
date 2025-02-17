@@ -1,0 +1,109 @@
+# RL GRPO config
+job:
+  seed: 117
+  artifacts_path: "./runs/grpo_qwen2.5_1.5b_1st_run_explore"
+  max_samples: 5000
+
+model:
+  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
+  load_in_4bit: false
+  gradient_checkpointing: true
+  flash_attention: true
+
+datasets: # List of math datasets to load
+  - "gsm"
+  # - "math"
+
+grpo_config:
+  max_steps: 1000
+  rollout_size: 1024
+  num_updates: 2
+  batch_size: 8
+  gradient_accumulate_steps: 16
+  # dynamic_discount: false           # compute dynamic discount based on completion length
+  # min_gamma: 0.999                  # for compute dynamic discount
+  # max_gamma: 0.9998                 # for compute dynamic discount
+  gamma: 1.0                        # fixed discount
+  clip_eps: 0.2                     # PPO policy clip parameter
+  normalize_group_rewards: true     # no need to normalize for binary rewards
+  normalize_advantages: true
+  kl_loss_coef: 0.001
+  sync_reference_interval: 100      # every N iteration
+
+  # for sample generation
+  system_prompt: |
+    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your thoughts. Present your final answer in \boxed{}.
+  max_new_tokens: 1024
+  temperature: 0.9
+  group_size: 16                     # for each sample we generate a group of answers
+  # group temperature where some are more 'exploitive'
+  group_temperature: true
+  # random start exploration
+  explore_init_epsilon: 0.9
+  explore_min_epsilon: 0.1
+  explore_decay_steps: 500
+  random_start_steps: 5
+  uncertainty_threshold: 0.0        # entropy threshold for exploration
+  exploration_top_k: 20
+  exploration_beta: 0.5             # Square root of probabilities
+
+  # others
+  checkpoint_interval: 100          # every N iteration
+
+deepspeed_train_config:
+  # memory_breakdown: true  # for debugging
+  steps_per_print: 1000000 # disable default logging
+  train_micro_batch_size_per_gpu: 4
+  gradient_accumulation_steps: 16
+  gradient_clipping: 0.0
+  bf16:
+    enabled: true
+  optimizer:
+    type: Adam
+    params:
+      lr: 1.0e-6                            
+      betas: [0.9, 0.95]
+      eps: 1.0e-8
+      weight_decay: 0.002
+  scheduler:
+    type: "WarmupDecayLR"
+    params:
+      warmup_num_steps: 100
+      total_num_steps: 20000
+      warmup_min_lr: 1.0e-7
+      warmup_max_lr: 1.0e-6
+  zero_optimization:
+    stage: 2
+    contiguous_gradients: true
+    overlap_comm: true
+    allgather_partitions: true
+    reduce_scatter: true
+    offload_optimizer:
+      device: cpu
+      pin_memory: true
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: true
+    contiguous_memory_optimization: true
+    number_checkpoints: null
+    synchronize_checkpoint_boundary: false
+
+  
+deepspeed_eval_config:          # for reference model
+  # memory_breakdown: true      # for debugging
+  steps_per_print: 1000000      # disable default logging
+  gradient_clipping: 0.0
+  bf16:
+    enabled: true
+  zero_optimization:
+    stage: 0
+    offload_param:
+      device: cpu
+      pin_memory: true
+  optimizer:   # might need this in order to start the initializations
+    type: Adam
+    params:
+      lr: 1.0e-6                            
+      betas: [0.9, 0.95]
+      eps: 1.0e-8
+      weight_decay: 0.000

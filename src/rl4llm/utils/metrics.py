@@ -1,7 +1,7 @@
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Dict
+from typing import Dict, Any
 
 import numpy as np
 
@@ -33,6 +33,10 @@ class MetricsCollector:
     def add_metric(self, name: str, value: float):
         """Add a generation-related metric"""
         self._metrics[name].append(value)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get all metrics"""
+        return {name: values for name, values in self._metrics.items()}
 
     def get_summary(self) -> Dict[str, float]:
         """Get summary of all metrics"""
