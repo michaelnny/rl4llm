@@ -4,41 +4,30 @@ import logging
 import os
 import random
 from contextlib import contextmanager
-from copy import deepcopy
-from functools import partial
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List
 
 import deepspeed
 import torch
 import torch.distributed as dist
-import yaml
 from datasets import Dataset
 from deepspeed import DeepSpeedEngine
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.generations import CustomLLMGenerator
-from rl4llm.graders import format_structure_grader, math_problem_grader
-from rl4llm.utils import (
-    DummyLogger,
-    MetricsCollector,
-    gather_tensor,
-    masked_mean,
-    masked_sum,
-    masked_whiten,
-    save_yaml_config_file,
-)
+from rl4llm.utils import gather_tensor
 
+from .base_grpo import BaseGRPOTrainer
 from .data_types import GRPOConfig, GRPOSample
-from .grpo import GRPOTrainer
 
 logger = logging.getLogger(__name__)
 
 
-class DistGRPOTrainer(GRPOTrainer):
-    """RL GRPO for training LLMs on multiple GPUs"""
+class GRPOTrainer(BaseGRPOTrainer):
+    """RL GRPO for training LLMs on multiple GPUs using deepspeed.
+
+    Important: due to custom generator class, this code only supports ZeRO stage <=2
+    """
 
     def __init__(
         self,
@@ -47,6 +36,7 @@ class DistGRPOTrainer(GRPOTrainer):
         reference_engine: DeepSpeedEngine,
         tokenizer: PreTrainedTokenizer,
         train_ds: Dataset,
+        test_ds: Dataset,
         device: torch.device,
         torch_dtype: torch.dtype,
         artifacts_path: str,
@@ -59,68 +49,40 @@ class DistGRPOTrainer(GRPOTrainer):
         self.global_rank = int(os.environ['RANK'])
         self.local_rank = int(os.environ['LOCAL_RANK'])  # dist.get_rank()
 
-        self.policy_engine = policy_engine
-        self.reference_engine = reference_engine
-
-        super.__init__(
+        super().__init__(
             config=config,
-            policy_model=self.policy_engine.module,
             tokenizer=tokenizer,
-            optimizer=self.policy_engine.optimizer,
-            scheduler=self.policy_engine.scheduler,
-            train_ds=train_ds,
             device=device,
             torch_dtype=torch_dtype,
             artifacts_path=artifacts_path,
             logger=logger,
+            is_master=self.global_rank == 0,
         )
 
-    def is_master(self) -> bool:
-        """Returns true if this is the global master rank (rank=0)"""
-        return self.global_rank == 0
+        self.policy_engine = policy_engine
+        self.reference_engine = reference_engine
+
+        self.policy_model: PreTrainedModel = self.policy_engine.module
+        self.reference_model: PreTrainedModel = self.reference_engine.module
+        self.llm_generator = CustomLLMGenerator(self.policy_model)
+
+        # we only sample one item at a time for training, so no need loader
+        self.train_ds = train_ds.shuffle(seed=None)
+        self.train_iter = iter(self.train_ds)
+
+        self.test_ds = test_ds
+        self.test_loader = DataLoader(
+            self.test_ds,
+            batch_size=self.config.eval_batch_size,
+            shuffle=False,
+            drop_last=True,
+        )
 
     def is_zero3_enabled(self) -> bool:
         """Returns true if Zero-3 is enabled"""
         return self.policy_engine.zero_optimization_stage() == 3
 
-    def _initialize(self):
-        """Setup logging and checkpoint directories"""
-        self.tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
-        self.checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
-
-        if self.is_master():
-            for path in [self.tb_log_dir, self.checkpoint_dir]:
-                os.makedirs(path, exist_ok=True)
-            logger.info(f"Artifacts will be saved at: {self.artifacts_path!r}")
-            self.writer = SummaryWriter(self.tb_log_dir)
-        else:
-            self.writer = None
-
-        self.metrics = MetricsCollector()
-
-        self.generation_mode = False
-        self.explore_epsilon = 0
-        self.episode_count = 0
-        self.update_count = 0
-        self.iteration_count = 0
-        self.ref_update_count = 0
-
-    def train(self, hyper_params: Optional[Dict] = None):
-        """Start to train the model using RL GRPO.
-
-        Args:
-            hyper_params (Dict): Hyper parameters for the training job.
-        """
-
-        # log the params we use for this training run
-        if hyper_params and self.is_master():
-            save_yaml_config_file(hyper_params, os.path.join(self.artifacts_path, 'hyper_params.yaml'))
-            self._log_hyper_params_to_tensorboard(hyper_params)
-
-        for _ in tqdm(range(self.config.max_steps), desc='Training steps', disable=not self.is_master()):
-            self.run_one_train_iteration()
-
-    def run_one_train_iteration(self) -> None:
+    def run_one_iteration(self) -> None:
         """
         Runs one iteration of the RL GRPO algorithm.
 
@@ -137,7 +99,7 @@ class DistGRPOTrainer(GRPOTrainer):
 
         with self.metrics.timer('step'):
             dist.barrier()
-            samples = self.generate_samples()
+            samples = self.generate_train_samples()
             dist.barrier()
             with torch.autograd.set_detect_anomaly(True):
                 self.train_policy(samples)
@@ -153,6 +115,37 @@ class DistGRPOTrainer(GRPOTrainer):
 
         dist.barrier()
 
+    def run_evaluation(self):
+        """Evaluate the model on the test dataset"""
+        with self._generation_context(is_training=False):
+            self.evaluate_policy(self.policy_model, self.test_loader)
+
+    def generate_train_samples(
+        self,
+    ) -> List[GRPOSample]:
+        """Generates samples using the current policy."""
+
+        with self._generation_context(is_training=True):
+            assert not self.policy_model.training
+            assert not self.reference_model.training
+            collected_samples: List[GRPOSample] = []
+
+            with self.metrics.timer('generation'):
+                while len(collected_samples) < self.config.rollout_size:
+                    sample = self._get_next_data_item()
+                    samples = self.generate_group_samples(
+                        sample,
+                        policy_model=self.policy_model,
+                        reference_model=self.reference_model,
+                        generator=self.llm_generator,
+                    )
+                    collected_samples.extend(samples)
+
+            self.metrics.add_metric('elapsed/generation_episodes', self.train_episode_count)
+            self.metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
+
+            return collected_samples
+
     def train_policy(self, samples: List[GRPOSample]) -> None:
         """Train the policy model using the collected samples."""
 
@@ -162,7 +155,7 @@ class DistGRPOTrainer(GRPOTrainer):
             batch_size=self.config.batch_size,
             shuffle=True,
             pin_memory=self.device.type == 'cuda',
-            collate_fn=self._train_collate_fn,
+            collate_fn=self._train_collate_function,
             drop_last=True,
         )
 
@@ -188,10 +181,20 @@ class DistGRPOTrainer(GRPOTrainer):
         """Save policy model checkpoint following HF conventions"""
         # TODO what about zero-3???
         if self.is_zero3_enabled():
-            self.logger.info('Saving policy model checkpoint using DeepSpeed...')
+            # self.logger.info('Saving policy model checkpoint using DeepSpeed...')
+            raise NotImplementedError
 
         else:
             self.policy_model.save_pretrained(save_dir)
+
+    @contextmanager
+    def _generation_context(self, is_training: bool = True):
+        """Context manager for handling model and optimizer states during generation"""
+        try:
+            self._prepare_for_generation(is_training)
+            yield
+        finally:
+            self._prepare_for_training()
 
     def _get_metrics_summary(self) -> Dict[str, Any]:
         """Get summary of all metrics"""
@@ -207,7 +210,7 @@ class DistGRPOTrainer(GRPOTrainer):
 
         return metrics
 
-    def _prepare_for_generation(self):
+    def _prepare_for_generation(self, is_training: bool = True):
         """Move unnecessary components to CPU during generation"""
         if self.generation_mode:
             return
@@ -216,7 +219,10 @@ class DistGRPOTrainer(GRPOTrainer):
         self.reference_engine.eval()
         # Ensure both models are on GPU for generation
         self.policy_engine = self.policy_engine.to(self.device)
-        self.reference_engine = self.reference_engine.to(self.device)
+        if is_training:
+            self.reference_engine = self.reference_engine.to(self.device)
+        else:
+            self.reference_engine = self.reference_engine.cpu()
 
         # Clear gradients to free memory
         self.policy_engine.optimizer.zero_grad(set_to_none=True)
@@ -251,49 +257,30 @@ class DistGRPOTrainer(GRPOTrainer):
 
         pi_logprobs = self._compute_action_logprobs(self.policy_engine, states, actions)
 
-        behavior_logprobs = batch.pi_logprobs.to(self.device)
-        advantages = batch.advantages.to(self.device)
-        loss_mask = batch.loss_mask.to(self.device)
-        ref_logprobs = batch.ref_logprobs.to(self.device)
-        advantages = batch.advantages.to(self.device)
-        behavior_logprobs = batch.pi_logprobs.to(self.device)
-        ref_logprobs = batch.ref_logprobs.to(self.device)
-        loss_mask = batch.loss_mask.to(self.device)
+        loss, metrics = self._compute_loss(pi_logprobs, batch)
 
-        # Compute the KL divergence between the model and the reference model
-        # per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
-
-        # Clamp log differences for stability
-        per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
-        per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
-        # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
-
-        if self.config.normalize_advantages:
-            advantages = masked_whiten(advantages, loss_mask)
-
-        # PPO clipped surrogate PG loss
-        ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
-        pg_losses = -torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
-
-        pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
-        kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
-
-        # Only compute KL loss for incorrect samples
-        # correctness_mask = (mini_batch.reward >= 1).to(self.device)  # Correct if reward >= 1
-        # incorrect_mask = ~correctness_mask
-        # kl_loss = self.config.kl_loss_coef * (kl * incorrect_mask).mean()
-
-        kl_loss = self.config.kl_loss_coef * kl
-        loss = pg_loss + kl_loss
         self.policy_engine.backward(loss)
         self.policy_engine.step()
 
         # These metrics will later be accumulated over mini batches
-        self.metrics.add_metric('train/total_loss', loss.detach().item())
-        self.metrics.add_metric('train/pg_loss', pg_loss.detach().item())
-        self.metrics.add_metric('train/kl_loss', kl_loss.detach().item())
-        self.metrics.add_metric('train/kl', kl.detach().item())
+        for k, v in metrics.items():
+            self.metrics.add_metric(f'training/{k}', v)
+
+    def _get_next_data_item(self) -> Dict:
+        """Fetches the next sample for generation, handles epoch reset.
+
+        Returns:
+            Dict: A single item containing question and ground truth
+        """
+        try:
+            item = next(self.train_iter)
+            return item
+        except StopIteration:
+            # Epoch finished! Reshuffle and recreate the iterator
+            self.train_ds = self.train_ds.shuffle(seed=None)
+            self.train_iter = iter(self.train_ds)
+            item = next(self.train_iter)  # Get the first item of the new epoch
+            return item
 
     def _handle_post_train(self):
         """Handle post-training operations"""
@@ -310,34 +297,38 @@ class DistGRPOTrainer(GRPOTrainer):
                 logger.info('Saving policy model checkpoint...')
                 save_dir = os.path.join(self.checkpoint_dir, f"iteration_{self.iteration_count}")
                 self.save_checkpoint(save_dir)
-
             dist.barrier()
 
-    def _create_deepspeed_inference_engine(
-        self,
-        model: PreTrainedModel,
-    ) -> deepspeed.InferenceEngine:
-        """Creates DeepSpeed inference engine."""
-        if self.logger:
-            self.logger.info('Creating inference engine...')
-        tp_size = dist.get_world_size() if self.is_zero3_enabled() else 1
-        ds_infer_config = {
-            'tensor_parallel': {'tp_size': tp_size},
-            'dtype': self.torch_dtype,
-            'replace_with_kernel_inject': True,
-            # "use_triton": True,
-            'max_out_tokens': self.tokenizer.model_max_length,
-        }
+        if self.iteration_count % self.config.eval_interval == 0:
+            self.logger.info('Run evaluation...')
+            self.run_evaluation()
+            dist.barrier()
 
-        inference_engine: deepspeed.InferenceEngine = None
-        inference_engine = deepspeed.init_inference(
-            model=model,
-            config=ds_infer_config,
-            # base_dir="/dev/shm",
-            checkpoint=None,
-        )
+    # def _create_deepspeed_inference_engine(
+    #     self,
+    #     model: PreTrainedModel,
+    # ) -> deepspeed.InferenceEngine:
+    #     """Creates DeepSpeed inference engine."""
+    #     if self.logger:
+    #         self.logger.info('Creating inference engine...')
+    #     tp_size = dist.get_world_size() if self.is_zero3_enabled() else 1
+    #     ds_infer_config = {
+    #         'tensor_parallel': {'tp_size': tp_size},
+    #         'dtype': self.torch_dtype,
+    #         'replace_with_kernel_inject': True,
+    #         # "use_triton": True,
+    #         'max_out_tokens': self.tokenizer.model_max_length,
+    #     }
 
-        return inference_engine
+    #     inference_engine: deepspeed.InferenceEngine = None
+    #     inference_engine = deepspeed.init_inference(
+    #         model=model,
+    #         config=ds_infer_config,
+    #         # base_dir="/dev/shm",
+    #         checkpoint=None,
+    #     )
+
+    #     return inference_engine
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""

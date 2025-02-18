@@ -12,10 +12,12 @@ class GRPOConfig(BaseModel):
     system_prompt: Optional[str] = Field(None, description='System prompt for generation')
     max_new_tokens: Optional[int] = Field(4096, ge=50, description='Maximum number of new tokens to generate')
     temperature: Optional[float] = Field(0.9, gt=0.0, le=1.0, description='Sampling temperature for generation')
-    top_k: Optional[int] = Field(0, ge=0, le=50000, description='Sampling top-k for generation')
+    top_k: Optional[int] = Field(100, ge=0, le=50000, description='Sampling top-k for generation')
     top_p: Optional[float] = Field(1.0, ge=0.0, le=1.0, description='Sampling top-p for generation')
     group_size: int = Field(8, ge=4, le=256, description='Number of group outcomes for single question')
-    min_completion_length: Optional[int] = Field(100, ge=10, le=1000, description='Minimum completion token length for compute reward')
+    min_completion_length: Optional[int] = Field(
+        100, ge=10, le=1000, description='Minimum completion token length for compute reward'
+    )
     xml_format: Optional[bool] = Field(False, description='Check R1 style XML format for compute reward')
 
     # enhancements to encourage exploration
@@ -23,9 +25,9 @@ class GRPOConfig(BaseModel):
     explore_init_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Initial exploration epsilon')
     explore_min_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Minimum exploration epsilon after decay')
     explore_decay_steps: Optional[int] = Field(0, ge=0, le=1000000, description='Exploration epsilon decay steps')
-    explore_start_steps: Optional[int] = Field(0, ge=0, le=128, description='Number of random start steps to do exploration')
+    explore_start_ratio: Optional[float] = Field(0, ge=0, le=1.0, description='Ratio of random start steps to do exploration')
     explore_uncertainty: Optional[float] = Field(
-        0.5, ge=0.0, le=1.0, description='Entropy threshold for uncertainty exploration'
+        0.0, ge=0.0, le=1.0, description='Entropy threshold for uncertainty exploration'
     )
     explore_top_k: Optional[int] = Field(50, ge=10, le=200, description='Unified top-k for both exploration')
     explore_top_k_beta: Optional[float] = Field(
@@ -48,7 +50,9 @@ class GRPOConfig(BaseModel):
     dynamic_discount: bool = Field(False, description='Use dynamic discount based on sequence length')
     min_gamma: float = Field(0.999, ge=0.0, le=1.0, description='Min value of dynamic discount for compute returns')
     max_gamma: float = Field(0.9999, ge=0.0, le=1.0, description='Max value of dynamic discount for compute returns')
-    max_completion_length: int = Field(8192, ge=1024, le=51200, description='Maximum to scale the dynamic discount compute returns')
+    max_completion_length: int = Field(
+        8192, ge=1024, le=51200, description='Maximum to scale the dynamic discount compute returns'
+    )
 
     sync_reference_interval: int = Field(
         0, ge=10, le=1000, description='Interval to update reference model using latest policy'

@@ -4,21 +4,27 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
-from copy import deepcopy
-from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import yaml
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-
-from rl4llm.graders import format_structure_grader, math_problem_grader
-from rl4llm.utils import DummyLogger, MetricsCollector, masked_mean, masked_sum, masked_whiten
 from rl4llm.generations import CustomLLMGenerator
+from rl4llm.graders import format_structure_grader, math_problem_grader
+from rl4llm.utils import (
+    DummyLogger,
+    MetricsCollector,
+    masked_mean,
+    masked_sum,
+    masked_whiten,
+    save_yaml_config_file,
+)
+
 from .data_types import GRPOConfig, GRPOSample
 
 
@@ -52,6 +58,8 @@ class BaseGRPOTrainer(ABC):
         self.generation_mode = False
         self.is_master = is_master
 
+        self.stats_completion_lengths = []
+
         self._initialize()
 
     def _initialize(self):
@@ -75,25 +83,94 @@ class BaseGRPOTrainer(ABC):
         else:
             self.writer = None
 
-    @abstractmethod
-    def train(self):
-        """Starts the training loop - implement in subclass"""
-        pass
+    def train(self, log_hyper_params: Optional[Dict] = None):
+        """Start to train the model using RL GRPO.
+
+        Args:
+            hyper_params (Dict): Hyper parameters for the training job.
+        """
+
+        # log the params we use for this training run
+        if log_hyper_params and self.is_master:
+            save_yaml_config_file(log_hyper_params, os.path.join(self.artifacts_path, 'config.yaml'))
+            self._log_hyper_params_to_tensorboard(log_hyper_params)
+
+        for _ in tqdm(range(self.config.max_steps), desc='Training steps', disable=not self.is_master):
+            self.run_one_iteration()
 
     @abstractmethod
-    def run_one_train_iteration(self):
+    def run_one_iteration(self):
         """Run one training iteration - implement in subclass"""
         pass
 
     @abstractmethod
-    def train_policy(self, samples: List[GRPOSample]) -> None:
+    def train_policy(self, policy_model: PreTrainedModel, samples: List[GRPOSample]) -> None:
         """Train the policy model using the collected samples - implement in subclass"""
         pass
 
-    @abstractmethod
-    def run_evaluation(self, test_loader: DataLoader) -> None:
-        """Run evaluation - implement in subclass"""
-        pass
+    @torch.no_grad()
+    def evaluate_policy(self, policy_model: PreTrainedModel, test_loader: DataLoader) -> None:
+        """Run evaluation"""
+
+        system_prompt = self.config.system_prompt
+
+        # use greedy sampling for evaluation
+        eval_kwargs = {
+            'eos_token_id': self.eos_token_id,
+            'pad_token_id': self.pad_token_id,
+            'max_new_tokens': self.config.max_new_tokens,
+            'temperature': 0.0,
+            'top_p': 1.0,
+            'do_sample': False,
+            'use_cache': True,
+            'output_scores': False,
+            'output_logits': False,
+            'return_dict_in_generate': True,
+            'return_legacy_cache': False,
+        }
+
+        total_samples = 0
+        total_correct = 0
+
+        with self.metrics.timer('evaluation'):
+            for batch in test_loader:
+                questions = batch['question']
+                ground_truths = batch['ground_truth']
+                task_types = batch['task_type']
+
+                batch_messages = []
+                for question in questions:
+                    if not system_prompt:
+                        sample_message = [{'role': 'user', 'content': question.strip()}]
+                    else:
+                        sample_message = [
+                            {'role': 'system', 'content': system_prompt.strip()},
+                            {'role': 'user', 'content': question.strip()},
+                        ]
+                    batch_messages.append(sample_message)
+
+                # Tokenize single message
+                message_prompt = self.tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
+                inputs = self.tokenizer(
+                    message_prompt,
+                    return_tensors='pt',
+                    truncation=True,
+                    padding=True,
+                    padding_side='left',
+                    max_length=self.tokenizer.model_max_length,
+                ).to(self.device)
+
+                outputs = policy_model.generate(**inputs, **eval_kwargs)
+
+                reward_dict = self._process_generation_outputs(
+                    questions, ground_truths, task_types, inputs.input_ids, outputs.sequences
+                )
+
+                total_samples += len(questions)
+                total_correct += (reward_dict['accuracy_rewards'] == 1.0).sum().item()
+
+        # accuracy = total_correct / total_samples
+        # self.logger.info(f"Evaluation accuracy: {accuracy:.4f}")
 
     @torch.no_grad()
     def generate_group_samples(
@@ -147,7 +224,11 @@ class BaseGRPOTrainer(ABC):
             max_length=self.tokenizer.model_max_length,
         ).to(self.device)
 
-        use_custom_generator = generator is not None and hasattr(generator, 'generate')
+        use_custom_generator = (
+            generator is not None
+            and hasattr(generator, 'generate')
+            and (self.config.group_temperature or self.config.explore_start_ratio > 0)
+        )
         if not use_custom_generator:
             generator = policy_model
 
@@ -158,11 +239,8 @@ class BaseGRPOTrainer(ABC):
             'pad_token_id': self.pad_token_id,
             'max_new_tokens': self.config.max_new_tokens,
             'temperature': self.config.temperature,
-            # 'enable_exploration': enable_exploration,
-            # 'explore_start_steps': random.choice(range(10, self.config.explore_start_steps)),
-            # 'explore_uncertainty': self.config.explore_uncertainty,
-            # 'explore_top_k': self.config.explore_top_k,
-            # 'explore_top_k_beta': self.config.explore_top_k_beta,
+            'top_p': self.config.top_p,
+            'top_k': self.config.top_k,
             'do_sample': True,
             'use_cache': True,
             'output_scores': False,
@@ -193,13 +271,14 @@ class BaseGRPOTrainer(ABC):
             enable_exploration = (explore_epsilon > 0) and (random.random() < self.explore_epsilon)
 
             # add exploration parameters
-            generation_kwargs["temperature"] = temperature
-            if (self.config.explore_start_steps > 0 or self.config.explore_uncertainty > 0.0) and enable_exploration:
-                generation_kwargs["enable_exploration"] = enable_exploration
-                generation_kwargs["explore_start_steps"] = random.choice(range(10, self.config.explore_start_steps))
-                generation_kwargs["explore_uncertainty"] = self.config.explore_uncertainty
-                generation_kwargs["explore_top_k"] = self.config.explore_top_k
-                generation_kwargs["explore_top_k_beta"] = self.config.explore_top_k_beta
+            generation_kwargs['temperature'] = temperature
+            if (self.config.explore_start_ratio > 0 or self.config.explore_uncertainty > 0.0) and enable_exploration:
+                explore_start_steps = self._get_moving_average_completion_length() * self.config.explore_start_ratio
+                generation_kwargs['enable_exploration'] = enable_exploration
+                generation_kwargs['explore_start_steps'] = explore_start_steps
+                # generation_kwargs["explore_uncertainty"] = self.config.explore_uncertainty
+                generation_kwargs['explore_top_k'] = self.config.explore_top_k
+                generation_kwargs['explore_top_k_beta'] = self.config.explore_top_k_beta
 
         outputs = generator.generate(**generation_kwargs)
 
@@ -354,11 +433,11 @@ class BaseGRPOTrainer(ABC):
 
         # Log samples
         sample_indices = (
-            random.sample(range(len(completion_texts)), min(4, self.config.group_size))
+            random.sample(range(len(completion_texts)), k=min(2, 0.1 * self.config.group_size))
             if is_training
             else range(len(completion_texts))
         )
-        tb_tag = "training" if is_training else "evaluation"
+        tb_tag = 'training' if is_training else 'evaluation'
 
         for i in range(len(completion_texts)):
             if is_training:
@@ -383,6 +462,9 @@ class BaseGRPOTrainer(ABC):
 
         if not is_training:
             return reward_output
+
+        # store historical completion lengths
+        self.stats_completion_lengths.append(completion_tokens_count.float().mean().item())
 
         # Training specific processing
         normalized_rewards = (
@@ -476,7 +558,7 @@ class BaseGRPOTrainer(ABC):
                 format_structure_grader(
                     completion,
                     seq_length=completion_len,
-                    min_length=self.config.min_completion_length,
+                    min_length=min(self.config.min_completion_length, 50),
                     xml_format=self.config.xml_format,
                 )
             )
@@ -581,6 +663,25 @@ class BaseGRPOTrainer(ABC):
         }
 
         return loss, metrics
+
+    def _get_moving_average_completion_length(self, window_size: int = 10) -> int:
+        """Compute moving average completion lengths over the past N iterations"""
+        assert window_size > 1
+
+        if not self.stats_completion_lengths or len(self.stats_completion_lengths) < window_size:
+            return 200
+
+        # Convert to numpy array if not already
+        values = np.array(self.stats_completion_lengths)
+
+        # Calculate moving average using numpy's convolve
+        weights = np.ones(window_size) / window_size
+        moving_averages = np.convolve(values, weights, mode='valid')
+
+        # Get the last moving average value
+        last_ma_value = moving_averages[-1]
+
+        return last_ma_value
 
     def _train_collate_function(self, batch: List[GRPOSample]) -> GRPOSample:
         """Collate function for DataLoader during training"""

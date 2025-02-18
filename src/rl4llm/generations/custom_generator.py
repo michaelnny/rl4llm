@@ -3,7 +3,7 @@ from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers import PreTrainedModel
 from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 logger = logging.getLogger(__name__)
@@ -48,11 +48,22 @@ class CustomLLMGenerator:
         logits: torch.Tensor,  # Single item logits
         temperature: float,
         top_p: float,
+        top_k: int,
         do_exploration: bool = False,
         explore_top_k: int = 0,
         explore_top_k_beta: float = 0.5,
     ) -> torch.Tensor:
-        """Sample next token for a single item in the batch."""
+        """Sample next token for a single item in the batch.
+
+        Args:
+            logits: Token logits
+            temperature: Sampling temperature
+            top_p: Nucleus sampling threshold
+            top_k: Number of highest probability tokens to consider (0 means no limit)
+            do_exploration: Whether to use exploration sampling
+            explore_top_k: Number of tokens to consider in exploration
+            explore_top_k_beta: Power to raise probabilities to in exploration
+        """
         if temperature == 0:
             return logits.argmax(dim=-1, keepdim=True)
 
@@ -75,14 +86,20 @@ class CustomLLMGenerator:
         else:
             logits = logits / temperature
 
+            # Apply top-k filtering
+            if top_k > 0:
+                top_k_values, top_k_indices = torch.topk(logits, min(top_k, logits.size(-1)), dim=-1)
+                indices_to_remove = torch.ones_like(logits, dtype=torch.bool)
+                indices_to_remove.scatter_(-1, top_k_indices, False)
+                logits[indices_to_remove] = float('-inf')
+
+            # Apply nucleus (top-p) filtering
             if top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
                 sorted_indices_to_remove = cumulative_probs > top_p
                 sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
                 sorted_indices_to_remove[0] = 0
-
                 logits[sorted_indices[sorted_indices_to_remove]] = float('-inf')
 
             probs = F.softmax(logits, dim=-1)
@@ -93,6 +110,7 @@ class CustomLLMGenerator:
         token_logits: torch.Tensor,
         temperature: torch.Tensor,
         top_p: float,
+        top_k: int,
         do_exploration: bool = False,
         explore_top_k: int = 0,
         explore_top_k_beta: float = 1.0,
@@ -100,7 +118,9 @@ class CustomLLMGenerator:
         """Sample next tokens for the entire batch."""
         next_tokens = []
         for logits, temp in zip(token_logits, temperature):
-            next_token = self._sample_next_token(logits, temp.item(), top_p, do_exploration, explore_top_k, explore_top_k_beta)
+            next_token = self._sample_next_token(
+                logits, temp.item(), top_p, top_k, do_exploration, explore_top_k, explore_top_k_beta
+            )
             next_tokens.append(next_token)
         return torch.cat(next_tokens, dim=0)
 
@@ -112,17 +132,17 @@ class CustomLLMGenerator:
         pad_token_id: int,
         eos_token_id: int,
         top_p: float = 1.0,
+        top_k: int = 50,
         max_new_tokens: int = 50,
         enable_exploration: bool = False,
         explore_start_steps: int = 0,
-        # explore_uncertainty: float = 0.5,
+        explore_uncertainty: float = 0.5,
         explore_top_k: int = 5,
         explore_top_k_beta: float = 0.5,
         **kwargs,
     ) -> GenerateDecoderOnlyOutput:
         """Generate text with batch-specific temperatures."""
         batch_size = input_ids.shape[0]
-        prompt_len = input_ids.shape[1]
         generated_tokens = 0  # Track only the new tokens generated
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         past_key_values = None
@@ -157,12 +177,13 @@ class CustomLLMGenerator:
 
             # Sample next tokens
             next_tokens = self._sample_next_tokens(
-                next_token_logits,
-                temperature,
-                top_p,
-                do_exploration,
-                explore_top_k,
-                explore_top_k_beta,
+                token_logits=next_token_logits,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                do_exploration=do_exploration,
+                explore_top_k=explore_top_k,
+                explore_top_k_beta=explore_top_k_beta,
             )
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(
