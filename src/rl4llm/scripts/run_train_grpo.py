@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import os
 from traceback import format_exc
 
 import torch
@@ -22,7 +23,7 @@ def parse_args():
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/grpo_train_config.yaml',
+        default='./configs/test_grpo_train_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -31,8 +32,10 @@ def parse_args():
 
 def main():
     """Starts RL GRPO training loop."""
-    if not torch.cuda.is_available():
-        raise RuntimeError('This script is designed to run on a single GPU.')
+    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+        raise RuntimeError('This script only supports run on a single GPU with BF16 mode.')
+
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
     args = parse_args()
 
@@ -40,7 +43,8 @@ def main():
 
     seed = int(config.get('job').get('seed', 142))
     artifacts_path = config.get('job').get('artifacts_path')
-    max_samples = config.get('job').get('max_samples', None)
+    max_train_samples = config.get('job').get('max_train_samples', None)
+    max_test_samples = config.get('job').get('max_test_samples', None)
     set_seed(seed)
 
     logger = setup_logger()
@@ -48,9 +52,13 @@ def main():
 
     train_ds, test_ds = load_and_combine_datasets(config['datasets'])
 
-    if max_samples is not None and max_samples < len(train_ds):
-        logger.info(f"Randomly select {max_samples} training samples")
-        train_ds = train_ds.shuffle().select(range(max_samples))
+    if max_train_samples is not None and max_train_samples < len(train_ds):
+        logger.info(f"Randomly select {max_train_samples} training samples")
+        train_ds = train_ds.shuffle().select(range(max_train_samples))
+
+    if max_test_samples is not None and max_test_samples < len(test_ds):
+        logger.info(f"Randomly select {max_test_samples} testing samples")
+        test_ds = test_ds.shuffle().select(range(max_test_samples))
 
     device = torch.device('cuda')
     torch_dtype = torch.bfloat16
@@ -76,6 +84,7 @@ def main():
         optimizer=optimizer,
         scheduler=scheduler,
         train_ds=train_ds,
+        test_ds=test_ds,
         device=device,
         torch_dtype=torch_dtype,
         artifacts_path=artifacts_path,

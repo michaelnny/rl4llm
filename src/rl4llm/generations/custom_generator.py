@@ -115,7 +115,7 @@ class CustomLLMGenerator:
         max_new_tokens: int = 50,
         enable_exploration: bool = False,
         explore_start_steps: int = 0,
-        explore_uncertainty: float = 0.5,
+        # explore_uncertainty: float = 0.5,
         explore_top_k: int = 5,
         explore_top_k_beta: float = 0.5,
         **kwargs,
@@ -123,13 +123,13 @@ class CustomLLMGenerator:
         """Generate text with batch-specific temperatures."""
         batch_size = input_ids.shape[0]
         prompt_len = input_ids.shape[1]
-        cur_len = input_ids.shape[1]
+        generated_tokens = 0  # Track only the new tokens generated
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         past_key_values = None
 
         seq_entropies = []
 
-        while cur_len < max_new_tokens:
+        while generated_tokens < max_new_tokens:
             # Get next token logits
             outputs = self.model(
                 input_ids=input_ids if past_key_values is None else input_ids[:, -1:],
@@ -144,16 +144,16 @@ class CustomLLMGenerator:
             do_exploration = False
             if enable_exploration:
                 # 1. Initial Random Start Exploration
-                if explore_start_steps is not None and explore_start_steps > 0 and (cur_len - prompt_len) < explore_start_steps:
+                if explore_start_steps is not None and explore_start_steps > 0 and generated_tokens < explore_start_steps:
                     do_exploration = True
 
-                # 2. Uncertainty-Based Exploration
-                elif explore_uncertainty is not None and explore_top_k > 0:
-                    entropy_values = self._calculate_entropy(next_token_logits)
-                    avg_entropy = torch.mean(entropy_values).item()
-                    seq_entropies.append(avg_entropy)
-                    if avg_entropy < explore_uncertainty:
-                        do_exploration = True
+                # # 2. Uncertainty-Based Exploration
+                # elif explore_uncertainty is not None and explore_top_k > 0:
+                #     entropy_values = self._calculate_entropy(next_token_logits)
+                #     avg_entropy = torch.mean(entropy_values).item()
+                #     seq_entropies.append(avg_entropy)
+                #     if avg_entropy < explore_uncertainty:
+                #         do_exploration = True
 
             # Sample next tokens
             next_tokens = self._sample_next_tokens(
@@ -177,7 +177,7 @@ class CustomLLMGenerator:
             if unfinished_sequences.max() == 0:
                 break
 
-            cur_len = input_ids.shape[1]
+            generated_tokens += 1
 
         # for debugging
         if seq_entropies:

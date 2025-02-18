@@ -4,31 +4,33 @@ xml_pattern = r'^<think>(.*?)</think>\s*<answer>(.*?)</answer>$'
 
 
 def check_has_invalid_format(text: str) -> bool:
-    is_invalid = False
-    text = text.strip()
-    if not text or len(text.split(' ')) < 50:  # empty completion or too short
-        is_invalid = True
-    elif text.startswith('```') or text.endswith('```'):  # start with code
-        is_invalid = True
-    elif (
-        text.startswith(r'\\')
-        or text.startswith(r'\boxed')
-        or text.startswith('The answer is')
-        or text.startswith('The correct answer is')
-    ):  # start with answer block
-        is_invalid = True
-    elif text[0].isdigit():  # start with numerical answer or bullet point
-        is_invalid = True
+    try:
+        is_invalid = False
+        if not text:  # empty text
+            is_invalid = True
+        elif text.strip().startswith('```') or text.strip().endswith('```'):  # start with code
+            is_invalid = True
+        elif (
+            text.strip().startswith(r'\\')
+            or text.strip().startswith(r'\boxed')
+            or text.strip().startswith('The answer is')
+            or text.strip().startswith('The correct answer is')
+        ):  # start with answer block
+            is_invalid = True
+        elif text.strip()[0].isdigit():  # start with numerical answer or bullet point
+            is_invalid = True
 
-    return is_invalid
+        return is_invalid
+    except Exception as _e:
+        return True
 
 
-def format_structure_grader(completion: str, check_xml_format: bool = False) -> float:
+def format_structure_grader(completion: str, seq_length: int, min_length: int = 100, xml_format: bool = False) -> float:
     """Checks for general rules like format, length etc"""
     score = 0.0
     completion_text = completion.strip()
 
-    if check_xml_format:
+    if xml_format:
         # DeepSeek R1 style XML format
         match = re.match(xml_pattern, completion_text, re.DOTALL | re.MULTILINE)
         if not match:  # If the XML format doesn't match
@@ -47,7 +49,9 @@ def format_structure_grader(completion: str, check_xml_format: bool = False) -> 
             if check_has_invalid_format(think_content) or check_has_invalid_format(answer_content):
                 score = -0.5
     else:
-        if check_has_invalid_format(completion_text):
+        if seq_length < min_length:
+            score = -0.5
+        elif check_has_invalid_format(completion_text):
             score = -0.5
 
     return score
