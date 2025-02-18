@@ -32,7 +32,7 @@ def parse_args():
 def main():
     """Starts RL GRPO training loop."""
     if not torch.cuda.is_available():
-        raise RuntimeError("This script is designed to run on a single GPU.")
+        raise RuntimeError('This script is designed to run on a single GPU.')
 
     args = parse_args()
 
@@ -55,13 +55,18 @@ def main():
     device = torch.device('cuda')
     torch_dtype = torch.bfloat16
 
+    # compute the total update steps for LR scheduler
+    total_update_steps = int(
+        grpo_config.max_steps * grpo_config.rollout_size / (grpo_config.batch_size * grpo_config.gradient_accumulate_steps)
+    )
+
     policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
 
     optimizer, scheduler = create_optimizer_and_scheduler(
         policy_model,
         optimizer_config=config['optimizer'],
         scheduler_config=config.get('scheduler', None),
-        total_steps=grpo_config.max_steps,
+        total_steps=total_update_steps,
     )
 
     trainer = GRPOTrainer(

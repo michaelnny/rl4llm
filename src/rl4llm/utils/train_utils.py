@@ -1,4 +1,5 @@
-from typing import Any, List, Dict, Optional, Tuple, Union
+import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.optim import Optimizer
@@ -11,6 +12,8 @@ from transformers import (
     PreTrainedTokenizer,
 )
 
+logger = logging.getLogger()
+
 
 def create_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
     """Creates the model and tokenizer from the given configuration."""
@@ -20,6 +23,7 @@ def create_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> 
     gradient_checkpointing = model_config['gradient_checkpointing']
     flash_attention = model_config.get('flash_attention', None)
 
+    logger.info(f"Loading model and tokenizer for {model_name!r}")
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_name)
 
     assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id > 1
@@ -190,6 +194,3 @@ def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = T
     output[mask] = valid_values
 
     return output
-
-
-

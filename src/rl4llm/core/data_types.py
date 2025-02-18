@@ -15,18 +15,19 @@ class GRPOConfig(BaseModel):
     top_k: Optional[int] = Field(0, ge=0, le=50000, description='Sampling top-k for generation')
     top_p: Optional[float] = Field(1.0, ge=0.0, le=1.0, description='Sampling top-p for generation')
     group_size: int = Field(8, ge=4, le=256, description='Number of group outcomes for single question')
+    xml_format: Optional[bool] = Field(False, description='Follow XML structure format during generation')
 
     # our enhancements to GRPO to encourage exploration
     group_temperature: Optional[bool] = Field(False, description='Use group temperatures to sample tokens during generation')
     explore_init_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Initial exploration epsilon')
     explore_min_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Minimum exploration epsilon after decay')
     explore_decay_steps: Optional[int] = Field(0, ge=0, le=1000000, description='Exploration epsilon decay steps')
-    random_start_steps: Optional[int] = Field(3, ge=0, le=128, description='Number of random start steps to do exploration')
-    uncertainty_threshold: Optional[float] = Field(
+    explore_start_steps: Optional[int] = Field(0, ge=0, le=128, description='Number of random start steps to do exploration')
+    explore_uncertainty: Optional[float] = Field(
         0.5, ge=0.0, le=1.0, description='Entropy threshold for uncertainty exploration'
     )
-    exploration_top_k: Optional[int] = Field(10, ge=10, le=200, description='Unified top-k for both exploration')
-    exploration_beta: Optional[float] = Field(
+    explore_top_k: Optional[int] = Field(50, ge=10, le=200, description='Unified top-k for both exploration')
+    explore_top_k_beta: Optional[float] = Field(
         0.5, ge=0.0, le=1.0, description='Square root of probabilities during exploration'
     )
 

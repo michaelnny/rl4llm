@@ -3,15 +3,14 @@
 import argparse
 import os
 import sys
-from traceback import format_exc
 from copy import deepcopy
+from traceback import format_exc
 
 import deepspeed
 import torch
 import torch.distributed as dist
-from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
-from torch.optim.lr_scheduler import OneCycleLR
 
+from rl4llm.core.grpo_dist import DistGRPOTrainer, GRPOConfig
 from rl4llm.data import load_and_combine_datasets
 from rl4llm.utils import (
     DummyLogger,
@@ -21,30 +20,6 @@ from rl4llm.utils import (
     set_seed,
     setup_logger,
 )
-from rl4llm.core.grpo_dist import GRPOTrainer, GRPOConfig
-
-
-# def create_ds_optimizer_and_scheduler(policy_model, optimizer_config, scheduler_config, total_steps):
-
-#     optim_type = optimizer_config['type']
-#     opt_params = optimizer_config['params']
-#     lr = float(opt_params['lr'])
-#     eps = float(opt_params['eps'])
-#     weight_decay = float(opt_params['weight_decay'])
-#     betas = opt_params['betas']
-
-#     optim_groups = get_trainable_param_groups(policy_model, lr, weight_decay)
-
-#     optim_kwargs = {'lr': lr, 'eps': eps, 'betas': betas}
-
-#     adam_offload = False
-
-#     AdamOptimizer = DeepSpeedCPUAdam if adam_offload else FusedAdam
-
-#     optimizer = AdamOptimizer(optim_groups, **optim_kwargs)
-#     scheduler = create_scheduler(optimizer, optimizer)
-
-#     return optimizer, scheduler
 
 
 def parse_args():
@@ -52,7 +27,7 @@ def parse_args():
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/ppo_train_config.yaml',
+        default='./configs/ds_grpo_train_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -70,7 +45,7 @@ def main():
     """Starts RL GRPO training loop."""
 
     if not torch.cuda.is_available():
-        raise RuntimeError("This script is designed to run on a single GPU.")
+        raise RuntimeError('This script is designed to run on a single GPU.')
 
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -135,7 +110,7 @@ def main():
 
     grpo_config = GRPOConfig(**config['grpo_config'])
 
-    trainer = GRPOTrainer(
+    trainer = DistGRPOTrainer(
         config=grpo_config,
         policy_engine=policy_engine,
         reference_engine=ref_engine,

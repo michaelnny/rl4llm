@@ -17,8 +17,8 @@ from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.generations import CustomLLMGenerator
-from rl4llm.graders import general_rule_grader, math_problem_grader
-from rl4llm.utils import MetricsCollector, DummyLogger, masked_mean, masked_sum, masked_whiten, save_yaml_config_file
+from rl4llm.graders import format_structure_grader, math_problem_grader
+from rl4llm.utils import DummyLogger, MetricsCollector, masked_mean, masked_sum, masked_whiten, save_yaml_config_file
 
 from .data_types import GRPOConfig, GRPOSample
 
@@ -104,7 +104,7 @@ class GRPOTrainer:
         for path in [self.tb_log_dir, self.checkpoint_dir]:
             os.makedirs(path, exist_ok=True)
 
-        self.logger.info(f"Artifacts will be saved at: {self.artifacts_path}")
+        self.logger.info(f"Artifacts will be saved at: {self.artifacts_path!r}")
 
         self.writer = SummaryWriter(self.tb_log_dir)
         self.metrics = MetricsCollector()
@@ -230,10 +230,10 @@ class GRPOTrainer:
             'max_new_tokens': self.config.max_new_tokens,
             'temperature': temperature,
             'enable_exploration': enable_exploration,
-            'random_start_steps': self.config.random_start_steps,
-            'uncertainty_threshold': self.config.uncertainty_threshold,
-            'exploration_top_k': self.config.exploration_top_k,
-            'exploration_beta': self.config.exploration_beta,
+            'explore_start_steps': random.choice(range(10, self.config.explore_start_steps)),
+            'explore_uncertainty': self.config.explore_uncertainty,
+            'explore_top_k': self.config.explore_top_k,
+            'explore_top_k_beta': self.config.explore_top_k_beta,
             'do_sample': True,
             'use_cache': True,
             'output_scores': False,
@@ -269,6 +269,7 @@ class GRPOTrainer:
     def train_policy(self, samples: List[GRPOSample]) -> None:
         """Train the policy model using the collected samples."""
 
+        random.shuffle(samples)
         data_loader = DataLoader(
             samples,
             batch_size=self.config.batch_size,
@@ -399,7 +400,6 @@ class GRPOTrainer:
 
         pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
         kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
-        clip_ratio = masked_mean(clipped_ratio, loss_mask, dim=1).mean()
 
         # Only compute KL loss for incorrect samples
         # correctness_mask = (mini_batch.reward >= 1).to(self.device)  # Correct if reward >= 1
@@ -417,7 +417,6 @@ class GRPOTrainer:
         self.metrics.add_metric('train/pg_loss', pg_loss.detach().item())
         self.metrics.add_metric('train/kl_loss', kl_loss.detach().item())
         self.metrics.add_metric('train/kl', kl.detach().item())
-        self.metrics.add_metric('train/pg_clip_ratio', clip_ratio.detach().item())
 
     def _compute_action_logprobs(
         self, model: PreTrainedModel, input_ids: torch.LongTensor, actions: torch.LongTensor
@@ -477,7 +476,7 @@ class GRPOTrainer:
         """Computes exploration epsilon based on the current iteration step count."""
         if self.config.explore_decay_steps == 0:
             self.explore_epsilon = 0.0
-        if self.iteration_count >= self.config.explore_decay_steps:
+        elif self.iteration_count >= self.config.explore_decay_steps:
             self.explore_epsilon = self.config.explore_min_epsilon
         else:
             # Cosine decay schedule
@@ -509,19 +508,19 @@ class GRPOTrainer:
         completion_texts = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
 
         # Compute rewards for group outcomes
-        outcome_rewards = []
-        other_rewards = []
+        accuracy_rewards = []
+        format_rewards = []
         for completion, completion_len in zip(completion_texts, completion_tokens_count.tolist()):
             # Check for correctness
-            outcome_rewards.append(math_problem_grader(completion, ground_truth))
+            accuracy_rewards.append(math_problem_grader(completion, ground_truth))
 
             # Check for general rules like format, sequence length etc
-            other_rewards.append(general_rule_grader(completion))
+            format_rewards.append(format_structure_grader(completion, self.config.xml_format))
 
-        outcome_rewards = torch.tensor(outcome_rewards, dtype=self.torch_dtype)
-        other_rewards = torch.tensor(other_rewards, dtype=self.torch_dtype)
+        accuracy_rewards = torch.tensor(accuracy_rewards, dtype=self.torch_dtype)
+        format_rewards = torch.tensor(format_rewards, dtype=self.torch_dtype)
 
-        rewards = outcome_rewards + other_rewards
+        rewards = accuracy_rewards + format_rewards
 
         # Normalize rewards
         if self.config.normalize_group_rewards:
@@ -589,8 +588,8 @@ class GRPOTrainer:
             results.append(sample)
             self.episode_count += 1
 
-            self.metrics.add_metric('objective/outcome_reward', outcome_rewards[i].item())
-            self.metrics.add_metric('objective/other_reward', other_rewards[i].item())
+            self.metrics.add_metric('objective/accuracy_reward', accuracy_rewards[i].item())
+            self.metrics.add_metric('objective/format_reward', format_rewards[i].item())
             self.metrics.add_metric('objective/total_rewards', rewards[i].item())
             self.metrics.add_metric('objective/completion_length', completion_tokens_count[i].item())
 

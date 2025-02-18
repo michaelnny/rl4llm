@@ -49,26 +49,26 @@ class CustomLLMGenerator:
         temperature: float,
         top_p: float,
         do_exploration: bool = False,
-        exploration_top_k: int = 0,
-        exploration_beta: float = 0.5,
+        explore_top_k: int = 0,
+        explore_top_k_beta: float = 0.5,
     ) -> torch.Tensor:
         """Sample next token for a single item in the batch."""
         if temperature == 0:
             return logits.argmax(dim=-1, keepdim=True)
 
-        if do_exploration and exploration_top_k > 1:
-            top_k_values, top_k_indices = torch.topk(logits, k=exploration_top_k, dim=-1)
+        if do_exploration and explore_top_k > 1:
+            top_k_values, top_k_indices = torch.topk(logits, k=explore_top_k, dim=-1)
 
             # Convert to probabilities
             probs = F.softmax(top_k_values, dim=-1)
 
             # Simple but effective: raise probabilities to a power < 1
             # This flattens the distribution, giving lower-probability tokens more chance
-            probs = probs.pow(exploration_beta)
+            probs = probs.pow(explore_top_k_beta)
             probs = probs / probs.sum()
 
             # # Uniform sampling within top-k (original behavior if temp is 1.0)
-            # probs = torch.ones_like(top_k_values) / exploration_top_k
+            # probs = torch.ones_like(top_k_values) / explore_top_k
 
             sampled_indices = torch.multinomial(probs, num_samples=1)
             return torch.gather(top_k_indices, -1, sampled_indices)
@@ -94,15 +94,13 @@ class CustomLLMGenerator:
         temperature: torch.Tensor,
         top_p: float,
         do_exploration: bool = False,
-        exploration_top_k: int = 0,
-        exploration_beta: float = 1.0,
+        explore_top_k: int = 0,
+        explore_top_k_beta: float = 1.0,
     ) -> torch.Tensor:
         """Sample next tokens for the entire batch."""
         next_tokens = []
         for logits, temp in zip(token_logits, temperature):
-            next_token = self._sample_next_token(
-                logits, temp.item(), top_p, do_exploration, exploration_top_k, exploration_beta
-            )
+            next_token = self._sample_next_token(logits, temp.item(), top_p, do_exploration, explore_top_k, explore_top_k_beta)
             next_tokens.append(next_token)
         return torch.cat(next_tokens, dim=0)
 
@@ -116,10 +114,10 @@ class CustomLLMGenerator:
         top_p: float = 1.0,
         max_new_tokens: int = 50,
         enable_exploration: bool = False,
-        random_start_steps: int = 0,
-        uncertainty_threshold: float = 0.5,
-        exploration_top_k: int = 5,
-        exploration_beta: float = 0.5,
+        explore_start_steps: int = 0,
+        explore_uncertainty: float = 0.5,
+        explore_top_k: int = 5,
+        explore_top_k_beta: float = 0.5,
         **kwargs,
     ) -> GenerateDecoderOnlyOutput:
         """Generate text with batch-specific temperatures."""
@@ -146,15 +144,15 @@ class CustomLLMGenerator:
             do_exploration = False
             if enable_exploration:
                 # 1. Initial Random Start Exploration
-                if random_start_steps is not None and random_start_steps > 0 and (cur_len - prompt_len) < random_start_steps:
+                if explore_start_steps is not None and explore_start_steps > 0 and (cur_len - prompt_len) < explore_start_steps:
                     do_exploration = True
 
                 # 2. Uncertainty-Based Exploration
-                elif uncertainty_threshold is not None and exploration_top_k > 0:
+                elif explore_uncertainty is not None and explore_top_k > 0:
                     entropy_values = self._calculate_entropy(next_token_logits)
                     avg_entropy = torch.mean(entropy_values).item()
                     seq_entropies.append(avg_entropy)
-                    if avg_entropy < uncertainty_threshold:
+                    if avg_entropy < explore_uncertainty:
                         do_exploration = True
 
             # Sample next tokens
@@ -163,8 +161,8 @@ class CustomLLMGenerator:
                 temperature,
                 top_p,
                 do_exploration,
-                exploration_top_k,
-                exploration_beta,
+                explore_top_k,
+                explore_top_k_beta,
             )
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(

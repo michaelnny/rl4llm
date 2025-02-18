@@ -1,8 +1,8 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/grpo_qwen2.5_1.5b_1st_run_explore"
-  max_samples: 5000
+  artifacts_path: "./runs/grpo_qwen2.5_1.5b_2nd_run"
+  # max_samples: 1000         # for a quick run
 
 model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -17,38 +17,45 @@ datasets: # List of math datasets to load
 grpo_config:
   max_steps: 1000
   rollout_size: 1024
-  num_updates: 2
+  num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
   # dynamic_discount: false           # compute dynamic discount based on completion length
   # min_gamma: 0.999                  # for compute dynamic discount
   # max_gamma: 0.9998                 # for compute dynamic discount
-  gamma: 1.0                        # fixed discount
-  clip_eps: 0.2                     # PPO policy clip parameter
-  normalize_group_rewards: true     # no need to normalize for binary rewards
+  gamma: 1.0                          # fixed discount
+  clip_eps: 0.2                       # PPO policy clip parameter
+  normalize_group_rewards: true       # no need to normalize for binary rewards
   normalize_advantages: true
   kl_loss_coef: 0.001
-  sync_reference_interval: 100      # every N iteration
+  sync_reference_interval: 500        # every N iteration
 
   # for sample generation
   system_prompt: |
-    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your thoughts. Present your final answer in \boxed{}.
+    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your reasoning process. Present your final answer within \\boxed{}.
+  # system_prompt: |
+  #   Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your reasoning process. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
+    
+  #   Example structure:
+  #   <think> detailed reasoning process here ... </think>
+  #   <answer> summary answer here ... Thus, the final answer is \\boxed{} </answer>
+  xml_format: false
   max_new_tokens: 1024
   temperature: 0.9
-  group_size: 16                     # for each sample we generate a group of answers
+  group_size: 32                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   group_temperature: true
   # random start exploration
   explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
-  explore_decay_steps: 500
-  random_start_steps: 5
-  uncertainty_threshold: 0.0        # entropy threshold for exploration
-  exploration_top_k: 20
-  exploration_beta: 0.5             # Square root of probabilities
+  explore_decay_steps: 300
+  explore_start_steps: 30
+  explore_uncertainty: 0.0            # entropy threshold for exploration
+  explore_top_k: 50
+  explore_top_k_beta: 0.5             # Square root of probabilities
 
   # others
-  checkpoint_interval: 100          # every N iteration
+  checkpoint_interval: 100            # every N iteration
 
 optimizer:
   type: AdamW8bit
@@ -58,9 +65,9 @@ optimizer:
     eps: 1.0e-8
     weight_decay: 0.002
 
-# scheduler:
-#   type: "OneCycleLR"
-#   params:
-#     warmup_fraction: 0.02
-#     initial_lr_fraction: 0.1
-#     final_lr_fraction: 0.1
+scheduler:
+  type: "OneCycleLR"
+  params:
+    warmup_fraction: 0.01
+    initial_lr_fraction: 0.1
+    final_lr_fraction: 0.1

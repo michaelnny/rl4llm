@@ -28,6 +28,14 @@ PYTHONPATH=src python -m rl4llm.scripts.run_train_grpo
 ```
 
 
+```bash
+
+PYTHONPATH=src TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 src/rl4llm/scripts/run_train_grpo_dist.py --config-file ./configs/ds_grpo_train_config.yaml
+
+
+```
+
+
 To monitoring the job, open tensorboard
 
 ```bash

@@ -1,7 +1,7 @@
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Dict, Any
+from typing import Any, Dict
 
 import numpy as np
 
@@ -45,7 +45,8 @@ class MetricsCollector:
         # Summarize generation metrics
         for name, values in self._metrics.items():
             summary[name] = np.mean(values).item()
-            if len(values) > 1 and 'loss' not in name:  # Add std dev and variance for multiple values
+            # Add std dev and variance for multiple values
+            if len(values) > 1 and 'loss' not in name and 'kl' not in name:
                 summary[f"{name}_std"] = np.std(values).item()
                 summary[f"{name}_var"] = np.var(values).item()
 

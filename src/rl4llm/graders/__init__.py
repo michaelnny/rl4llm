@@ -1,2 +1,2 @@
-from .general_grader import general_rule_grader
+from .format_grader import format_structure_grader
 from .math_grader import math_problem_grader

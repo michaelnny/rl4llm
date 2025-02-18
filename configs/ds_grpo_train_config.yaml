@@ -1,8 +1,8 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/grpo_qwen2.5_1.5b_1st_run_explore"
-  max_samples: 5000
+  artifacts_path: "./runs/grpo_qwen2.5_1.5b_2nd_run"
+  # max_samples: 5000         # for a quick run
 
 model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -16,46 +16,53 @@ datasets: # List of math datasets to load
 
 grpo_config:
   max_steps: 1000
-  rollout_size: 1024
-  num_updates: 2
+  rollout_size: 512
+  num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
   # dynamic_discount: false           # compute dynamic discount based on completion length
   # min_gamma: 0.999                  # for compute dynamic discount
   # max_gamma: 0.9998                 # for compute dynamic discount
-  gamma: 1.0                        # fixed discount
-  clip_eps: 0.2                     # PPO policy clip parameter
-  normalize_group_rewards: true     # no need to normalize for binary rewards
+  gamma: 1.0                          # fixed discount
+  clip_eps: 0.2                       # PPO policy clip parameter
+  normalize_group_rewards: true       # no need to normalize for binary rewards
   normalize_advantages: true
   kl_loss_coef: 0.001
-  sync_reference_interval: 100      # every N iteration
+  sync_reference_interval: 500        # every N iteration
 
   # for sample generation
   system_prompt: |
-    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your thoughts. Present your final answer in \boxed{}.
+    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your reasoning process. Present your final answer within \\boxed{}.
+  # system_prompt: |
+  #   Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your reasoning process. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
+    
+  #   Example structure:
+  #   <think> detailed reasoning process here ... </think>
+  #   <answer> summary answer here ... Thus, the final answer is \\boxed{} </answer>
+  xml_format: false
   max_new_tokens: 1024
   temperature: 0.9
-  group_size: 16                     # for each sample we generate a group of answers
+  group_size: 32                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   group_temperature: true
   # random start exploration
   explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
   explore_decay_steps: 500
-  random_start_steps: 5
-  uncertainty_threshold: 0.0        # entropy threshold for exploration
-  exploration_top_k: 20
-  exploration_beta: 0.5             # Square root of probabilities
+  explore_start_steps: 20
+  explore_uncertainty: 0.0            # entropy threshold for exploration
+  explore_top_k: 50
+  explore_top_k_beta: 0.5             # Square root of probabilities
 
   # others
-  checkpoint_interval: 100          # every N iteration
+  checkpoint_interval: 100            # every N iteration
 
 deepspeed_train_config:
   # memory_breakdown: true  # for debugging
   steps_per_print: 1000000 # disable default logging
-  train_micro_batch_size_per_gpu: 4
-  gradient_accumulation_steps: 16
-  gradient_clipping: 0.0
+  train_micro_batch_size_per_gpu: 8
+  train_batch_size: 128
+  gradient_clipping: 0.5
   bf16:
     enabled: true
   optimizer:
@@ -69,7 +76,7 @@ deepspeed_train_config:
     type: "WarmupDecayLR"
     params:
       warmup_num_steps: 100
-      total_num_steps: 20000
+      total_num_steps: 80000
       warmup_min_lr: 1.0e-7
       warmup_max_lr: 1.0e-6
   zero_optimization:
@@ -92,7 +99,8 @@ deepspeed_train_config:
 deepspeed_eval_config:          # for reference model
   # memory_breakdown: true      # for debugging
   steps_per_print: 1000000      # disable default logging
-  gradient_clipping: 0.0
+  train_micro_batch_size_per_gpu: 8
+  train_batch_size: 128
   bf16:
     enabled: true
   zero_optimization:
@@ -100,10 +108,10 @@ deepspeed_eval_config:          # for reference model
     offload_param:
       device: cpu
       pin_memory: true
-  optimizer:   # might need this in order to start the initializations
-    type: Adam
-    params:
-      lr: 1.0e-6                            
-      betas: [0.9, 0.95]
-      eps: 1.0e-8
-      weight_decay: 0.000
+  # optimizer:   # might need this in order to start the initializations
+  #   type: Adam
+  #   params:
+  #     lr: 1.0e-6                            
+  #     betas: [0.9, 0.95]
+  #     eps: 1.0e-8
+  #     weight_decay: 0.000
