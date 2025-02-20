@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class CustomLLMGenerator:
     """
-    A custom class for LLM text generation with batch-specific temperatures and KV caching.
+    A custom class for LLM text generation with batch-specific temperatures exploring start.
     """
 
     def __init__(self, model: PreTrainedModel):
@@ -27,6 +27,10 @@ class CustomLLMGenerator:
         pad_token_id: Optional[int],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Update sequences with new tokens and handle finished sequences."""
+        assert input_ids.dim() == 2
+        assert next_tokens.dim() == unfinished_sequences.dim() == 1
+        assert input_ids.size(0) == next_tokens.size(0) == unfinished_sequences.size(0)
+
         if eos_token_id is not None:
             next_tokens = next_tokens * unfinished_sequences + (pad_token_id or 0) * (1 - unfinished_sequences)
             unfinished_sequences = unfinished_sequences.mul(next_tokens.ne(eos_token_id))
@@ -36,75 +40,6 @@ class CustomLLMGenerator:
 
         return input_ids, attention_mask, unfinished_sequences
 
-    def _calculate_entropy(self, logits: torch.Tensor) -> torch.Tensor:
-        """Calculates entropy for each item in the batch of logits."""
-        probs = F.softmax(logits, dim=-1)
-        log_probs = F.log_softmax(logits, dim=-1)
-        entropy = -torch.sum(probs * log_probs, dim=-1)  # Calculate entropy for each batch item
-        return entropy
-
-    def _sample_next_token(
-        self,
-        logits: torch.Tensor,  # Single item logits
-        temperature: float,
-        top_p: float,
-        top_k: int,
-        do_exploration: bool = False,
-        explore_top_k: int = 0,
-        explore_top_k_beta: float = 0.5,
-    ) -> torch.Tensor:
-        """Sample next token for a single item in the batch.
-
-        Args:
-            logits: Token logits
-            temperature: Sampling temperature
-            top_p: Nucleus sampling threshold
-            top_k: Number of highest probability tokens to consider (0 means no limit)
-            do_exploration: Whether to use exploration sampling
-            explore_top_k: Number of tokens to consider in exploration
-            explore_top_k_beta: Power to raise probabilities to in exploration
-        """
-        if temperature == 0:
-            return logits.argmax(dim=-1, keepdim=True)
-
-        if do_exploration and explore_top_k > 1:
-            top_k_values, top_k_indices = torch.topk(logits, k=explore_top_k, dim=-1)
-
-            # Convert to probabilities
-            probs = F.softmax(top_k_values, dim=-1)
-
-            # Simple but effective: raise probabilities to a power < 1
-            # This flattens the distribution, giving lower-probability tokens more chance
-            probs = probs.pow(explore_top_k_beta)
-            probs = probs / probs.sum()
-
-            # # Uniform sampling within top-k (original behavior if temp is 1.0)
-            # probs = torch.ones_like(top_k_values) / explore_top_k
-
-            sampled_indices = torch.multinomial(probs, num_samples=1)
-            return torch.gather(top_k_indices, -1, sampled_indices)
-        else:
-            logits = logits / temperature
-
-            # Apply top-k filtering
-            if top_k > 0:
-                top_k_values, top_k_indices = torch.topk(logits, min(top_k, logits.size(-1)), dim=-1)
-                indices_to_remove = torch.ones_like(logits, dtype=torch.bool)
-                indices_to_remove.scatter_(-1, top_k_indices, False)
-                logits[indices_to_remove] = float('-inf')
-
-            # Apply nucleus (top-p) filtering
-            if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
-                sorted_indices_to_remove[0] = 0
-                logits[sorted_indices[sorted_indices_to_remove]] = float('-inf')
-
-            probs = F.softmax(logits, dim=-1)
-            return torch.multinomial(probs, num_samples=1)
-
     def _sample_next_tokens(
         self,
         token_logits: torch.Tensor,
@@ -113,17 +48,55 @@ class CustomLLMGenerator:
         top_k: int,
         do_exploration: bool = False,
         explore_top_k: int = 0,
-        explore_top_k_beta: float = 1.0,
+        explore_top_k_beta: float = 0.5,
     ) -> torch.Tensor:
-        """Sample next tokens for the entire batch."""
-        next_tokens = []
-        for logits, temp in zip(token_logits, temperature):
-            next_token = self._sample_next_token(
-                logits, temp.item(), top_p, top_k, do_exploration, explore_top_k, explore_top_k_beta
-            )
-            next_tokens.append(next_token)
-        return torch.cat(next_tokens, dim=0)
+        """Optimized batch sampling of next tokens."""
+        assert token_logits.size(0) == temperature.size(0)
 
+        # Handle zero temperature case first to match old behavior exactly
+        zero_temp_mask = temperature == 0
+        if zero_temp_mask.all():
+            return token_logits.argmax(dim=-1, keepdim=True)
+
+        if do_exploration and explore_top_k > 1:
+            top_k_values, top_k_indices = torch.topk(token_logits, k=explore_top_k, dim=-1)
+            probs = F.softmax(top_k_values, dim=-1)
+            probs = probs.pow(explore_top_k_beta)
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+
+            sampled_indices = torch.multinomial(probs, num_samples=1)
+            tokens = torch.gather(top_k_indices, -1, sampled_indices)
+        else:
+            # Regular sampling path
+            scaled_logits = token_logits.clone()  # Clone to avoid modifying input
+            scaled_logits[~zero_temp_mask] = scaled_logits[~zero_temp_mask] / temperature[~zero_temp_mask].unsqueeze(-1)
+
+            if top_k > 0:
+                top_k_values, top_k_indices = torch.topk(scaled_logits, min(top_k, scaled_logits.size(-1)), dim=-1)
+                indices_to_remove = torch.ones_like(scaled_logits, dtype=torch.bool)
+                indices_to_remove.scatter_(-1, top_k_indices, False)
+                scaled_logits.masked_fill_(indices_to_remove, float('-inf'))
+
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                indices_to_remove = sorted_indices_to_remove.scatter(-1, sorted_indices, sorted_indices_to_remove)
+                scaled_logits.masked_fill_(indices_to_remove, float('-inf'))
+
+            probs = F.softmax(scaled_logits, dim=-1)
+            tokens = torch.multinomial(probs, num_samples=1)
+
+        # Handle zero temperature cases
+        if zero_temp_mask.any():
+            argmax_tokens = token_logits.argmax(dim=-1, keepdim=True)
+            tokens = torch.where(zero_temp_mask.unsqueeze(-1), argmax_tokens, tokens)
+
+        return tokens.squeeze(-1)  # [batch_size]
+
+    @torch.no_grad()
     def generate(
         self,
         input_ids: torch.Tensor,
@@ -136,7 +109,6 @@ class CustomLLMGenerator:
         max_new_tokens: int = 50,
         enable_exploration: bool = False,
         explore_start_steps: int = 0,
-        explore_uncertainty: float = 0.5,
         explore_top_k: int = 5,
         explore_top_k_beta: float = 0.5,
         **kwargs,
@@ -146,8 +118,6 @@ class CustomLLMGenerator:
         generated_tokens = 0  # Track only the new tokens generated
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         past_key_values = None
-
-        seq_entropies = []
 
         while generated_tokens < max_new_tokens:
             # Get next token logits
@@ -163,17 +133,9 @@ class CustomLLMGenerator:
 
             do_exploration = False
             if enable_exploration:
-                # 1. Initial Random Start Exploration
+                # Random Start Exploration
                 if explore_start_steps is not None and explore_start_steps > 0 and generated_tokens < explore_start_steps:
                     do_exploration = True
-
-                # # 2. Uncertainty-Based Exploration
-                # elif explore_uncertainty is not None and explore_top_k > 0:
-                #     entropy_values = self._calculate_entropy(next_token_logits)
-                #     avg_entropy = torch.mean(entropy_values).item()
-                #     seq_entropies.append(avg_entropy)
-                #     if avg_entropy < explore_uncertainty:
-                #         do_exploration = True
 
             # Sample next tokens
             next_tokens = self._sample_next_tokens(
@@ -200,13 +162,6 @@ class CustomLLMGenerator:
 
             generated_tokens += 1
 
-        # for debugging
-        if seq_entropies:
-            entropies = torch.tensor(seq_entropies)
-            logger.debug(f"Mean entropy: {entropies.mean().item()}")
-            logger.debug(f"Median entropy: {entropies.median().item()}")
-            logger.debug(f"P90 entropy: {torch.quantile(entropies, 0.90).item()}")
-            logger.debug(f"P95 entropy: {torch.quantile(entropies, 0.95).item()}")
         return GenerateDecoderOnlyOutput(sequences=input_ids)
 
 

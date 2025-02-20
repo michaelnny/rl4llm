@@ -26,9 +26,6 @@ class GRPOConfig(BaseModel):
     explore_min_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Minimum exploration epsilon after decay')
     explore_decay_steps: Optional[int] = Field(0, ge=0, le=1000000, description='Exploration epsilon decay steps')
     explore_start_ratio: Optional[float] = Field(0, ge=0, le=1.0, description='Ratio of random start steps to do exploration')
-    explore_uncertainty: Optional[float] = Field(
-        0.0, ge=0.0, le=1.0, description='Entropy threshold for uncertainty exploration'
-    )
     explore_top_k: Optional[int] = Field(50, ge=10, le=200, description='Unified top-k for both exploration')
     explore_top_k_beta: Optional[float] = Field(
         0.5, ge=0.0, le=1.0, description='Square root of probabilities during exploration'
