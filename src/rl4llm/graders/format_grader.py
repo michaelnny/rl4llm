@@ -1,53 +1,55 @@
 import re
 
+from .text_utils import has_irregular_words, has_repetitions
+
 xml_pattern = r'^<think>(.*?)</think>\s*<answer>(.*?)</answer>$'
 
 
-def check_has_invalid_format(text: str) -> bool:
-    is_invalid = False
-    text = text.strip()
-    if not text or len(text.split(' ')) < 50:  # empty completion or too short
-        is_invalid = True
-    elif text.startswith('```') or text.endswith('```'):  # start with code
-        is_invalid = True
-    elif (
-        text.startswith(r'\\')
-        or text.startswith(r'\boxed')
-        or text.startswith('The answer is')
-        or text.startswith('The correct answer is')
-    ):  # start with answer block
-        is_invalid = True
-    elif text[0].isdigit():  # start with numerical answer or bullet point
-        is_invalid = True
+def has_invalid_format(text: str) -> bool:
+    # Avoid processing if text is empty after stripping
+    stripped_text = text.strip()
+    if not stripped_text:
+        return True
 
-    return is_invalid
+    # Check for invalid formatting
+    invalid_conditions = [
+        stripped_text.startswith(('```', '`')),  # start with code block
+        stripped_text.endswith(('```', '`')),
+        stripped_text.startswith(('\\\\', '\\boxed', 'The answer is', 'The correct answer is')),  # start with direct answer
+        stripped_text[0].isdigit(),  # start with number of bullet point
+        # has_irregular_words(stripped_text),  # check for very long words, careful for code or latex math???
+    ]
+
+    return any(invalid_conditions)
 
 
-def format_structure_grader(completion: str, check_xml_format: bool = False) -> float:
+def format_structure_grader(completion: str, seq_length: int, min_length: int = 100, xml_format: bool = False) -> float:
     """Checks for general rules like format, length etc"""
     score = 0.0
     completion_text = completion.strip()
 
-    if check_xml_format:
-        # DeepSeek R1 style XML format
+    if xml_format:
         match = re.match(xml_pattern, completion_text, re.DOTALL | re.MULTILINE)
-        if not match:  # If the XML format doesn't match
-            score = -0.5
-        else:
-            # Extract content inside <think> and <answer> tags
-            think_content = match.group(1).strip() if match.group(1) else ''
-            answer_content = match.group(2).strip() if match.group(2) else ''
+        if not match:
+            return -0.5  # if XML doesn't match
 
-            # Check that the content within <think> and <answer> is not empty
-            if not think_content:
-                score = -0.5
-            if not answer_content:
-                score = -0.5
+        think_content = match.group(1).strip() if match.group(1) else ''
+        answer_content = match.group(2).strip() if match.group(2) else ''
 
-            if check_has_invalid_format(think_content) or check_has_invalid_format(answer_content):
-                score = -0.5
+        if (
+            not think_content
+            or not answer_content
+            or has_invalid_format(think_content)
+            or has_invalid_format(answer_content)
+            or has_repetitions(think_content)
+            or has_repetitions(answer_content)
+        ):
+            # if any content is invalid or repeated
+            return -0.5
+
     else:
-        if check_has_invalid_format(completion_text):
-            score = -0.5
+        if seq_length < min_length or has_invalid_format(completion_text) or has_repetitions(completion_text):
+            return -0.5  # if any condition is violated
 
+    # no conditions are violated
     return score

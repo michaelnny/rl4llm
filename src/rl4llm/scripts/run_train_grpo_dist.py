@@ -10,7 +10,7 @@ import deepspeed
 import torch
 import torch.distributed as dist
 
-from rl4llm.core.grpo_dist import DistGRPOTrainer, GRPOConfig
+from rl4llm.core.grpo_dist import GRPOConfig, GRPOTrainer
 from rl4llm.data import load_and_combine_datasets
 from rl4llm.utils import (
     DummyLogger,
@@ -43,9 +43,8 @@ def parse_args():
 
 def main():
     """Starts RL GRPO training loop."""
-
-    if not torch.cuda.is_available():
-        raise RuntimeError('This script is designed to run on a single GPU.')
+    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+        raise RuntimeError('This script only supports run on GPU with BF16 mode.')
 
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -62,7 +61,9 @@ def main():
     world_size = dist.get_world_size()
     seed = int(config.get('job', {}).get('seed', 143)) + local_rank
     artifacts_path = config.get('job').get('artifacts_path')
-    max_samples = config.get('job').get('max_samples', None)
+    datasets = config.get('job').get('datasets')
+    max_train_samples = config.get('job').get('max_train_samples', None)
+    max_test_samples = config.get('job').get('max_test_samples', None)
     set_seed(seed)
 
     # Set device for each process using local_rank
@@ -70,11 +71,19 @@ def main():
 
     logger = setup_logger() if local_rank == 0 else DummyLogger()
 
-    train_ds, _ = load_and_combine_datasets(config['datasets'])
+    train_ds, test_ds = load_and_combine_datasets(datasets)
 
-    if max_samples is not None and max_samples < len(train_ds):
-        logger.info(f"Randomly select {max_samples} training samples")
-        train_ds = train_ds.shuffle().select(range(max_samples))
+    if max_train_samples is not None and max_train_samples < len(train_ds):
+        logger.info(f"Randomly select {max_train_samples} training samples")
+        train_ds = train_ds.shuffle().select(range(max_train_samples))
+    else:
+        logger.info(f'Number of training samples: {len(train_ds)}')
+
+    if max_test_samples is not None and max_test_samples < len(test_ds):
+        logger.info(f"Randomly select {max_test_samples} testing samples")
+        test_ds = test_ds.shuffle().select(range(max_test_samples))
+    else:
+        logger.info(f'Number of testing samples: {len(test_ds)}')
 
     # shard datasets across ranks, so each rank only works on a small subset of the data
     shared_train_ds = train_ds.shard(world_size, local_rank)
@@ -110,12 +119,13 @@ def main():
 
     grpo_config = GRPOConfig(**config['grpo_config'])
 
-    trainer = DistGRPOTrainer(
+    trainer = GRPOTrainer(
         config=grpo_config,
         policy_engine=policy_engine,
         reference_engine=ref_engine,
         tokenizer=tokenizer,
         train_ds=train_ds,
+        test_ds=test_ds,
         device=device,
         torch_dtype=torch_dtype,
         artifacts_path=artifacts_path,
@@ -123,7 +133,7 @@ def main():
     )
 
     try:
-        trainer.train(hyper_params=config)
+        trainer.train(log_hyper_params=config)
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
         sys.exit(0)

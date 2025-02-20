@@ -1,6 +1,7 @@
 """Script to run RL GRPO fine-tuning on a single GPU."""
 
 import argparse
+import os
 import sys
 from traceback import format_exc
 
@@ -31,8 +32,10 @@ def parse_args():
 
 def main():
     """Starts RL GRPO training loop."""
-    if not torch.cuda.is_available():
-        raise RuntimeError('This script is designed to run on a single GPU.')
+    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+        raise RuntimeError('This script only supports run on GPU with BF16 mode.')
+
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
     args = parse_args()
 
@@ -40,17 +43,27 @@ def main():
 
     seed = int(config.get('job').get('seed', 142))
     artifacts_path = config.get('job').get('artifacts_path')
-    max_samples = config.get('job').get('max_samples', None)
+    datasets = config.get('job').get('datasets')
+    max_train_samples = config.get('job').get('max_train_samples', None)
+    max_test_samples = config.get('job').get('max_test_samples', None)
     set_seed(seed)
 
     logger = setup_logger()
     grpo_config = GRPOConfig(**config['grpo_config'])
 
-    train_ds, test_ds = load_and_combine_datasets(config['datasets'])
+    train_ds, test_ds = load_and_combine_datasets(datasets)
 
-    if max_samples is not None and max_samples < len(train_ds):
-        logger.info(f"Randomly select {max_samples} training samples")
-        train_ds = train_ds.shuffle().select(range(max_samples))
+    if max_train_samples is not None and max_train_samples < len(train_ds):
+        logger.info(f"Randomly select {max_train_samples} training samples")
+        train_ds = train_ds.shuffle().select(range(max_train_samples))
+    else:
+        logger.info(f'Number of training samples: {len(train_ds)}')
+
+    if max_test_samples is not None and max_test_samples < len(test_ds):
+        logger.info(f"Randomly select {max_test_samples} testing samples")
+        test_ds = test_ds.shuffle().select(range(max_test_samples))
+    else:
+        logger.info(f'Number of testing samples: {len(test_ds)}')
 
     device = torch.device('cuda')
     torch_dtype = torch.bfloat16
@@ -76,6 +89,7 @@ def main():
         optimizer=optimizer,
         scheduler=scheduler,
         train_ds=train_ds,
+        test_ds=test_ds,
         device=device,
         torch_dtype=torch_dtype,
         artifacts_path=artifacts_path,
@@ -83,7 +97,7 @@ def main():
     )
 
     try:
-        trainer.train(hyper_params=config)
+        trainer.train(log_hyper_params=config)
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
         sys.exit(0)

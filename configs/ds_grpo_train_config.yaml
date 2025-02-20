@@ -2,7 +2,11 @@
 job:
   seed: 117
   artifacts_path: "./runs/grpo_qwen2.5_1.5b_2nd_run"
-  # max_samples: 5000         # for a quick run
+  datasets: # List of math datasets to load
+    - "gsm"
+    # - "math"
+  # max_train_samples: 1600         # for a quick run
+  max_test_samples: 2048       
 
 model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -10,9 +14,6 @@ model:
   gradient_checkpointing: true
   flash_attention: true
 
-datasets: # List of math datasets to load
-  - "gsm"
-  # - "math"
 
 grpo_config:
   max_steps: 1000
@@ -49,7 +50,7 @@ grpo_config:
   explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
   explore_decay_steps: 500
-  explore_start_steps: 20
+  explore_start_ratio: 0.1
   explore_uncertainty: 0.0            # entropy threshold for exploration
   explore_top_k: 50
   explore_top_k_beta: 0.5             # Square root of probabilities
