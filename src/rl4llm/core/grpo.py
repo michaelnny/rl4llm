@@ -65,6 +65,7 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.test_loader = DataLoader(
             self.test_ds,
             batch_size=self.config.eval_batch_size,
+            pin_memory=True,
             shuffle=False,
             drop_last=True,
         )
@@ -82,20 +83,20 @@ class GRPOTrainer(BaseGRPOTrainer):
         6. Handles any post-training operations. Include checkpoint and optionally updates the reference policy.
         """
 
-        self.metrics.reset()
+        self._metrics.reset()
 
-        with self.metrics.timer('step'):
+        with self._metrics.timer('step'):
             samples = self.generate_train_samples()
             with torch.autograd.set_detect_anomaly(True):
                 self.train_policy(samples)
 
         self.iteration_count += 1
 
-        self._handle_post_train()
-
         # Log all metrics
         metrics = self._get_metrics_summary()
         self._log_stats_to_tensorboard(metrics, self.iteration_count)
+
+        self._handle_post_train()
 
     def run_evaluation(self):
         """Evaluate the model on the test dataset"""
@@ -112,7 +113,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             assert not self.reference_model.training
             collected_samples: List[GRPOSample] = []
 
-            with self.metrics.timer('generation'):
+            with self._metrics.timer('generation'):
                 while len(collected_samples) < self.config.rollout_size:
                     sample = self._get_next_data_item()
                     samples = self.generate_group_samples(
@@ -123,8 +124,8 @@ class GRPOTrainer(BaseGRPOTrainer):
                     )
                     collected_samples.extend(samples)
 
-            self.metrics.add_metric('elapsed/generation_episodes', self.train_episode_count)
-            self.metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
+            self._metrics.add_metric('elapsed/generation_episodes', self.train_episode_count)
+            self._metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
 
             return collected_samples
 
@@ -147,13 +148,19 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         mini_steps = 0
 
-        with self.metrics.timer('train'):
+        with self._metrics.timer('train'):
             for _ in range(self.config.num_updates):
                 for mini_batch in data_loader:
                     self._train_one_batch(mini_batch)
                     mini_steps += 1
 
                     if mini_steps % self.config.gradient_accumulate_steps == 0:
+                        grad_norm = self.get_grad_norm(self.policy_model)
+                        self._metrics.add_metric('training/grad_norm', grad_norm.item())
+                        if self.config.clip_grad_norm > 0:
+                            torch.nn.utils.clip_grad_norm_(
+                                self.policy_model.parameters(), max_norm=self.config.clip_grad_norm, error_if_nonfinite=True
+                            )
                         self.optimizer.step()
                         if self.scheduler is not None:
                             self.scheduler.step()
@@ -170,9 +177,9 @@ class GRPOTrainer(BaseGRPOTrainer):
             self.update_count += 1
 
         # add more metrics
-        self.metrics.add_metric('elapsed/policy_update', self.update_count)
-        self.metrics.add_metric('elapsed/reference_update', self.ref_update_count)
-        self.metrics.add_metric('training/learning_rate', self.optimizer.param_groups[0]['lr'])
+        self._metrics.add_metric('elapsed/policy_update', self.update_count)
+        self._metrics.add_metric('elapsed/reference_update', self.ref_update_count)
+        self._metrics.add_metric('training/learning_rate', self.optimizer.param_groups[0]['lr'])
 
     def save_checkpoint(self, save_dir: str):
         """Save policy model checkpoint following HF conventions"""
@@ -189,7 +196,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def _get_metrics_summary(self) -> Dict[str, Any]:
         """Get summary of all metrics"""
-        return self.metrics.get_summary()
+        return self._metrics.get_summary()
 
     def _prepare_for_generation(self, is_training: bool = True):
         """Move unnecessary components to CPU during generation"""
@@ -239,13 +246,12 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         loss, metrics = self._compute_loss(pi_logprobs, batch)
 
-        # scaled_loss = loss / self.config.gradient_accumulate_steps
-        # scaled_loss.backward()
-        loss.backward()
+        scaled_loss = loss / self.config.gradient_accumulate_steps
+        scaled_loss.backward()
 
         # These metrics will later be accumulated over mini batches
         for k, v in metrics.items():
-            self.metrics.add_metric(f'training/{k}', v)
+            self._metrics.add_metric(f'training/{k}', v)
 
     def _get_next_data_item(self) -> Dict:
         """Fetches the next sample for generation, handles epoch reset.
@@ -274,7 +280,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         if self.iteration_count % self.config.checkpoint_interval == 0:
             self.logger.info('Saving policy model checkpoint...')
-            save_dir = os.path.join(self.checkpoint_dir, f"iteration_{self.iteration_count}")
+            save_dir = os.path.join(self._checkpoint_dir, f"iteration_{self.iteration_count}")
             self.save_checkpoint(save_dir)
 
         if self.iteration_count % self.config.eval_interval == 0:

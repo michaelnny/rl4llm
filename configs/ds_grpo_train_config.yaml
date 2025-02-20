@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/grpo_qwen2.5_1.5b_2nd_run"
+  artifacts_path: "./runs/ds_enhanced_grpo_qwen2.5_0.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -9,15 +9,14 @@ job:
   max_test_samples: 2048       
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
 
-
 grpo_config:
   max_steps: 1000
-  rollout_size: 512
+  rollout_size: 1024
   num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
@@ -41,6 +40,8 @@ grpo_config:
   #   <think> detailed reasoning process here ... </think>
   #   <answer> summary answer here ... Thus, the final answer is \\boxed{} </answer>
   xml_format: false
+  min_completion_length: 100
+
   max_new_tokens: 1024
   temperature: 0.9
   group_size: 32                      # for each sample we generate a group of answers
@@ -51,9 +52,12 @@ grpo_config:
   explore_min_epsilon: 0.1
   explore_decay_steps: 500
   explore_start_ratio: 0.1
-  explore_uncertainty: 0.0            # entropy threshold for exploration
-  explore_top_k: 50
+  explore_top_k: 100
   explore_top_k_beta: 0.5             # Square root of probabilities
+
+  # evaluation
+  eval_batch_size: 32
+  eval_interval: 100
 
   # others
   checkpoint_interval: 100            # every N iteration
@@ -63,7 +67,7 @@ deepspeed_train_config:
   steps_per_print: 1000000 # disable default logging
   train_micro_batch_size_per_gpu: 8
   train_batch_size: 128
-  gradient_clipping: 0.5
+  gradient_clipping: 1.0
   bf16:
     enabled: true
   optimizer:
@@ -100,8 +104,8 @@ deepspeed_train_config:
 deepspeed_eval_config:          # for reference model
   # memory_breakdown: true      # for debugging
   steps_per_print: 1000000      # disable default logging
-  train_micro_batch_size_per_gpu: 8
-  train_batch_size: 128
+  train_micro_batch_size_per_gpu: 8   # not used
+  train_batch_size: 128               # not used
   bf16:
     enabled: true
   zero_optimization:
@@ -109,10 +113,3 @@ deepspeed_eval_config:          # for reference model
     offload_param:
       device: cpu
       pin_memory: true
-  # optimizer:   # might need this in order to start the initializations
-  #   type: Adam
-  #   params:
-  #     lr: 1.0e-6                            
-  #     betas: [0.9, 0.95]
-  #     eps: 1.0e-8
-  #     weight_decay: 0.000

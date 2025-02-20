@@ -74,6 +74,7 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.test_loader = DataLoader(
             self.test_ds,
             batch_size=self.config.eval_batch_size,
+            pin_memory=True,
             shuffle=False,
             drop_last=True,
         )
@@ -95,9 +96,9 @@ class GRPOTrainer(BaseGRPOTrainer):
         6. Handles any post-training operations. Include checkpoint and optionally updates the reference policy.
         """
 
-        self.metrics.reset()
+        self._metrics.reset()
 
-        with self.metrics.timer('step'):
+        with self._metrics.timer('step'):
             dist.barrier()
             samples = self.generate_train_samples()
             dist.barrier()
@@ -108,7 +109,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         # Log all metrics
         metrics = self._get_metrics_summary()
-        if self.is_master():
+        if self.is_master:
             self._log_stats_to_tensorboard(metrics, self.iteration_count)
 
         self._handle_post_train()
@@ -130,7 +131,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             assert not self.reference_model.training
             collected_samples: List[GRPOSample] = []
 
-            with self.metrics.timer('generation'):
+            with self._metrics.timer('generation'):
                 while len(collected_samples) < self.config.rollout_size:
                     sample = self._get_next_data_item()
                     samples = self.generate_group_samples(
@@ -141,8 +142,8 @@ class GRPOTrainer(BaseGRPOTrainer):
                     )
                     collected_samples.extend(samples)
 
-            self.metrics.add_metric('elapsed/generation_episodes', self.train_episode_count)
-            self.metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
+            self._metrics.add_metric('elapsed/generation_episodes', self.train_episode_count)
+            self._metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
 
             return collected_samples
 
@@ -166,16 +167,16 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         dist.barrier()
 
-        with self.metrics.timer('train'):
+        with self._metrics.timer('train'):
             for _ in range(self.config.num_updates):
                 for mini_batch in data_loader:
                     self._train_one_batch(mini_batch)
                     if self.policy_engine.is_gradient_accumulation_boundary():
                         self.update_count += 1
 
-        self.metrics.add_metric('elapsed/policy_update', self.update_count)
-        self.metrics.add_metric('elapsed/reference_update', self.ref_update_count)
-        self.metrics.add_metric('train/learning_rate', self.policy_engine.optimizer.param_groups[0]['lr'])
+        self._metrics.add_metric('elapsed/policy_update', self.update_count)
+        self._metrics.add_metric('elapsed/reference_update', self.ref_update_count)
+        self._metrics.add_metric('training/learning_rate', self.policy_engine.optimizer.param_groups[0]['lr'])
 
     def save_checkpoint(self, save_dir: str):
         """Save policy model checkpoint following HF conventions"""
@@ -200,7 +201,7 @@ class GRPOTrainer(BaseGRPOTrainer):
         """Get summary of all metrics"""
         # gather metrics from all ranks
         metrics = {}
-        local_metrics = self.metrics.get_metrics()
+        local_metrics = self._metrics.get_metrics()
         for k, v in local_metrics.items():
             values = gather_tensor(torch.tensor(v, dtype=self.torch_dtype, device=self.device))
             metrics[k] = values.mean().item()
@@ -264,7 +265,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         # These metrics will later be accumulated over mini batches
         for k, v in metrics.items():
-            self.metrics.add_metric(f'training/{k}', v)
+            self._metrics.add_metric(f'training/{k}', v)
 
     def _get_next_data_item(self) -> Dict:
         """Fetches the next sample for generation, handles epoch reset.
@@ -293,9 +294,9 @@ class GRPOTrainer(BaseGRPOTrainer):
             dist.barrier()
 
         if self.iteration_count % self.config.checkpoint_interval == 0:
-            if self.is_master():
+            if self.is_master:
                 logger.info('Saving policy model checkpoint...')
-                save_dir = os.path.join(self.checkpoint_dir, f"iteration_{self.iteration_count}")
+                save_dir = os.path.join(self._checkpoint_dir, f"iteration_{self.iteration_count}")
                 self.save_checkpoint(save_dir)
             dist.barrier()
 

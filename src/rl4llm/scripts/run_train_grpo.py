@@ -100,12 +100,15 @@ def main():
         trainer.train(log_hyper_params=config)
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
+        trainer.on_exit()
         sys.exit(0)
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
         logger.error(format_exc())
+        trainer.on_exit()
         sys.exit(1)
     finally:
+        trainer.on_exit()
         logger.info('Exiting main program.')
 
 

@@ -44,7 +44,7 @@ class MetricsCollector:
         """Get all metrics"""
         return {name: values for name, values in self._metrics.items()}
 
-    def get_summary(self) -> Dict[str, float]:
+    def get_summary(self, skip_list: List[str] = ['loss', 'kl', 'grad_norm']) -> Dict[str, float]:
         """Get summary of all metrics"""
         summary = {}
 
@@ -52,7 +52,9 @@ class MetricsCollector:
         for name, values in self._metrics.items():
             summary[name] = np.mean(values).item()
             # Add std dev and variance for multiple values
-            if len(values) > 1 and 'loss' not in name and 'kl' not in name:
+            if len(values) > 1:
+                if skip_list and any([k in name for k in skip_list]):
+                    continue
                 summary[f"{name}_std"] = np.std(values).item()
                 summary[f"{name}_var"] = np.var(values).item()
 

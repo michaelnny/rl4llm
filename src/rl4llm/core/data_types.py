@@ -42,6 +42,7 @@ class GRPOConfig(BaseModel):
     normalize_group_rewards: bool = Field(True, description='Normalized rewards for the group outcomes')
     normalize_advantages: bool = Field(False, description='Normalized advantages before compute PG loss')
     kl_loss_coef: float = Field(0.01, ge=0.0, le=1.0, description='KL penalty loss coefficient')
+    clip_grad_norm: Optional[float] = Field(0.0, ge=0.0, le=10.0, description='Clip L2 gradient norm')
 
     # enhancement of dynamic discount based on sequence length
     dynamic_discount: bool = Field(False, description='Use dynamic discount based on sequence length')
@@ -81,7 +82,7 @@ class GRPOSample(BaseModel):
     advantages: torch.Tensor = Field(
         ..., description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T'
     )
-    reward: torch.Tensor = Field(..., description='A scalar reward (not normalized) corresponding to terminal time step t=T')
+    # reward: torch.Tensor = Field(..., description='A scalar reward (not normalized) corresponding to terminal time step t=T')
 
     @model_validator(mode='after')
     def check_tensor_shapes(cls, values):

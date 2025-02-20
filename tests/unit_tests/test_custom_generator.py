@@ -45,7 +45,7 @@ def test_zero_temperature_sampling(generator: CustomLLMGenerator):
 
     next_tokens = generator._sample_next_tokens(logits, temperature, top_p=1.0, top_k=0)
 
-    expected = torch.tensor([[2], [0]])  # argmax positions
+    expected = torch.tensor([2, 0])  # argmax positions
     assert torch.equal(next_tokens, expected)
 
 

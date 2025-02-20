@@ -137,6 +137,19 @@ def create_scheduler(
     )
 
 
+def compute_grad_norm(model: torch.nn.Module) -> torch.Tensor:
+    total_norm = torch.tensor(0.0)
+    for p in model.parameters():
+        if p.grad is not None:
+            # Detach the gradient tensor before computing the norm
+            grad_detached = p.grad.detach()
+            local_norm = torch.linalg.vector_norm(grad_detached, dtype=p.dtype)
+            if total_norm.device != local_norm.device:
+                total_norm = total_norm.to(local_norm.device)
+            total_norm += local_norm**2
+    return total_norm**0.5
+
+
 def masked_sum(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[int, Tuple]] = None) -> torch.Tensor:
     assert torch.is_tensor(mask) and mask.dtype == torch.bool
     assert torch.is_tensor(values) and values.shape == mask.shape
