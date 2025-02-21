@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -42,6 +43,7 @@ class GRPOConfig(BaseModel):
     normalize_group_rewards: bool = Field(True, description='Normalized rewards for the group outcomes')
     normalize_advantages: bool = Field(False, description='Normalized advantages before compute PG loss')
     kl_loss_coef: float = Field(0.01, ge=0.0, le=1.0, description='KL penalty loss coefficient')
+    clip_grad_norm: Optional[float] = Field(0.0, ge=0.0, le=10.0, description='Clip L2 gradient norm')
 
     # enhancement of dynamic discount based on sequence length
     dynamic_discount: bool = Field(False, description='Use dynamic discount based on sequence length')
@@ -51,12 +53,10 @@ class GRPOConfig(BaseModel):
         8192, ge=1024, le=51200, description='Maximum to scale the dynamic discount compute returns'
     )
 
-    sync_reference_interval: int = Field(
-        0, ge=10, le=1000, description='Interval to update reference model using latest policy'
-    )
-    checkpoint_interval: int = Field(0, ge=0, le=100, description='Interval to save policy model checkpoint')
-    eval_interval: int = Field(100, ge=1, description='Interval to evaluate policy model')
-    eval_batch_size: int = Field(8, ge=1, le=1024, description='Mini-batch size for evaluation')
+    sync_reference_interval: int = Field(0, ge=0, le=1000, description='Interval to update reference model using latest policy')
+    checkpoint_interval: int = Field(0, ge=0, le=1000, description='Interval to save policy model checkpoint')
+    eval_interval: int = Field(100, ge=0, description='Interval to evaluate policy model')
+    eval_batch_size: int = Field(8, ge=0, le=1024, description='Mini-batch size for evaluation')
 
     class Config:
         arbitrary_types_allowed = True
@@ -81,7 +81,7 @@ class GRPOSample(BaseModel):
     advantages: torch.Tensor = Field(
         ..., description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T'
     )
-    reward: torch.Tensor = Field(..., description='A scalar reward (not normalized) corresponding to terminal time step t=T')
+    # reward: torch.Tensor = Field(..., description='A scalar reward (not normalized) corresponding to terminal time step t=T')
 
     @model_validator(mode='after')
     def check_tensor_shapes(cls, values):
@@ -104,3 +104,16 @@ class GRPOSample(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+class SampleLog(BaseModel):
+    """Pydantic model for sample logging data."""
+
+    question: str
+    task_type: str
+    ground_truth: str
+    completion: str
+    accuracy_reward: Optional[float] = 0.0
+    format_reward: Optional[float] = 0.0
+    total_reward: Optional[float] = 0.0
+    completion_length: Optional[int] = 0

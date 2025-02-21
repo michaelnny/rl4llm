@@ -85,6 +85,31 @@ def test_boxed_answers(answer, ground_truth, expected_score):
         (r'Therefore, the answer is $a = \boxed{-\frac{1}{4}}$.', '-0.25', 1.0),
         (r'So, the final answer is $\boxed{-1.8}$.', r'-\frac{9}{5}', 1.0),
         (r'So, the final answer is $\boxed{\frac{2469}{20000}}$.', r'\dfrac{2469}{20,!000}', 1.0),
+        (r'最终答案是 $\boxed{-\frac{1}{2}}$。', r'-\tfrac12', 1.0),
+        (r'最终答案是 $\boxed{\frac{5\sqrt{3}}{3}}$。', r'\frac{5 \sqrt{3}}{3}', 1.0),
+        (r'与标准答案 \( \boxed{y = x + 2} \) 匹配。', 'y = x+2', 1.0),
+        (r'因此，最终每个男孩收到 \(\boxed{\$52}\) 美元。', '52', 1.0),
+        (r'因此，算术序列的公差是 \( \boxed{\frac{1}{2}} \) 。', r'\frac{1}{2}', 1.0),
+        (r'因此，算术序列的公差是 $\frac{1}{3}$。', '\frac{1}{2}', 0.0),
+        (r'最终 $\boxed{3.25}$ 美元。', r'3.25\text{ 美元}', 1.0),
+        (r'最终答案是 $\boxed{156}$ 度。', r'156^\circ', 1.0),
+        (r'第 158 个大理石是 $\boxed{\text{灰色}}$。这是我的最终答案。', r'\text{灰色}', 1.0),
+        (r'最终答案是 $\boxed{24,000}$。', '24{}000', 1.0),
+        (r'所以，最终答案是 \( \boxed{\$400.00} \) 。', '400', 1.0),
+        (r'因此，答案是 $a = \boxed{-\frac{1}{4}}$。', '-0.25', 1.0),
+        (r'所以，最终答案是 $\boxed{-1.8}$。', r'-\frac{9}{5}', 1.0),
+        (r'所以，最终答案是 $\boxed{\frac{2469}{20000}}$。', r'\dfrac{2469}{20,!000}', 1.0),
+        (r'最终结果是 $\boxed{3\frac{1}{2}}$。', r'3\frac{1}{2}', 1.0),
+        (r'最终高度是 $\boxed{10\text{米}}$。', r'10\text{米}', 1.0),
+        (r'答案范围是 $\boxed{[1, 5]}$。', r'[1, 5]', 1.0),
+        (r'答案应该是 $\boxed{x > 3}$。', r'x > 3', 1.0),
+        (r'增长率是 $\boxed{25\%}$。', r'25\%', 1.0),
+        (r'结果大约是 $\boxed{1.2 \times 10^5}$。', r'1.2 \times 10^5', 1.0),
+        (r'根据计算，$\boxed{x}$ 的值是 $\boxed{\frac{3}{4}}$。', r'\frac{3}{4}', 1.0),
+        (r'请注意，答案必须是 $\boxed{整数}$。', r'\text{整数}', 1.0),
+        (r'温度变化了 $\boxed{-5}$ 度。', r'-5', 1.0),
+        (r'面积是 $\boxed{120}$ 平方厘米。', r'120\text{ 平方厘米}', 1.0),
+        (r'角度 $\boxed{\theta}$ 等于 $\boxed{45}$ 度。', '45', 1.0),
     ],
 )
 def test_complex_latex_answers(answer, ground_truth, expected_score):
@@ -137,6 +162,27 @@ def test_pattern_answers(answer, ground_truth, expected_score):
             3,
         ),
         ('Percentage of disliked books = (90 / 300) x 100 = 30%', '30', 1.0, 3),
+        ('所以，Meryll还需要再写31个整体的题目', '31', 1.0, 3),
+        (
+            """
+首先，我思考这段数学表达式的目的是什么我决定逐步解析这段信息。
+
+1. 首先，我们需要找到平均分，即90分。
+2. Marco的分数比平均分少10%，所以我们可以通过计算Marco的分数来找到Marco的分数。
+3. 接下来，我们计算Margaret的分数，因为她得到了5个单位的额外分数。
+
+首先，计算Marco的分数。Marco的分数 = 平均分 - 10% of 平均分 = 90 - 0.1 * 90 = 90 - 9 = 81。所以，Marco得到了81分。
+
+然后，计算Margaret的分数。Margaret的分数 = Marco的分数 + 5 = 81 + 5 = 86。
+
+所以，Margaret的测试分数是86分。
+
+经过推理，我得出的最终答案是：Margaret的测试分数是86分
+""",
+            '86',
+            1.0,
+            3,
+        ),
     ],
 )
 def test_last_numbers(answer, ground_truth, expected_score, last_n):

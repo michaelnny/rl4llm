@@ -3,7 +3,8 @@
 import logging
 import os
 import random
-from abc import ABC, abstractmethod
+from abc import ABC
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -20,18 +21,23 @@ from rl4llm.generations import CustomLLMGenerator
 from rl4llm.graders import format_structure_grader, math_problem_grader
 from rl4llm.utils import (
     DummyLogger,
+    FileHandler,
     MetricsCollector,
+    compute_grad_norm,
     masked_mean,
     masked_sum,
     masked_whiten,
     save_yaml_config_file,
 )
 
-from .data_types import GRPOConfig, GRPOSample
+from .data_types import GRPOConfig, GRPOSample, SampleLog
 
 
 class BaseGRPOTrainer(ABC):
-    """Base GRPO trainer with common functionality for both single and distributed training"""
+    """
+    Base GRPO trainer with common functionality for both single and distributed training.
+    With focus on code reusability and execution speed.
+    """
 
     def __init__(
         self,
@@ -41,8 +47,20 @@ class BaseGRPOTrainer(ABC):
         torch_dtype: torch.dtype,
         artifacts_path: str,
         logger: Optional[logging.Logger] = None,
-        is_master: Optional[bool] = True,
+        rank: Optional[int] = 0,
     ):
+        """
+        Initialize the BaseGRPOTrainer with training components.
+
+        Args:
+            config (GRPOConfig): Configuration object for training parameters.
+            tokenizer (PreTrainedTokenizer): Tokenizer for encoding/decoding text.
+            device (torch.device): Device (CPU/GPU) for computation.
+            torch_dtype (torch.dtype): Data type for PyTorch tensors (e.g., float32).
+            artifacts_path (str): Directory path for saving logs and checkpoints.
+            logger (Optional[logging.Logger]): Logger for training events; defaults to DummyLogger if None.
+        """
+
         self.config = config
         self.device = device
         self.torch_dtype = torch_dtype
@@ -58,40 +76,70 @@ class BaseGRPOTrainer(ABC):
         self.ref_update_count = 0
         self.explore_epsilon = 0
         self.generation_mode = False
-        self.is_master = is_master
+        self.rank = rank
+        self.is_master = rank == 0
 
-        self.stats_completion_lengths = []
+        # For moving average of completion lengths
+        self._completion_lengths = deque(maxlen=1000)
 
         self._initialize()
 
     def _initialize(self):
         """Initialize training components"""
+
         # Setup special tokens
         self.pad_token_id = self.tokenizer.pad_token_id
         self.bos_token_id = self.tokenizer.bos_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
 
-        self.metrics = MetricsCollector()
+        # Initialize metrics
+        self._metrics = MetricsCollector()
 
         # Setup directories and logging
-        self.tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
-        self.checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
+        self._setup_directories()
 
         if self.is_master:
-            for path in [self.tb_log_dir, self.checkpoint_dir]:
-                os.makedirs(path, exist_ok=True)
-
-            self.writer = SummaryWriter(self.tb_log_dir)
+            # Initialize TensorBoard writer
+            self._writer = SummaryWriter(self._tb_log_dir)
         else:
-            self.writer = None
+            self._writer = None
 
-        self.pool_executor = None  # To hold the executor for reuse during post processing
+        # Initialize sample file handlers
+        train_sample_file = os.path.join(self._samples_dir, f'training_samples_rank{self.rank}.jsonl')
+        eval_sample_file = os.path.join(self._samples_dir, f'evaluation_samples_rank{self.rank}.jsonl')
+        train_stats = os.path.join(self._samples_dir, f'training_stats_rank{self.rank}.csv')
+        self._train_sample_handler = FileHandler(train_sample_file, 'jsonl', True)
+        self._eval_sample_handler = FileHandler(eval_sample_file, 'jsonl', True)
+        self._train_stats_handler = FileHandler(train_stats, 'csv', False)
+
+        # Executor setup
+        self._pool_executor = None  # Will be used later for post-processing
+
+    def _setup_directories(self):
+        """Helper method to create necessary directories"""
+        self._tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
+        self._checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
+        self._samples_dir = os.path.join(self.artifacts_path, 'samples')
+
+        for path in [self._tb_log_dir, self._checkpoint_dir, self._samples_dir]:
+            os.makedirs(path, exist_ok=True)
+
+    def on_exit(self):
+        if self._pool_executor is not None:
+            try:
+                self._pool_executor.shutdown(wait=True)
+            except Exception as e:
+                self.logger.warning(f"Failed to shutdown pool executor: {e}")
+
+        self._train_sample_handler.close()
+        self._eval_sample_handler.close()
+        self._train_stats_handler.close()
 
     def train(self, log_hyper_params: Optional[Dict] = None):
         """Start to train the model using RL GRPO.
 
         Args:
-            hyper_params (Dict): Hyper parameters for the training job.
+            log_hyper_params (Dict[str, Any], optional): Hyperparameters to log.
         """
 
         # log the params we use for this training run
@@ -102,28 +150,28 @@ class BaseGRPOTrainer(ABC):
         for _ in tqdm(range(self.config.max_steps), desc='Training steps', disable=not self.is_master):
             self.run_one_iteration()
 
-    @abstractmethod
     def run_one_iteration(self):
-        """Run one training iteration - implement in subclass"""
-        pass
+        """Run a single training iteration. Must be implemented by subclasses."""
+        raise NotImplementedError('Subclasses must implement this method')
 
-    @abstractmethod
     def train_policy(self, policy_model: PreTrainedModel, samples: List[GRPOSample]) -> None:
-        """Train the policy model using the collected samples - implement in subclass"""
-        pass
+        """Train the policy model using collected samples. Must be implemented by subclasses."""
+        raise NotImplementedError('Subclasses must implement this method')
 
     @torch.no_grad()
     def evaluate_policy(self, policy_model: PreTrainedModel, test_loader: DataLoader) -> None:
-        """Run evaluation"""
+        """Evaluate the policy model on a test dataset.
 
-        system_prompt = self.config.system_prompt
+        Args:
+            policy_model (PreTrainedModel): The model to evaluate.
+            test_loader: DataLoader providing test batches.
+        """
 
-        # use greedy sampling for evaluation
         eval_kwargs = {
             'eos_token_id': self.eos_token_id,
             'pad_token_id': self.pad_token_id,
             'max_new_tokens': self.config.max_new_tokens,
-            'temperature': 0.0,
+            'temperature': 0.0,  # Greedy sampling for evaluation
             'top_p': None,
             'top_k': None,
             'do_sample': False,
@@ -134,42 +182,22 @@ class BaseGRPOTrainer(ABC):
             'return_legacy_cache': False,
         }
 
-        with self.metrics.timer('evaluation'):
+        with self._metrics.timer('evaluation'):
             for batch in test_loader:
                 questions = batch['question']
                 ground_truths = batch['ground_truth']
                 task_types = batch['task_type']
 
-                batch_messages = []
-                for question in questions:
-                    if not system_prompt:
-                        sample_message = [{'role': 'user', 'content': question.strip()}]
-                    else:
-                        sample_message = [
-                            {'role': 'system', 'content': system_prompt.strip()},
-                            {'role': 'user', 'content': question.strip()},
-                        ]
-                    batch_messages.append(sample_message)
-
-                # Tokenize single message
-                message_prompt = self.tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
-                inputs = self.tokenizer(
-                    message_prompt,
-                    return_tensors='pt',
-                    truncation=True,
-                    padding=True,
-                    padding_side='left',
-                    max_length=self.tokenizer.model_max_length,
-                ).to(self.device)
-
+                batch_messages = [self._prepare_single_message(q, self.config.system_prompt) for q in questions]
+                inputs = self._tokenize_messages(batch_messages, for_eval=True)
                 outputs = policy_model.generate(**inputs, **eval_kwargs)
 
-                _ = self._process_generation_outputs(questions, ground_truths, task_types, inputs.input_ids, outputs.sequences)
+                self._process_evaluation_outputs(questions, ground_truths, task_types, inputs.input_ids, outputs.sequences)
 
     @torch.no_grad()
     def generate_group_samples(
         self,
-        sample: Dict[str, str],
+        item: Dict[str, str],
         policy_model: PreTrainedModel,
         reference_model: PreTrainedModel,
         generator: Optional[CustomLLMGenerator] = None,
@@ -177,46 +205,29 @@ class BaseGRPOTrainer(ABC):
         """Generate responses for a batch of questions and ground truth answers
 
         Args:
-            sample: Dict containing question, ground_truth and task_type
-            policy_model: Policy model to compute log probabilities
-            reference_model: Reference model to compute log probabilities
-            generator: CustomLLMGenerator instance, if None, use HF default 'model.generate'
+            item (Dict[str, str]): Dictionary with 'question', 'ground_truth', and 'task_type'.
+            policy_model (PreTrainedModel): Model to generate responses and compute log probs.
+            reference_model (PreTrainedModel): Model to compute reference log probs.
+            generator (CustomLLMGenerator, optional): Custom generator for responses.
 
         Returns:
             List[Dict]: List of samples for all groups in the batch
         """
 
         # Prepare messages for the entire batch
-        question = sample['question']
-        ground_truth = sample['ground_truth']
-        task_type = sample['task_type'].upper()
+        question = item['question']
+        ground_truth = item['ground_truth']
+        task_type = item['task_type'].upper()
 
         assert isinstance(question, str)
 
         if task_type not in ['MATH', 'GSM']:
             raise ValueError(f"Invalid task type: {task_type}, only support 'MATH' or 'GSM'")
 
-        # Create the basic message template
-        system_prompt = self.config.system_prompt
-        if not system_prompt:
-            sample_message = [{'role': 'user', 'content': question.strip()}]
-        else:
-            sample_message = [
-                {'role': 'system', 'content': system_prompt.strip()},
-                {'role': 'user', 'content': question.strip()},
-            ]
         # Build a list of messages for the entire group
+        sample_message = self._prepare_single_message(question, self.config.system_prompt)
         batch_messages = [sample_message] * self.config.group_size
-        # Tokenize single message
-        message_prompt = self.tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.tokenizer(
-            message_prompt,
-            return_tensors='pt',
-            truncation=True,
-            padding=False,  # no need padding for single data point
-            padding_side='left',
-            max_length=self.tokenizer.model_max_length,
-        ).to(self.device)
+        inputs = self._tokenize_messages(batch_messages, for_eval=False)
 
         use_custom_generator = (
             generator is not None
@@ -251,30 +262,25 @@ class BaseGRPOTrainer(ABC):
                 temperature = torch.linspace(
                     0.0, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
                 )
-                # temperature = (
-                #     torch.pow(torch.linspace(0.0, 1.0, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device), 2)
-                #     * self.config.temperature
-                # )
-            else:
-                # make code compatible
-                temperature = torch.tensor(
-                    [self.config.temperature] * self.config.group_size, dtype=self.torch_dtype, device=self.device
-                )
+                # over written to use group temperatures
+                generation_kwargs['temperature'] = temperature
 
             explore_epsilon = self._get_exploration_epsilon()
-            enable_exploration = (explore_epsilon > 0) and (random.random() < self.explore_epsilon)
+            enable_exploration = (
+                (self.config.explore_start_ratio > 0) and (explore_epsilon > 0) and (random.random() < self.explore_epsilon)
+            )
 
-            # add exploration parameters
-            generation_kwargs['temperature'] = temperature
-            if self.config.explore_start_ratio > 0 and enable_exploration:
-                generation_kwargs['enable_exploration'] = enable_exploration
+            # add random start exploration params
+            if enable_exploration:
                 generation_kwargs['explore_start_steps'] = self._get_explore_start_steps()
                 generation_kwargs['explore_top_k'] = self.config.explore_top_k
                 generation_kwargs['explore_top_k_beta'] = self.config.explore_top_k_beta
 
         outputs = generator.generate(**generation_kwargs)
 
-        return self._process_generation_outputs(
+        torch.cuda.empty_cache()
+
+        return self._process_training_outputs(
             question,
             ground_truth,
             task_type,
@@ -284,8 +290,7 @@ class BaseGRPOTrainer(ABC):
             reference_model=reference_model,
         )
 
-    @staticmethod
-    def compute_masked_monte_carlo_returns(rewards: torch.Tensor, mask: torch.Tensor, gamma: float) -> torch.FloatTensor:
+    def compute_masked_monte_carlo_returns(self, rewards: torch.Tensor, mask: torch.Tensor, gamma: float) -> torch.FloatTensor:
         """
         Computes monte carlo returns considering only assistant turns.
 
@@ -327,8 +332,7 @@ class BaseGRPOTrainer(ABC):
 
         return returns
 
-    @staticmethod
-    def normalize_group_rewards(rewards: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    def normalize_group_rewards(self, rewards: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
         """
         Normalize group rewards by subtracting the mean and dividing by the standard deviation.
 
@@ -359,6 +363,48 @@ class BaseGRPOTrainer(ABC):
         gamma = self.config.min_gamma + (self.config.max_gamma - self.config.min_gamma) * scaled_length
         return gamma
 
+    def get_grad_norm(self, model: PreTrainedModel) -> torch.Tensor:
+        """Compute gradient norm for the given model"""
+        return compute_grad_norm(model)
+
+    def _prepare_single_message(self, question: str, system_prompt: str) -> List[Dict[str, str]]:
+        """Prepare a single message for tokenization.
+
+        Args:
+            question (str): The user question.
+            system_prompt (str): The system prompt to prepend.
+
+        Returns:
+            List[Dict[str, str]]: Formatted message list.
+        """
+        if not system_prompt:
+            return [{'role': 'user', 'content': question.strip()}]
+        return [
+            {'role': 'system', 'content': system_prompt.strip()},
+            {'role': 'user', 'content': question.strip()},
+        ]
+
+    def _tokenize_messages(self, messages: List[List[Dict[str, str]]], for_eval: bool = False) -> Dict[str, torch.Tensor]:
+        """Tokenize a batch of messages.
+
+        Args:
+            messages (List[List[Dict[str, str]]]): Batch of messages.
+            for_eval (bool): for evaluation, which need to pad tokens.
+
+        Returns:
+            Dict[str, torch.Tensor]: Tokenized inputs (input_ids, attention_mask).
+        """
+        message_prompts = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self.tokenizer(
+            message_prompts,
+            return_tensors='pt',
+            truncation=True,
+            padding=for_eval,
+            padding_side='left',
+            max_length=self.tokenizer.model_max_length,
+        ).to(self.device)
+        return inputs
+
     def _get_exploration_epsilon(self) -> float:
         """Computes exploration epsilon based on the current iteration step count."""
         if self.config.explore_decay_steps == 0:
@@ -376,22 +422,59 @@ class BaseGRPOTrainer(ABC):
 
         return self.explore_epsilon
 
-    def _process_generation_outputs(
+    @torch.no_grad()
+    def _process_evaluation_outputs(
         self,
-        questions: Union[str, List[str]],
-        ground_truths: Union[str, List[str]],
-        task_types: Union[str, List[str]],
+        questions: List[str],
+        ground_truths: List[str],
+        task_types: List[str],
         input_ids: torch.Tensor,
         full_sequences: torch.Tensor,
-        policy_model: Optional[PreTrainedModel] = None,
-        reference_model: Optional[PreTrainedModel] = None,
+    ) -> None:
+        """Process generated sequences for evaluation, logging metrics only.
+
+        Args:
+            questions (List[str]): List of questions.
+            ground_truths (List[str]): List of ground truth answers.
+            task_types (List[str]): List of task types.
+            input_ids (torch.Tensor): Input token IDs.
+            full_sequences (torch.Tensor): Generated sequences including prompts.
+        """
+
+        outputs = self._process_generation_common_outputs(
+            questions=questions,
+            ground_truths=ground_truths,
+            task_types=task_types,
+            input_ids=input_ids,
+            full_sequences=full_sequences,
+        )
+
+        self._log_sample_metrics(
+            is_training=False,
+            task_types=task_types,
+            questions=questions,
+            ground_truths=ground_truths,
+            reward_output=outputs['reward_output'],
+            completion_lengths=outputs['completion_lengths'],
+            completion_texts=outputs['completion_texts'],
+        )
+
+    def _process_training_outputs(
+        self,
+        question: str,
+        ground_truth: str,
+        task_type: str,
+        input_ids: torch.Tensor,
+        full_sequences: torch.Tensor,
+        policy_model: PreTrainedModel,
+        reference_model: PreTrainedModel,
     ) -> List[GRPOSample]:
         """Process generated outputs after generation.
 
         Args:
-            questions: Single question (training) or list of questions (evaluation)
-            ground_truths: Single ground truth (training) or list (evaluation)
-            task_types: Single task type (training) or list (evaluation)
+            question: Single question
+            ground_truth: Single ground truth
+            task_type: Single task type
             input_ids: Prompt token ids [batch_size, prompt_seq_len]
             full_sequences: Full sequence token ids [batch_size, seq_len]
             policy_model: Policy model to compute log probabilities, only required for training
@@ -400,45 +483,39 @@ class BaseGRPOTrainer(ABC):
         Returns:
             List[GRPOSample] for training
         """
-        # Standardize inputs to lists
+        # Standardize single inputs to lists
         batch_size = full_sequences.size(0)
-        questions = [questions] * batch_size if isinstance(questions, str) else questions
-        ground_truths = [ground_truths] * batch_size if isinstance(ground_truths, str) else ground_truths
-        task_types = [task_types] * batch_size if isinstance(task_types, str) else task_types
+        questions = [question] * batch_size
+        ground_truths = [ground_truth] * batch_size
+        task_types = [task_type] * batch_size
 
-        assert len(questions) == len(ground_truths) == len(task_types) == batch_size
-
-        # Extract completions
         prompt_length = input_ids.size(1)
-        completion_ids = full_sequences[:, prompt_length:]
-        completion_tokens_count = (completion_ids != self.pad_token_id).sum(dim=1).cpu()
-        completion_texts = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
 
-        # Compute rewards
-        reward_output = self._compute_rewards(completion_texts, ground_truths, completion_tokens_count.tolist())
-        accuracy_rewards = reward_output['accuracy_rewards']
-        format_rewards = reward_output['format_rewards']
-        total_rewards = reward_output['total_rewards']
+        outputs = self._process_generation_common_outputs(
+            questions=questions,
+            ground_truths=ground_truths,
+            task_types=task_types,
+            input_ids=input_ids,
+            full_sequences=full_sequences,
+        )
 
-        is_training = policy_model is not None and reference_model is not None
+        completion_lengths = outputs['completion_lengths']
 
         self._log_sample_metrics(
-            is_training=is_training,
-            reward_output=reward_output,
-            completion_tokens_count=completion_tokens_count,
+            is_training=True,
             task_types=task_types,
             questions=questions,
             ground_truths=ground_truths,
-            completion_texts=completion_texts,
+            reward_output=outputs['reward_output'],
+            completion_lengths=completion_lengths,
+            completion_texts=outputs['completion_texts'],
         )
 
-        if not is_training:
-            return []
-
-        # store historical completion lengths
-        self.stats_completion_lengths.append(completion_tokens_count.float().mean().item())
+        # Store historical completion lengths
+        self._completion_lengths.append(completion_lengths.float().mean().item())
 
         # Training specific processing
+        total_rewards = outputs['reward_output']['total_rewards']
         normalized_rewards = (
             self.normalize_group_rewards(total_rewards) if self.config.normalize_group_rewards else total_rewards
         )
@@ -448,7 +525,8 @@ class BaseGRPOTrainer(ABC):
         pi_logprobs = self._compute_action_logprobs(policy_model, states, actions).cpu()
         ref_logprobs = self._compute_action_logprobs(reference_model, states, actions).cpu()
 
-        # TODO can we improve this code??
+        # TODO can we improve this code of post-processing sample creation??
+
         # Do not include the prompt or pad tokens in the loss
         # for example, if we have a sequence token ids: [1, 2, 3, 4, 5, 6, 7, -1, -1]
         # where [1, 2, 3, 4] are the prompt tokens
@@ -472,17 +550,15 @@ class BaseGRPOTrainer(ABC):
 
         # Cut sequences to the first eos token in completion
         for i, cut_position in enumerate(cut_positions):
-            assert completion_tokens_count[i].item() > 0
-            assert loss_mask[i, ...].sum().item() == completion_tokens_count[i]
-            assert loss_mask[i, :cut_position].sum().item() == completion_tokens_count[i]
+            assert completion_lengths[i].item() > 0
+            assert loss_mask[i, ...].sum().item() == completion_lengths[i]
+            assert loss_mask[i, :cut_position].sum().item() == completion_lengths[i]
 
             seq_rewards = torch.zeros_like(actions[i, :cut_position], dtype=self.torch_dtype)
             seq_rewards[-1] = normalized_rewards[i]  # important to use normalized rewards here
 
             gamma = (
-                self.compute_dynamic_discount(
-                    completion_tokens_count[i].item(), min_gamma=self.config.min_gamma, max_gamma=self.config.max_gamma
-                )
+                self.compute_dynamic_discount(completion_lengths[i].item())
                 if self.config.dynamic_discount
                 else self.config.gamma
             )
@@ -505,6 +581,46 @@ class BaseGRPOTrainer(ABC):
 
         return samples
 
+    def _process_generation_common_outputs(
+        self,
+        questions: List[str],
+        ground_truths: List[str],
+        task_types: List[str],
+        input_ids: torch.Tensor,
+        full_sequences: torch.Tensor,
+    ) -> Dict:
+        """Common processing logic for both evaluation and training outputs.
+
+        Args:
+            questions (List[str]): List of questions
+            ground_truths (List[str]): List of ground truth answers
+            task_types (List[str]): List of task types
+            input_ids (torch.Tensor): Input token IDs
+            full_sequences (torch.Tensor): Generated sequences including prompts
+
+        Returns:
+            dict: Dictionary containing processed outputs including completions and rewards
+        """
+        # Validate inputs
+        batch_size = full_sequences.size(0)
+        assert len(questions) == len(ground_truths) == len(task_types) == batch_size
+
+        # Extract completions
+        prompt_length = input_ids.size(1)
+        completion_ids = full_sequences[:, prompt_length:]
+        completion_lengths = (completion_ids != self.pad_token_id).sum(dim=1).cpu()
+        completion_texts = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
+
+        # Compute rewards
+        reward_output = self._compute_rewards(completion_texts, ground_truths, completion_lengths.tolist())
+
+        return {
+            'completion_ids': completion_ids,
+            'completion_lengths': completion_lengths,
+            'completion_texts': completion_texts,
+            'reward_output': reward_output,
+        }
+
     def _compute_rewards(
         self, completion_texts: List[str], ground_truths: List[str], completion_tokens_count: List[int]
     ) -> Dict[str, torch.Tensor]:
@@ -521,28 +637,18 @@ class BaseGRPOTrainer(ABC):
         """
         assert len(completion_texts) == len(ground_truths) == len(completion_tokens_count)
 
-        # Use ProcessPoolExecutor for CPU-bound reward computation
-        executor = self._get_pool_executor()
-
-        results = []
+        accuracy_rewards = []
+        format_rewards = []
         for idx in range(len(completion_texts)):
-            result = executor.submit(
-                self._compute_reward_single_sample,
+            out_dict = self._compute_reward_single_sample(
                 completion_texts[idx],
                 ground_truths[idx],
                 completion_tokens_count[idx],
                 self.config.min_completion_length,
                 self.config.xml_format,
             )
-            results.append(result)
-
-        # Collecting results from all futures
-        accuracy_rewards = []
-        format_rewards = []
-        for future in results:
-            reward_dict = future.result()
-            accuracy_rewards.append(reward_dict['accuracy_reward'])
-            format_rewards.append(reward_dict['format_reward'])
+            accuracy_rewards.append(out_dict['accuracy_reward'])
+            format_rewards.append(out_dict['format_reward'])
 
         accuracy_rewards = torch.tensor(accuracy_rewards, dtype=self.torch_dtype)
         format_rewards = torch.tensor(format_rewards, dtype=self.torch_dtype)
@@ -553,6 +659,29 @@ class BaseGRPOTrainer(ABC):
             'format_rewards': format_rewards,
             'total_rewards': total_rewards,
         }
+
+        # # Use ProcessPoolExecutor for CPU-bound reward computation
+        # executor = self._get_pool_executor()
+
+        # results = []
+        # for idx in range(len(completion_texts)):
+        #     result = executor.submit(
+        #         self._compute_reward_single_sample,
+        #         completion_texts[idx],
+        #         ground_truths[idx],
+        #         completion_tokens_count[idx],
+        #         self.config.min_completion_length,
+        #         self.config.xml_format,
+        #     )
+        #     results.append(result)
+
+        # # Collecting results from all futures
+        # accuracy_rewards = []
+        # format_rewards = []
+        # for future in results:
+        # reward_dict = future.result()
+        # accuracy_rewards.append(reward_dict['accuracy_reward'])
+        # format_rewards.append(reward_dict['format_reward'])
 
     @staticmethod
     def _compute_reward_single_sample(
@@ -573,13 +702,16 @@ class BaseGRPOTrainer(ABC):
         return {'accuracy_reward': accuracy_score, 'format_reward': format_score}
 
     def _get_pool_executor(self) -> ProcessPoolExecutor:
-        # Use ThreadPoolExecutor for I/O-bound operations
+        """Initialize or return the ProcessPoolExecutor for reward computation, which is CPU heavy work.
 
-        if self.pool_executor is None:
+        Returns:
+            ProcessPoolExecutor: Executor for parallel reward computation.
+        """
+        if self._pool_executor is None:
             num_workers = min(mp.cpu_count(), 16)
-            self.pool_executor = ProcessPoolExecutor(max_workers=num_workers)
+            self._pool_executor = ProcessPoolExecutor(max_workers=num_workers)
 
-        return self.pool_executor
+        return self._pool_executor
 
     def _compute_action_logprobs(
         self, model: PreTrainedModel, input_ids: torch.LongTensor, actions: torch.LongTensor
@@ -659,11 +791,6 @@ class BaseGRPOTrainer(ABC):
         pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
         kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
 
-        # Only compute KL loss for incorrect samples
-        # correctness_mask = (mini_batch.reward >= 1).to(self.device)  # Correct if reward >= 1
-        # incorrect_mask = ~correctness_mask
-        # kl_loss = self.config.kl_loss_coef * (kl * incorrect_mask).mean()
-
         kl_loss = self.config.kl_loss_coef * kl
         loss = pg_loss + kl_loss
 
@@ -676,15 +803,16 @@ class BaseGRPOTrainer(ABC):
 
         return loss, metrics
 
-    def _get_moving_average_completion_length(self, window_size: int = 10) -> int:
-        """Compute moving average completion lengths over the past N iterations"""
-        assert window_size > 1
+    def _get_average_completion_length(self, window_size: int = 10) -> int:
+        """Compute the moving average of completion lengths.
 
-        if not self.stats_completion_lengths or len(self.stats_completion_lengths) < window_size:
-            return 200
+        Returns:
+            float: Moving average length, defaulting to 200.0 if no data.
+        """
+        if len(self._completion_lengths) < 10:
+            return 200.0
 
-        # Convert to numpy array if not already
-        values = np.array(self.stats_completion_lengths)
+        values = np.array(list(self._completion_lengths))
 
         # Calculate moving average using numpy's convolve
         weights = np.ones(window_size) / window_size
@@ -692,24 +820,17 @@ class BaseGRPOTrainer(ABC):
 
         # Get the last moving average value
         last_ma_value = moving_averages[-1]
-
         return last_ma_value
 
     def _get_explore_start_steps(self) -> int:
-        """Computes the exploration start steps based on past completion lengths"""
+        """Compute exploration start steps based on moving average length.
 
-        moving_average_length = self._get_moving_average_completion_length()
-
-        if not isinstance(moving_average_length, (int, float)) or moving_average_length <= 0:
-            moving_average_length = 100  # Fallback to a reasonable default value
-
-        max_explore_start_steps = moving_average_length * self.config.explore_start_ratio
-        if max_explore_start_steps < 10:
-            max_explore_start_steps = 10
-
-        explore_start_steps = random.choice(range(10, int(max_explore_start_steps) + 1))
-
-        return explore_start_steps
+        Returns:
+            int: Number of steps to start exploration.
+        """
+        moving_average_length = self._get_average_completion_length()
+        max_explore_start_steps = max(int(moving_average_length * self.config.explore_start_ratio), 10)
+        return random.randint(max(max_explore_start_steps // 2, 10), max_explore_start_steps)
 
     def _train_collate_function(self, batch: List[GRPOSample]) -> GRPOSample:
         """Collate function for DataLoader during training"""
@@ -725,7 +846,6 @@ class BaseGRPOTrainer(ABC):
         batch_advantages = torch.full((batch_size, max_seq_len), 0.0, dtype=torch_dtype)
         batch_pi_logprobs = torch.full((batch_size, max_seq_len), 0.0, dtype=torch_dtype)
         batch_ref_logprobs = torch.full((batch_size, max_seq_len), 0.0, dtype=torch_dtype)
-        batch_reward = torch.full((batch_size,), 0.0, dtype=torch_dtype)
 
         for i, item in enumerate(batch):
             seq_len = len(item.states)
@@ -735,7 +855,6 @@ class BaseGRPOTrainer(ABC):
             batch_advantages[i, :seq_len] = item.advantages.to(dtype=torch_dtype)
             batch_pi_logprobs[i, :seq_len] = item.pi_logprobs.to(dtype=torch_dtype)
             batch_ref_logprobs[i, :seq_len] = item.ref_logprobs.to(dtype=torch_dtype)
-            batch_reward[i] = item.reward
 
         return GRPOSample(
             states=batch_state_ids,
@@ -744,94 +863,129 @@ class BaseGRPOTrainer(ABC):
             pi_logprobs=batch_pi_logprobs,
             ref_logprobs=batch_ref_logprobs,
             advantages=batch_advantages,
-            reward=batch_reward,
         )
 
     def _log_sample_metrics(
         self,
         is_training: bool,
-        reward_output: Dict[str, torch.Tensor],
-        completion_tokens_count: torch.Tensor,
         task_types: List[str],
         questions: List[str],
         ground_truths: List[str],
+        reward_output: Dict[str, torch.Tensor],
+        completion_lengths: torch.Tensor,
         completion_texts: List[str],
     ) -> None:
-        """Handle metrics logging in parallel using ThreadPoolExecutor"""
+        """Log sample metrics to tensorboard and metrics collector.
 
-        # Prepare metrics data
+        Args:
+            is_training (bool): Whether this is training or evaluation.
+            task_types (List[str]): Task types for each sample.
+            questions (List[str]): Questions for each sample.
+            ground_truths (List[str]): Ground truths for each sample.
+            reward_output (Dict[str, torch.Tensor]): Reward components.
+            completion_lengths (torch.Tensor): Token counts of completions.
+            completion_texts (List[str]): Generated completions.
+        """
+
         metric_prefix = 'objective' if is_training else 'evaluation'
         metrics_batch = {
             f'{metric_prefix}/accuracy_reward': reward_output['accuracy_rewards'].tolist(),
             f'{metric_prefix}/format_reward': reward_output['format_rewards'].tolist(),
             f'{metric_prefix}/total_rewards': reward_output['total_rewards'].tolist(),
-            f'{metric_prefix}/completion_length': completion_tokens_count.tolist(),
+            f'{metric_prefix}/completion_length': completion_lengths.tolist(),
         }
 
         # Batch update metrics
         for metric_name, values in metrics_batch.items():
-            self.metrics.add_metrics_batch(metric_name, values)
+            self._metrics.add_metrics_batch(metric_name, values)
 
-        # Log samples
-        sample_indices = (
-            random.sample(range(len(completion_texts)), k=min(2, 0.1 * self.config.group_size))
-            if is_training
-            else range(len(completion_texts))
-        )
+        # Log samples to external file and optionally to tensorboard
+        tb_log_indices = random.sample(range(len(completion_texts)), k=1)
         tb_tag = 'training' if is_training else 'evaluation'
 
-        for i in range(len(completion_texts)):
+        ext_file_handler = self._train_sample_handler if is_training else self._eval_sample_handler
+        for idx in range(len(completion_texts)):
+            # Create sample log entry
+            sample = SampleLog(
+                question=questions[idx],
+                task_type=task_types[idx],
+                ground_truth=ground_truths[idx],
+                completion=completion_texts[idx],
+                accuracy_reward=reward_output['accuracy_rewards'][idx].item(),
+                format_reward=reward_output['format_rewards'][idx].item(),
+                total_reward=reward_output['total_rewards'][idx].item(),
+                completion_length=completion_lengths[idx].item(),
+            )
+
             if is_training:
                 self.train_episode_count += 1
+                ext_file_handler.log_entry(sample.model_dump())
             else:
                 self.eval_episode_count += 1
+                ext_file_handler.log_entry(sample.model_dump())
 
-            if i in sample_indices or not is_training:
-                # we only log few samples for training
-                formatted_text = self._format_sample_text(
-                    task_types[i], questions[i], ground_truths[i], reward_output['total_rewards'][i].item(), completion_texts[i]
-                )
-                self._log_sample_to_tensorboard(
-                    tb_tag, formatted_text, self.train_episode_count if is_training else self.eval_episode_count
-                )
+            # Log subset of samples to TensorBoard
+            if idx in tb_log_indices:
+                try:
+                    formatted_text = self._format_sample_text(sample)
+                    self._log_sample_to_tensorboard(
+                        f"{tb_tag}/sample",
+                        formatted_text,
+                        self.train_episode_count if is_training else self.eval_episode_count,
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to log sample to TensorBoard: {e}")
 
-    def _format_sample_text(
-        self, task_type: str, question: str, ground_truth: str, total_reward: float, completion_text: str
-    ) -> str:
-        """Format sample text for logging"""
+        ext_file_handler.flush()
 
-        formatted_text = (
-            f"**Question [{task_type}]**: {question}\n\n"
-            f"**Ground Truth**: {ground_truth}\n\n"
-            f"**Graded Reward**: {total_reward}\n\n"
-            f"**Full Answer**:\n```json\n{completion_text}\n```"
+    def _format_sample_text(self, sample: SampleLog) -> str:
+        """Format sample text for TensorBoard logging."""
+        return (
+            f"**Question [{sample.task_type}]**: {sample.question}\n\n"
+            f"**Ground Truth**: {sample.ground_truth}\n\n"
+            f"**Accuracy Reward**: {sample.accuracy_reward:.2f}, **Format Reward**: {sample.format_reward:.2f}, **Total Reward**: {sample.total_reward:.2f}\n\n"
+            f"**Generated Completion**:\n```json\n{sample.completion}\n```"
         )
 
-        return formatted_text
+    def _log_training_stats(self, stats: Dict[str, Any], step: int) -> None:
+        """Log stats to external file and tensorboard"""
+        self._train_stats_handler.log_entry({**stats, 'step': step})
+        self._train_stats_handler.flush()
+        self._log_stats_to_tensorboard(stats, step)
 
-    def _log_hyper_params_to_tensorboard(self, config: Dict[str, Any]):
-        """Log hyper parameters used for the job"""
-        if self.writer and config:
+    def _log_sample_to_tensorboard(self, tag: str, formatted_text: str, step: int) -> None:
+        """Log formatted text to TensorBoard.
+
+        Args:
+            tag (str): TensorBoard tag (e.g., 'training' or 'evaluation').
+            formatted_text (str): Text to log.
+            step (int): Episode number for logging.
+        """
+        if self._writer:
+            try:
+                self._writer.add_text(f'{tag}/sample', formatted_text, step)
+            except Exception as e:
+                self.logger.warning(f"Failed to log sample to TensorBoard: {e}")
+
+    def _log_hyper_params_to_tensorboard(self, config: Dict[str, Any]) -> None:
+        """Log hyperparameters to TensorBoard.
+
+        Args:
+            config (Dict[str, Any]): Hyperparameters dictionary.
+        """
+        if self._writer and config:
             try:
                 config_str = yaml.dump(config, sort_keys=False, indent=4)
-                self.writer.add_text('config/parameters', f"```yaml\n{config_str}\n```", 0)
-            except Exception as _e:
-                self.logger.warning('Failed to log hyper parameters to tensorboard')
+                self._writer.add_text('config/parameters', f"```yaml\n{config_str}\n```", 0)
+            except Exception as e:
+                self.logger.warning(f"Failed to log hyperparameters to TensorBoard: {e}")
 
-    def _log_sample_to_tensorboard(self, tag: str, formatted_text: str, episode_count: int):
-        """Log a sample text to tensorboard"""
-        if self.writer:
-            try:
-                self.writer.add_text(f'{tag}/sample', formatted_text, episode_count)
-            except Exception as _e:
-                self.logger.warning('Failed to log sample to tensorboard')
-
-    def _log_stats_to_tensorboard(self, stats: Dict[str, Any], step: int):
+    def _log_stats_to_tensorboard(self, stats: Dict[str, Any], step: int) -> None:
         """Log stats to tensorboard"""
-        if self.writer:
+        if self._writer:
             try:
                 for name, value in stats.items():
                     if isinstance(value, (int, float)):
-                        self.writer.add_scalar(f"{name}", value, step)
-            except Exception as _e:
-                self.logger.warning('Failed to log stats to tensorboard')
+                        self._writer.add_scalar(f"{name}", value, step)
+            except Exception as e:
+                self.logger.warning(f"Failed to log stats to TensorBoard: {e}")

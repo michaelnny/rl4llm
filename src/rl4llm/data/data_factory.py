@@ -5,9 +5,7 @@ import random
 from typing import Dict, List, Optional, Tuple
 
 from datasets import Dataset, concatenate_datasets, load_dataset
-from tqdm import tqdm
 
-from rl4llm.graders.math_grader import extract_math_answer_from_last_boxed
 from rl4llm.utils import (
     is_texts_similar,
     load_from_jsonl_file,
@@ -163,7 +161,7 @@ def fix_gsm_incorrect_answer(x: Dict) -> Dict:
     return x
 
 
-def load_gsm_dataset(
+def load_gsm8k_dataset(
     save_dir: str = './data/processed_gsm8k',
 ) -> Tuple[Dataset, Dataset]:
     """Load OpenAI GSM-8K (main) datasets, process them, and save locally."""
@@ -171,11 +169,11 @@ def load_gsm_dataset(
     os.makedirs(save_dir, exist_ok=True)
 
     # Check if processed files already exist
-    train_path = os.path.join(save_dir, 'train.jsonl.gz')
-    test_path = os.path.join(save_dir, 'test.jsonl.gz')
+    train_out_path = os.path.join(save_dir, 'train.jsonl.gz')
+    test_out_path = os.path.join(save_dir, 'test.jsonl.gz')
 
-    if os.path.exists(train_path) and os.path.exists(test_path):
-        return load_processed_local_dataset(train_path, test_path)
+    if os.path.exists(train_out_path) and os.path.exists(test_out_path):
+        return load_processed_local_dataset(train_out_path, test_out_path)
 
     ds = load_dataset('openai/gsm8k', 'main')
 
@@ -202,57 +200,113 @@ def load_gsm_dataset(
     test_ds = ds['test']
 
     # Save processed datasets
-    save_dataset_split(train_ds, train_path)
-    save_dataset_split(test_ds, test_path)
+    save_dataset_split(train_ds, train_out_path)
+    save_dataset_split(test_ds, test_out_path)
 
     return train_ds, test_ds
 
 
 def load_math_dataset(
+    source_dir: str = './data/openai_math',
     save_dir: str = './data/processed_math',
 ) -> Tuple[Dataset, Dataset]:
-    """Load MATH dataset from hendrycks, process them, and save locally."""
+    """Load OpenAI splitted MATH dataset from local files, process them, and save locally."""
+
+    train_input_path = os.path.join(source_dir, 'train.jsonl')
+    test_input_path = os.path.join(source_dir, 'test.jsonl')
+
+    if not os.path.exists(train_input_path) or not os.path.exists(test_input_path):
+        raise FileNotFoundError(f"Dataset files not exists at {train_input_path} and {test_input_path}")
 
     # Create directory if it doesn't exist
     os.makedirs(save_dir, exist_ok=True)
 
     # Check if processed files already exist
-    train_path = os.path.join(save_dir, 'train.jsonl.gz')
-    test_path = os.path.join(save_dir, 'test.jsonl.gz')
+    train_out_path = os.path.join(save_dir, 'train.jsonl.gz')
+    test_out_path = os.path.join(save_dir, 'test.jsonl.gz')
 
-    if os.path.exists(train_path) and os.path.exists(test_path):
-        return load_processed_local_dataset(train_path, test_path)
+    if os.path.exists(train_out_path) and os.path.exists(test_out_path):
+        return load_processed_local_dataset(train_out_path, test_out_path)
 
-    ds = load_dataset('hendrycks/competition_math', trust_remote_code=True)
+    train_data = load_from_jsonl_file(train_input_path)
+    test_data = load_from_jsonl_file(test_input_path)
+
+    # Convert to Dataset objects
+    train_ds = Dataset.from_list(train_data)
+    test_ds = Dataset.from_list(test_data)
 
     def extract_math_ground_truth(x):
-        full_answer = x['solution']
-        ground_truth = extract_math_answer_from_last_boxed(full_answer).strip()
 
         return {
+            'subject': x['subject'],
             'level': x['level'],
             'question': x['problem'],
-            'ground_truth': ground_truth,
+            'ground_truth': x['answer'],
             'task_type': 'MATH',
         }
 
-    ds = ds.map(extract_math_ground_truth)
-    ds = ds.filter(is_valid_math_sample)
+    train_ds = train_ds.map(extract_math_ground_truth)
+    test_ds = test_ds.map(extract_math_ground_truth)
 
     # Select only the columns you want in the final dataset
-    columns_to_keep = ['question', 'level', 'type', 'ground_truth', 'task_type']
+    columns_to_keep = ['question', 'ground_truth', 'task_type', 'subject', 'level']
 
     # remove any other columns that were not kept
-    ds = ds.remove_columns([col for col in ds['train'].column_names if col not in columns_to_keep])
-
-    train_ds = ds['train']
-    test_ds = ds['test']
+    train_ds = train_ds.remove_columns([col for col in train_ds.column_names if col not in columns_to_keep])
+    test_ds = test_ds.remove_columns([col for col in test_ds.column_names if col not in columns_to_keep])
 
     # Save processed datasets
-    save_dataset_split(train_ds, train_path)
-    save_dataset_split(test_ds, test_path)
+    save_dataset_split(train_ds, train_out_path)
+    save_dataset_split(test_ds, test_out_path)
 
     return train_ds, test_ds
+
+
+# def load_competitive_math_dataset(
+#     save_dir: str = './data/processed_math',
+# ) -> Tuple[Dataset, Dataset]:
+#     """Load MATH dataset from hendrycks, process them, and save locally."""
+
+#     # Create directory if it doesn't exist
+#     os.makedirs(save_dir, exist_ok=True)
+
+#     # Check if processed files already exist
+#     train_out_path = os.path.join(save_dir, 'train.jsonl.gz')
+#     test_out_path = os.path.join(save_dir, 'test.jsonl.gz')
+
+#     if os.path.exists(train_out_path) and os.path.exists(test_out_path):
+#         return load_processed_local_dataset(train_out_path, test_out_path)
+
+#     ds = load_dataset('hendrycks/competition_math', trust_remote_code=True)
+
+#     def extract_math_ground_truth(x):
+#         full_answer = x['solution']
+#         ground_truth = extract_math_answer_from_last_boxed(full_answer).strip()
+
+#         return {
+#             'level': x['level'],
+#             'question': x['problem'],
+#             'ground_truth': ground_truth,
+#             'task_type': 'MATH',
+#         }
+
+#     ds = ds.map(extract_math_ground_truth)
+#     ds = ds.filter(is_valid_math_sample)
+
+#     # Select only the columns you want in the final dataset
+#     columns_to_keep = ['question', 'level', 'type', 'ground_truth', 'task_type']
+
+#     # remove any other columns that were not kept
+#     ds = ds.remove_columns([col for col in ds['train'].column_names if col not in columns_to_keep])
+
+#     train_ds = ds['train']
+#     test_ds = ds['test']
+
+#     # Save processed datasets
+#     save_dataset_split(train_ds, train_out_path)
+#     save_dataset_split(test_ds, test_out_path)
+
+#     return train_ds, test_ds
 
 
 def load_and_combine_datasets(task_types: List[str], shuffle_seed: int = 42) -> Tuple[Dataset, Dataset]:
@@ -269,7 +323,7 @@ def load_and_combine_datasets(task_types: List[str], shuffle_seed: int = 42) -> 
     for task in task_types:
         task_upper = task.upper()
         if task_upper == 'GSM':
-            train_ds, test_ds = load_gsm_dataset()
+            train_ds, test_ds = load_gsm8k_dataset()
             train_datasets.append(train_ds)
             test_datasets.append(test_ds)
         elif task_upper == 'MATH':
@@ -300,13 +354,13 @@ def save_dataset_split(dataset_split, filepath):
     save_to_jsonl_file(dataset_split, filepath)
 
 
-def load_processed_local_dataset(train_path: str, test_path: str) -> Tuple[Dataset, Dataset]:
+def load_processed_local_dataset(train_out_path: str, test_out_path: str) -> Tuple[Dataset, Dataset]:
     """Load the processed dataset from local JSONL files."""
-    logger.info(f"Loading train dataset from local path: {train_path}")
-    logger.info(f"Loading test dataset from local path: {test_path}")
+    logger.info(f"Loading train dataset from local path: {train_out_path}")
+    logger.info(f"Loading test dataset from local path: {test_out_path}")
     # Load JSONL files
-    train_data = load_from_jsonl_file(train_path)
-    test_data = load_from_jsonl_file(test_path)
+    train_data = load_from_jsonl_file(train_out_path)
+    test_data = load_from_jsonl_file(test_out_path)
 
     # Convert to Dataset objects
     train_dataset = Dataset.from_list(train_data)
@@ -525,12 +579,12 @@ def load_pre_sft_datasets(
 
 
 if __name__ == '__main__':
-    gsm_train_ds, gsm_test_df = load_gsm_dataset()
-    math_train_ds, math_test_df = load_math_dataset()
+    gsm_train_ds, gsm_test_ds = load_gsm8k_dataset()
+    math_train_ds, math_test_ds = load_math_dataset()
 
-    # import random
+    import random
 
-    # sample_size = 100  # number of samples to draw
-    # sampled_data = random.sample(list(math_train_ds), sample_size)
-    # for sample in sampled_data:
-    #     logger.info(sample['ground_truth'])
+    sample_size = 10  # number of samples to draw
+    sampled_data = random.sample(list(math_train_ds), sample_size)
+    for sample in sampled_data:
+        logger.info(sample['ground_truth'])
