@@ -468,6 +468,11 @@ def test_repetition_detection():
         ('This is a test with exactlytwentycharactersword.', 20, True),
         ('The band members were reallygoodatplaying and they played all night.', 10, True),
         ('Short words and nothing too long.', 10, False),
+        (
+            "Niaile, j'oublis de mentionner que la taille de la tête est un-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu.",
+            20,
+            True,
+        ),
     ],
 )
 def test_has_irregular_words(text, min_length, expected_result):

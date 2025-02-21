@@ -92,11 +92,11 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self.iteration_count += 1
 
+        self._handle_post_train()
+
         # Log all metrics
         metrics = self._get_metrics_summary()
-        self._log_stats_to_tensorboard(metrics, self.iteration_count)
-
-        self._handle_post_train()
+        self._log_training_stats(metrics, self.iteration_count)
 
     def run_evaluation(self):
         """Evaluate the model on the test dataset"""

@@ -5,42 +5,39 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "GRPO Training",
+            "name": "Debug GRPO Training",
             "type": "debugpy",
             "request": "launch",
             "module": "rl4llm.scripts.run_train_grpo",
             "justMyCode": false,
             "env": {
-                // "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
-                // "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
+                "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "HF_TOKEN": "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",
                 "PYTORCH_ENABLE_MPS_FALLBACK": "1",
             },
         },
         {
-            "name": "DeepSpeed GRPO Training",
+            "name": "Debug DeepSpeed GRPO Training",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/src/rl4llm/scripts/run_train_grpo_dist.py",
+            "module": "deepspeed.launcher.runner", // Use deepspeed launcher as module
             "args": [
+                "--num_gpus=1",
+                "src/rl4llm/scripts/run_train_grpo_dist.py",
                 "--config-file",
                 "./configs/ds_grpo_train_config.yaml"
             ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
             "env": {
-                // "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
-                // "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
+                "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
-                "HF_TOKEN": "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",
-                "PYTORCH_ENABLE_MPS_FALLBACK": "1",
                 "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
                 "NCCL_P2P_DISABLE": "1"
             },
-            "console": "integratedTerminal",
-            "runtimeExecutable": "deepspeed",
-            "runtimeArgs": [
-                "--num_gpus=1"
-            ],
         },
         {
             "name": "Python Debugger: Current File",

@@ -47,7 +47,6 @@ class BaseGRPOTrainer(ABC):
         torch_dtype: torch.dtype,
         artifacts_path: str,
         logger: Optional[logging.Logger] = None,
-        # is_master: Optional[bool] = True,
         rank: Optional[int] = 0,
     ):
         """
@@ -60,7 +59,6 @@ class BaseGRPOTrainer(ABC):
             torch_dtype (torch.dtype): Data type for PyTorch tensors (e.g., float32).
             artifacts_path (str): Directory path for saving logs and checkpoints.
             logger (Optional[logging.Logger]): Logger for training events; defaults to DummyLogger if None.
-            is_master (Optional[bool]): Flag indicating if this is the master process; defaults to True.
         """
 
         self.config = config
@@ -78,7 +76,7 @@ class BaseGRPOTrainer(ABC):
         self.ref_update_count = 0
         self.explore_epsilon = 0
         self.generation_mode = False
-        self.rank = 0
+        self.rank = rank
         self.is_master = rank == 0
 
         # For moving average of completion lengths
@@ -102,28 +100,28 @@ class BaseGRPOTrainer(ABC):
 
         if self.is_master:
             # Initialize TensorBoard writer
-            self._writer = SummaryWriter(self.tb_log_dir)
+            self._writer = SummaryWriter(self._tb_log_dir)
         else:
             self._writer = None
 
         # Initialize sample file handlers
-        self._train_sample_handler = FileHandler(
-            os.path.join(self.samples_dir, f'training_samples_rank{self.rank}.jsonl'), 'jsonl', True
-        )
-        self._eval_sample_handler = FileHandler(
-            os.path.join(self.samples_dir, f'evaluation_samples_rank{self.rank}.jsonl'), 'jsonl', True
-        )
+        train_sample_file = os.path.join(self._samples_dir, f'training_samples_rank{self.rank}.jsonl')
+        eval_sample_file = os.path.join(self._samples_dir, f'evaluation_samples_rank{self.rank}.jsonl')
+        train_stats = os.path.join(self._samples_dir, f'training_stats_rank{self.rank}.csv')
+        self._train_sample_handler = FileHandler(train_sample_file, 'jsonl', True)
+        self._eval_sample_handler = FileHandler(eval_sample_file, 'jsonl', True)
+        self._train_stats_handler = FileHandler(train_stats, 'csv', False)
 
         # Executor setup
         self._pool_executor = None  # Will be used later for post-processing
 
     def _setup_directories(self):
         """Helper method to create necessary directories"""
-        self.tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
-        self.checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
-        self.samples_dir = os.path.join(self.artifacts_path, 'samples')
+        self._tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
+        self._checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
+        self._samples_dir = os.path.join(self.artifacts_path, 'samples')
 
-        for path in [self.tb_log_dir, self.checkpoint_dir, self.samples_dir]:
+        for path in [self._tb_log_dir, self._checkpoint_dir, self._samples_dir]:
             os.makedirs(path, exist_ok=True)
 
     def on_exit(self):
@@ -135,6 +133,7 @@ class BaseGRPOTrainer(ABC):
 
         self._train_sample_handler.close()
         self._eval_sample_handler.close()
+        self._train_stats_handler.close()
 
     def train(self, log_hyper_params: Optional[Dict] = None):
         """Start to train the model using RL GRPO.
@@ -452,11 +451,11 @@ class BaseGRPOTrainer(ABC):
 
         self._log_sample_metrics(
             is_training=False,
-            reward_output=outputs['reward_output'],
-            completion_lengths=outputs['completion_lengths'],
             task_types=task_types,
             questions=questions,
             ground_truths=ground_truths,
+            reward_output=outputs['reward_output'],
+            completion_lengths=outputs['completion_lengths'],
             completion_texts=outputs['completion_texts'],
         )
 
@@ -504,11 +503,11 @@ class BaseGRPOTrainer(ABC):
 
         self._log_sample_metrics(
             is_training=True,
-            reward_output=outputs['reward_output'],
-            completion_lengths=completion_lengths,
             task_types=task_types,
             questions=questions,
             ground_truths=ground_truths,
+            reward_output=outputs['reward_output'],
+            completion_lengths=completion_lengths,
             completion_texts=outputs['completion_texts'],
         )
 
@@ -869,22 +868,22 @@ class BaseGRPOTrainer(ABC):
     def _log_sample_metrics(
         self,
         is_training: bool,
-        reward_output: Dict[str, torch.Tensor],
-        completion_lengths: torch.Tensor,
         task_types: List[str],
         questions: List[str],
         ground_truths: List[str],
+        reward_output: Dict[str, torch.Tensor],
+        completion_lengths: torch.Tensor,
         completion_texts: List[str],
     ) -> None:
         """Log sample metrics to tensorboard and metrics collector.
 
         Args:
             is_training (bool): Whether this is training or evaluation.
-            reward_output (Dict[str, torch.Tensor]): Reward components.
-            completion_lengths (torch.Tensor): Token counts of completions.
             task_types (List[str]): Task types for each sample.
             questions (List[str]): Questions for each sample.
             ground_truths (List[str]): Ground truths for each sample.
+            reward_output (Dict[str, torch.Tensor]): Reward components.
+            completion_lengths (torch.Tensor): Token counts of completions.
             completion_texts (List[str]): Generated completions.
         """
 
@@ -901,7 +900,7 @@ class BaseGRPOTrainer(ABC):
             self._metrics.add_metrics_batch(metric_name, values)
 
         # Log samples to external file and optionally to tensorboard
-        tb_log_indices = random.sample(range(len(completion_texts)), k=min(2, 0.1 * self.config.group_size))
+        tb_log_indices = random.sample(range(len(completion_texts)), k=1)
         tb_tag = 'training' if is_training else 'evaluation'
 
         ext_file_handler = self._train_sample_handler if is_training else self._eval_sample_handler
@@ -944,9 +943,15 @@ class BaseGRPOTrainer(ABC):
         return (
             f"**Question [{sample.task_type}]**: {sample.question}\n\n"
             f"**Ground Truth**: {sample.ground_truth}\n\n"
-            f"**Rewards (accuracy/format/total)**: {sample.accuracy_reward:.2f}/{sample.format_reward:.2f}/{sample.total_reward:.2f}\n\n"
+            f"**Accuracy Reward**: {sample.accuracy_reward:.2f}, **Format Reward**: {sample.format_reward:.2f}, **Total Reward**: {sample.total_reward:.2f}\n\n"
             f"**Generated Completion**:\n```json\n{sample.completion}\n```"
         )
+
+    def _log_training_stats(self, stats: Dict[str, Any], step: int) -> None:
+        """Log stats to external file and tensorboard"""
+        self._train_stats_handler.log_entry({**stats, 'step': step})
+        self._train_stats_handler.flush()
+        self._log_stats_to_tensorboard(stats, step)
 
     def _log_sample_to_tensorboard(self, tag: str, formatted_text: str, step: int) -> None:
         """Log formatted text to TensorBoard.

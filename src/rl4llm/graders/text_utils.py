@@ -3,21 +3,41 @@ from collections import Counter
 
 
 def has_irregular_words(text: str, min_length: int = 20) -> bool:
-    """Checks for very long irregular words.
+    """Checks for very long irregular words while ignoring LaTeX and equations.
 
     Args:
-        text (str): Input text to check for repetitions
-        min_length (int): Threshold to minimum word length
+        text (str): Input text to check for irregular words
+        min_length (int): Threshold for minimum word length
 
     Returns:
-        bool: True if long words are found, False otherwise
+        bool: True if long words are found (excluding LaTeX/equations), False otherwise
     """
-    # Split the text into words (ignoring punctuation)
-    words = re.findall(r'\b\w+\b', text)
+    # Define patterns to detect LaTeX and mathematical expressions
+    latex_patterns = [
+        r'\\\w+',  # LaTeX commands (e.g., \textbf, \frac)
+        r'\$.*?\$',  # Inline math mode $...$
+        r'\\\[.*?\\\]',  # Display math mode \[...\]
+        r'\{.*?\}',  # Curly brace content often used in LaTeX
+    ]
+
+    # First, mask LaTeX/equation content to prevent false positives
+    masked_text = text
+    for pattern in latex_patterns:
+        masked_text = re.sub(pattern, ' MASKED ', masked_text, flags=re.DOTALL)
+
+    # Split the text into words by whitespace
+    words = masked_text.split()
 
     for word in words:
-        # Check if the word is longer than the specified length
-        if len(word) >= min_length:
+        # Skip if it's our mask or obviously not a real word
+        if word == 'MASKED' or not any(c.isalpha() for c in word):
+            continue
+
+        # Remove common punctuation from consideration in length
+        cleaned_word = re.sub(r'[.,!?;:()\'"]', '', word)
+
+        # Check if the cleaned word is longer than the specified length
+        if len(cleaned_word) >= min_length:
             return True
 
     return False

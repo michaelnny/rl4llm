@@ -44,7 +44,7 @@ class MetricsCollector:
         """Get all metrics"""
         return {name: values for name, values in self._metrics.items()}
 
-    def get_summary(self, skip_list: List[str] = ['loss', 'kl', 'grad_norm']) -> Dict[str, float]:
+    def get_summary(self, skip_list: List[str] = ['loss', 'grad_norm']) -> Dict[str, float]:
         """Get summary of all metrics"""
         summary = {}
 
@@ -57,6 +57,6 @@ class MetricsCollector:
                     continue
                 else:
                     summary[f"{name}_std"] = np.std(values).item()
-                    summary[f"{name}_var"] = np.var(values).item()
+                    # summary[f"{name}_var"] = np.var(values).item()
 
         return summary

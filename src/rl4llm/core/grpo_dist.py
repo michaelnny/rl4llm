@@ -23,6 +23,7 @@ from .data_types import GRPOConfig, GRPOSample
 logger = logging.getLogger(__name__)
 
 
+# TODO consider adapting to support deepspeed zero-3
 class GRPOTrainer(BaseGRPOTrainer):
     """RL GRPO for training LLMs on multiple GPUs using deepspeed.
 
@@ -107,12 +108,12 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self.iteration_count += 1
 
+        self._handle_post_train()
+
         # Log all metrics
         metrics = self._get_metrics_summary()
         if self.is_master:
-            self._log_stats_to_tensorboard(metrics, self.iteration_count)
-
-        self._handle_post_train()
+            self._log_training_stats(metrics, self.iteration_count)
 
         dist.barrier()
 
@@ -142,7 +143,7 @@ class GRPOTrainer(BaseGRPOTrainer):
                     )
                     collected_samples.extend(samples)
 
-            self._metrics.add_metric('elapsed/generation_episodes', self.train_episode_count)
+            self._metrics.add_metric('elapsed/generation_episodes', self.train_episode_count * self.world_size)
             self._metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
 
             return collected_samples
@@ -160,7 +161,6 @@ class GRPOTrainer(BaseGRPOTrainer):
             drop_last=True,
         )
 
-        # TODO adapt to deepspeed
         self.policy_engine.optimizer.zero_grad()
 
         assert self.policy_engine.training
@@ -180,7 +180,6 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def save_checkpoint(self, save_dir: str):
         """Save policy model checkpoint following HF conventions"""
-        # TODO what about zero-3???
         if self.is_zero3_enabled():
             # self.logger.info('Saving policy model checkpoint using DeepSpeed...')
             raise NotImplementedError
@@ -205,9 +204,10 @@ class GRPOTrainer(BaseGRPOTrainer):
         for k, v in local_metrics.items():
             values = gather_tensor(torch.tensor(v, dtype=self.torch_dtype, device=self.device))
             metrics[k] = values.mean().item()
-            if len(values) > self.world_size and 'loss' not in k:  # Add std dev and variance for multiple values
+            if (
+                len(values) > self.world_size and 'loss' not in k and 'grad_norm' not in k
+            ):  # Add std dev and variance for multiple values
                 metrics[f"{k}_std"] = values.std().item()
-                metrics[f"{k}_var"] = values.var().item()
 
         return metrics
 
@@ -333,7 +333,6 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""
-        # TODO handle zero-3???
 
         if self.is_zero3_enabled():
             raise NotImplementedError('Zero-3 is not supported yet')

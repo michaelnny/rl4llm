@@ -53,12 +53,10 @@ class GRPOConfig(BaseModel):
         8192, ge=1024, le=51200, description='Maximum to scale the dynamic discount compute returns'
     )
 
-    sync_reference_interval: int = Field(
-        0, ge=10, le=1000, description='Interval to update reference model using latest policy'
-    )
-    checkpoint_interval: int = Field(0, ge=0, le=100, description='Interval to save policy model checkpoint')
-    eval_interval: int = Field(100, ge=1, description='Interval to evaluate policy model')
-    eval_batch_size: int = Field(8, ge=1, le=1024, description='Mini-batch size for evaluation')
+    sync_reference_interval: int = Field(0, ge=0, le=1000, description='Interval to update reference model using latest policy')
+    checkpoint_interval: int = Field(0, ge=0, le=1000, description='Interval to save policy model checkpoint')
+    eval_interval: int = Field(100, ge=0, description='Interval to evaluate policy model')
+    eval_batch_size: int = Field(8, ge=0, le=1024, description='Mini-batch size for evaluation')
 
     class Config:
         arbitrary_types_allowed = True
@@ -119,4 +117,3 @@ class SampleLog(BaseModel):
     format_reward: Optional[float] = 0.0
     total_reward: Optional[float] = 0.0
     completion_length: Optional[int] = 0
-    timestamp: datetime = Field(default_factory=datetime.utcnow)

@@ -87,12 +87,21 @@ def main():
 
     # shard datasets across ranks, so each rank only works on a small subset of the data
     shared_train_ds = train_ds.shard(world_size, local_rank)
-    logger.info(f"Rank {local_rank} has {len(shared_train_ds)} samples after sharding")
+    shared_test_ds = test_ds.shard(world_size, local_rank)
+    logger.info(
+        f"Rank {local_rank} has {len(shared_train_ds)} training and {len(shared_test_ds)} testing samples after sharding"
+    )
 
     torch_dtype = torch.bfloat16
     device = torch.device(f"cuda:{local_rank}")
 
+    dist.barrier()
     policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
+
+    ref_model = deepcopy(policy_model)
+    for p in ref_model.parameters():
+        p.requires_grad = False
+    ref_model = ref_model.eval()
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
@@ -102,11 +111,6 @@ def main():
         ),
         config_params=train_ds_config,
     )
-
-    ref_model = deepcopy(policy_model)
-    for p in ref_model.parameters():
-        p.requires_grad = False
-    ref_model = ref_model.eval()
 
     eval_ds_config = config['deepspeed_eval_config']
 
@@ -124,13 +128,15 @@ def main():
         policy_engine=policy_engine,
         reference_engine=ref_engine,
         tokenizer=tokenizer,
-        train_ds=train_ds,
-        test_ds=test_ds,
+        train_ds=shared_train_ds,
+        test_ds=shared_test_ds,
         device=device,
         torch_dtype=torch_dtype,
         artifacts_path=artifacts_path,
         logger=logger,
     )
+
+    dist.barrier()
 
     try:
         trainer.train(log_hyper_params=config)

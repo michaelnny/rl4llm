@@ -1,12 +1,12 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/ds_enhanced_grpo_qwen2.5_0.5b_gsm8k"
+  artifacts_path: "./runs/test_ds_enhanced_grpo_qwen2.5_0.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
   # max_train_samples: 1600         # for a quick run
-  max_test_samples: 2048       
+  max_test_samples: 128       
 
 model:
   pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
@@ -16,7 +16,7 @@ model:
 
 grpo_config:
   max_steps: 1000
-  rollout_size: 1024
+  rollout_size: 128
   num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
@@ -27,7 +27,7 @@ grpo_config:
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       # no need to normalize for binary rewards
   normalize_advantages: true
-  kl_loss_coef: 0.001
+  kl_loss_coef: 0.01
   sync_reference_interval: 500        # every N iteration
 
   # for sample generation
@@ -51,16 +51,16 @@ grpo_config:
   explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
   explore_decay_steps: 500
-  explore_start_ratio: 0.1
+  explore_start_ratio: 0.05
   explore_top_k: 100
   explore_top_k_beta: 0.5             # Square root of probabilities
 
   # evaluation
   eval_batch_size: 32
-  eval_interval: 100
+  eval_interval: 2
 
   # others
-  checkpoint_interval: 100            # every N iteration
+  checkpoint_interval: 200            # every N iteration
 
 deepspeed_train_config:
   # memory_breakdown: true  # for debugging
@@ -80,7 +80,7 @@ deepspeed_train_config:
   scheduler:
     type: "WarmupDecayLR"
     params:
-      warmup_num_steps: 100
+      warmup_num_steps: 200
       total_num_steps: 80000
       warmup_min_lr: 1.0e-7
       warmup_max_lr: 1.0e-6

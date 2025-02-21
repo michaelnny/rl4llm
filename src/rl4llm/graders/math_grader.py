@@ -25,7 +25,6 @@ LIST_MARKER_PATTERN = re.compile(
 # Pattern for arithmetic expressions and standalone numbers
 NUMBER_PATTERN = re.compile(
     r"""
-    (?<!\S)                     # Ensure the match is not preceded by a non-whitespace character
     (?:[$€£¥₹])?               # Optional leading currency symbol
     [+-]?                       # Optional sign (+ or -)
     (?:                         # Start of non-capturing group for the integer part
@@ -39,7 +38,6 @@ NUMBER_PATTERN = re.compile(
         \s*                     # Optional whitespace
         (?:%|°[CF]|kg|km/h|mph|USD|EUR|GBP|JPY|INR)?  # Common units and currencies
     )?
-    (?=\s|[.,!?;:]|$)          # Ensure the match is followed by whitespace, punctuation, or end of string
     """,
     re.VERBOSE,
 )
