@@ -55,7 +55,8 @@ class MetricsCollector:
             if len(values) > 1:
                 if skip_list and any([k in name for k in skip_list]):
                     continue
-                summary[f"{name}_std"] = np.std(values).item()
-                summary[f"{name}_var"] = np.var(values).item()
+                else:
+                    summary[f"{name}_std"] = np.std(values).item()
+                    summary[f"{name}_var"] = np.var(values).item()
 
         return summary

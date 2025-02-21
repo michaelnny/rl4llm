@@ -137,6 +137,7 @@ def test_pattern_answers(answer, ground_truth, expected_score):
             3,
         ),
         ('Percentage of disliked books = (90 / 300) x 100 = 30%', '30', 1.0, 3),
+        ('所以，Meryll还需要再写31个整体的题目', '31', 1.0, 3),
     ],
 )
 def test_last_numbers(answer, ground_truth, expected_score, last_n):

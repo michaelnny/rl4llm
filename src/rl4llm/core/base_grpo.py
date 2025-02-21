@@ -21,6 +21,7 @@ from rl4llm.generations import CustomLLMGenerator
 from rl4llm.graders import format_structure_grader, math_problem_grader
 from rl4llm.utils import (
     DummyLogger,
+    FileHandler,
     MetricsCollector,
     compute_grad_norm,
     masked_mean,
@@ -29,7 +30,7 @@ from rl4llm.utils import (
     save_yaml_config_file,
 )
 
-from .data_types import GRPOConfig, GRPOSample
+from .data_types import GRPOConfig, GRPOSample, SampleLog
 
 
 class BaseGRPOTrainer(ABC):
@@ -46,7 +47,8 @@ class BaseGRPOTrainer(ABC):
         torch_dtype: torch.dtype,
         artifacts_path: str,
         logger: Optional[logging.Logger] = None,
-        is_master: Optional[bool] = True,
+        # is_master: Optional[bool] = True,
+        rank: Optional[int] = 0,
     ):
         """
         Initialize the BaseGRPOTrainer with training components.
@@ -76,7 +78,8 @@ class BaseGRPOTrainer(ABC):
         self.ref_update_count = 0
         self.explore_epsilon = 0
         self.generation_mode = False
-        self.is_master = is_master
+        self.rank = 0
+        self.is_master = rank == 0
 
         # For moving average of completion lengths
         self._completion_lengths = deque(maxlen=1000)
@@ -85,27 +88,43 @@ class BaseGRPOTrainer(ABC):
 
     def _initialize(self):
         """Initialize training components"""
+
         # Setup special tokens
         self.pad_token_id = self.tokenizer.pad_token_id
         self.bos_token_id = self.tokenizer.bos_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
 
+        # Initialize metrics
         self._metrics = MetricsCollector()
 
         # Setup directories and logging
-        self.tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
-        self.checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
+        self._setup_directories()
 
         if self.is_master:
-            for path in [self.tb_log_dir, self.checkpoint_dir]:
-                os.makedirs(path, exist_ok=True)
-
+            # Initialize TensorBoard writer
             self._writer = SummaryWriter(self.tb_log_dir)
         else:
             self._writer = None
 
-        self._metrics = MetricsCollector()
-        self._pool_executor = None  # To hold the executor for reuse during post processing
+        # Initialize sample file handlers
+        self._train_sample_handler = FileHandler(
+            os.path.join(self.samples_dir, f'training_samples_rank{self.rank}.jsonl'), 'jsonl', True
+        )
+        self._eval_sample_handler = FileHandler(
+            os.path.join(self.samples_dir, f'evaluation_samples_rank{self.rank}.jsonl'), 'jsonl', True
+        )
+
+        # Executor setup
+        self._pool_executor = None  # Will be used later for post-processing
+
+    def _setup_directories(self):
+        """Helper method to create necessary directories"""
+        self.tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
+        self.checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
+        self.samples_dir = os.path.join(self.artifacts_path, 'samples')
+
+        for path in [self.tb_log_dir, self.checkpoint_dir, self.samples_dir]:
+            os.makedirs(path, exist_ok=True)
 
     def on_exit(self):
         if self._pool_executor is not None:
@@ -113,6 +132,9 @@ class BaseGRPOTrainer(ABC):
                 self._pool_executor.shutdown(wait=True)
             except Exception as e:
                 self.logger.warning(f"Failed to shutdown pool executor: {e}")
+
+        self._train_sample_handler.close()
+        self._eval_sample_handler.close()
 
     def train(self, log_hyper_params: Optional[Dict] = None):
         """Start to train the model using RL GRPO.
@@ -245,10 +267,12 @@ class BaseGRPOTrainer(ABC):
                 generation_kwargs['temperature'] = temperature
 
             explore_epsilon = self._get_exploration_epsilon()
-            enable_exploration = (explore_epsilon > 0) and (random.random() < self.explore_epsilon)
+            enable_exploration = (
+                (self.config.explore_start_ratio > 0) and (explore_epsilon > 0) and (random.random() < self.explore_epsilon)
+            )
 
             # add random start exploration params
-            if self.config.explore_start_ratio > 0 and enable_exploration:
+            if enable_exploration:
                 generation_kwargs['explore_start_steps'] = self._get_explore_start_steps()
                 generation_kwargs['explore_top_k'] = self.config.explore_top_k
                 generation_kwargs['explore_top_k_beta'] = self.config.explore_top_k_beta
@@ -614,28 +638,18 @@ class BaseGRPOTrainer(ABC):
         """
         assert len(completion_texts) == len(ground_truths) == len(completion_tokens_count)
 
-        # Use ProcessPoolExecutor for CPU-bound reward computation
-        executor = self._get_pool_executor()
-
-        results = []
+        accuracy_rewards = []
+        format_rewards = []
         for idx in range(len(completion_texts)):
-            result = executor.submit(
-                self._compute_reward_single_sample,
+            out_dict = self._compute_reward_single_sample(
                 completion_texts[idx],
                 ground_truths[idx],
                 completion_tokens_count[idx],
                 self.config.min_completion_length,
                 self.config.xml_format,
             )
-            results.append(result)
-
-        # Collecting results from all futures
-        accuracy_rewards = []
-        format_rewards = []
-        for future in results:
-            reward_dict = future.result()
-            accuracy_rewards.append(reward_dict['accuracy_reward'])
-            format_rewards.append(reward_dict['format_reward'])
+            accuracy_rewards.append(out_dict['accuracy_reward'])
+            format_rewards.append(out_dict['format_reward'])
 
         accuracy_rewards = torch.tensor(accuracy_rewards, dtype=self.torch_dtype)
         format_rewards = torch.tensor(format_rewards, dtype=self.torch_dtype)
@@ -646,6 +660,29 @@ class BaseGRPOTrainer(ABC):
             'format_rewards': format_rewards,
             'total_rewards': total_rewards,
         }
+
+        # # Use ProcessPoolExecutor for CPU-bound reward computation
+        # executor = self._get_pool_executor()
+
+        # results = []
+        # for idx in range(len(completion_texts)):
+        #     result = executor.submit(
+        #         self._compute_reward_single_sample,
+        #         completion_texts[idx],
+        #         ground_truths[idx],
+        #         completion_tokens_count[idx],
+        #         self.config.min_completion_length,
+        #         self.config.xml_format,
+        #     )
+        #     results.append(result)
+
+        # # Collecting results from all futures
+        # accuracy_rewards = []
+        # format_rewards = []
+        # for future in results:
+        # reward_dict = future.result()
+        # accuracy_rewards.append(reward_dict['accuracy_reward'])
+        # format_rewards.append(reward_dict['format_reward'])
 
     @staticmethod
     def _compute_reward_single_sample(
@@ -863,67 +900,65 @@ class BaseGRPOTrainer(ABC):
         for metric_name, values in metrics_batch.items():
             self._metrics.add_metrics_batch(metric_name, values)
 
-        # Log samples
-        sample_indices = (
-            random.sample(range(len(completion_texts)), k=min(2, 0.1 * self.config.group_size))
-            if is_training
-            else range(len(completion_texts))
-        )
+        # Log samples to external file and optionally to tensorboard
+        tb_log_indices = random.sample(range(len(completion_texts)), k=min(2, 0.1 * self.config.group_size))
         tb_tag = 'training' if is_training else 'evaluation'
 
-        for i in range(len(completion_texts)):
+        ext_file_handler = self._train_sample_handler if is_training else self._eval_sample_handler
+        for idx in range(len(completion_texts)):
+            # Create sample log entry
+            sample = SampleLog(
+                question=questions[idx],
+                task_type=task_types[idx],
+                ground_truth=ground_truths[idx],
+                completion=completion_texts[idx],
+                accuracy_reward=reward_output['accuracy_rewards'][idx].item(),
+                format_reward=reward_output['format_rewards'][idx].item(),
+                total_reward=reward_output['total_rewards'][idx].item(),
+                completion_length=completion_lengths[idx].item(),
+            )
+
             if is_training:
                 self.train_episode_count += 1
+                ext_file_handler.log_entry(sample.model_dump())
             else:
                 self.eval_episode_count += 1
+                ext_file_handler.log_entry(sample.model_dump())
 
-            if i in sample_indices or not is_training:
-                # we only log few samples for training
-                formatted_text = self._format_sample_text(
-                    task_types[i], questions[i], ground_truths[i], reward_output['total_rewards'][i].item(), completion_texts[i]
-                )
-                self._log_sample_to_tensorboard(
-                    tb_tag, formatted_text, self.train_episode_count if is_training else self.eval_episode_count
-                )
+            # Log subset of samples to TensorBoard
+            if idx in tb_log_indices:
+                try:
+                    formatted_text = self._format_sample_text(sample)
+                    self._log_sample_to_tensorboard(
+                        f"{tb_tag}/sample",
+                        formatted_text,
+                        self.train_episode_count if is_training else self.eval_episode_count,
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to log sample to TensorBoard: {e}")
 
-    def _format_sample_text(
-        self,
-        task_type: str,
-        question: str,
-        ground_truth: str,
-        total_reward: float,
-        completion_text: str,
-    ) -> str:
-        """Format sample text for logging.
+        ext_file_handler.flush()
 
-        Args:
-            task_type (str): Type of task.
-            question (str): Input question.
-            ground_truth (str): Expected answer.
-            total_reward (float): Total reward for the completion.
-            completion_text (str): Generated completion.
-
-        Returns:
-            str: Formatted text string.
-        """
+    def _format_sample_text(self, sample: SampleLog) -> str:
+        """Format sample text for TensorBoard logging."""
         return (
-            f"**Question [{task_type}]**: {question}\n\n"
-            f"**Ground Truth**: {ground_truth}\n\n"
-            f"**Graded Reward**: {total_reward}\n\n"
-            f"**Full Answer**:\n```json\n{completion_text}\n```"
+            f"**Question [{sample.task_type}]**: {sample.question}\n\n"
+            f"**Ground Truth**: {sample.ground_truth}\n\n"
+            f"**Rewards (accuracy/format/total)**: {sample.accuracy_reward:.2f}/{sample.format_reward:.2f}/{sample.total_reward:.2f}\n\n"
+            f"**Generated Completion**:\n```json\n{sample.completion}\n```"
         )
 
-    def _log_sample_to_tensorboard(self, tag: str, formatted_text: str, episode_count: int) -> None:
+    def _log_sample_to_tensorboard(self, tag: str, formatted_text: str, step: int) -> None:
         """Log formatted text to TensorBoard.
 
         Args:
             tag (str): TensorBoard tag (e.g., 'training' or 'evaluation').
             formatted_text (str): Text to log.
-            episode_count (int): Episode number for logging.
+            step (int): Episode number for logging.
         """
         if self._writer:
             try:
-                self._writer.add_text(f'{tag}/sample', formatted_text, episode_count)
+                self._writer.add_text(f'{tag}/sample', formatted_text, step)
             except Exception as e:
                 self.logger.warning(f"Failed to log sample to TensorBoard: {e}")
 

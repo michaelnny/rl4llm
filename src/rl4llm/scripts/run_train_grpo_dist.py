@@ -59,7 +59,7 @@ def main():
 
     local_rank = dist.get_rank()
     world_size = dist.get_world_size()
-    seed = int(config.get('job', {}).get('seed', 143)) + local_rank
+    seed = int(config.get('job', {}).get('seed', 143))
     artifacts_path = config.get('job').get('artifacts_path')
     datasets = config.get('job').get('datasets')
     max_train_samples = config.get('job').get('max_train_samples', None)

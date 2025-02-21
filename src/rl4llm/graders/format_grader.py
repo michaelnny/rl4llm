@@ -5,7 +5,7 @@ from .text_utils import has_irregular_words, has_repetitions
 xml_pattern = r'^<think>(.*?)</think>\s*<answer>(.*?)</answer>$'
 
 
-def has_invalid_format(text: str) -> bool:
+def check_invalid_format(text: str) -> bool:
     # Avoid processing if text is empty after stripping
     stripped_text = text.strip()
     if not stripped_text:
@@ -17,7 +17,10 @@ def has_invalid_format(text: str) -> bool:
         stripped_text.endswith(('```', '`')),
         stripped_text.startswith(('\\\\', '\\boxed', 'The answer is', 'The correct answer is')),  # start with direct answer
         stripped_text[0].isdigit(),  # start with number of bullet point
-        # has_irregular_words(stripped_text),  # check for very long words, careful for code or latex math???
+        has_repetitions(
+            stripped_text,
+        ),  # check for n-gram repetitions
+        has_irregular_words(stripped_text, 25),  # check for very long words, careful for code or latex math???
     ]
 
     return any(invalid_conditions)
@@ -39,17 +42,14 @@ def format_structure_grader(completion: str, seq_length: int, min_length: int = 
         if (
             not think_content
             or not answer_content
-            or has_invalid_format(think_content)
-            or has_invalid_format(answer_content)
-            or has_repetitions(think_content)
-            or has_repetitions(answer_content)
+            or check_invalid_format(think_content)
+            or check_invalid_format(answer_content)
         ):
-            # if any content is invalid or repeated
             return -0.5
 
     else:
-        if seq_length < min_length or has_invalid_format(completion_text) or has_repetitions(completion_text):
-            return -0.5  # if any condition is violated
+        if seq_length < min_length or check_invalid_format(completion_text):
+            return -0.5
 
     # no conditions are violated
     return score

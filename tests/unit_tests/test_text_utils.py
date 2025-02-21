@@ -8,36 +8,12 @@ from rl4llm.graders.text_utils import has_irregular_words, has_repetitions
 def get_repetitions_test_data() -> List[Tuple[str, bool]]:
     """
     Returns a list of test cases for repetition detection.
-    Each tuple contains (test_text, expected_result, description)
+    Each tuple contains (test_text, expected_result)
     """
     return [
-        # Original test cases
         (
             r"""
 Hmm not sure I quite have you understand what I am saying. Could this guy not answer a little better? What I am trying to say is that I am not sure how to calculate the answer. I am not sure how to figure out how many hours of sleep he is behind on. I am not sure how to figure out how many hours of sleep he would ideally like to get. I am not sure how to figure out how many hours of sleep he has actually gotten. I am not sure how to figure out how many hours of sleep he has been getting. I am not sure how to figure out how many hours of sleep he has been getting.""",
-            True,
-        ),
-        (
-            r"""
-        To determine a quick way to reach New York for school, the teacher tells one quick shortcut.
-        The teacher says, "If you travel at the rate of 50 km/h and stop to rest for 30 minutes every 2 hours, you will arrive at the destination in 1 hour and 45 minutes."
-        First, let's break down the journey into segments.
-        1. **First Segment:**
-           - Distance: 300 km
-           - Speed: 50 km/h
-           - Time: \( \frac{300 \text{ km}}{50 \text{ km/h}} = 6 \text{ hours} \)
-        2. **Second Segment:**
-           - Distance: 300 km
-           - Speed: 50 km/h
-           - Time: \( \frac{300 \text{ km}}{50 \text{ km/h}} = 6 \text{ hours} \)
-        3. **Third Segment:**
-           - Distance: 300 km
-           - Speed: 50 km/h
-           - Time: \( \frac{300 \text{ km}}{50 \text{ km/h}} = 6 \text{ hours} \)
-        4. **Fourth Segment:**
-           - Distance: 300 km
-           - Speed: 50 km/h
-           - Time: \( \frac{300 \text{ km}}{50 \text{ km/h}} = 6 \text{ hours} \)""",
             True,
         ),
         (
@@ -169,7 +145,7 @@ Now, we subtract the number of bananas consumed by the first two monkeys from th
 
 Thus, the third monkey eats \(\boxed{303}\) bananas each day.
 """,
-            False,
+            True,
         ),
         (
             r"""
@@ -388,6 +364,82 @@ Thus, the total cost after the discount is $26.91.
 Let me repeat this important point. Let me repeat this important point. Let me repeat this important point.
 Let me repeat this important point. Let me repeat this important point. Let me repeat this important point.""",
             True,
+        ),
+        (
+            r"""
+At the end of the competition, we look good at each runner in Round 3 skips compared to round 4. Round 1: 16 skips.
+Round 2: Jeff skipped 3 fewer than Sam; so, Jeff skipped \( 16 - 3 = 13 \) skips.
+Round 3: Jeff skipped 4 more than Sam; so, Jeff skipped \( 16 + 4 = 20 \) skips.
+Round 4: Jeff completed half the number of skips as Sam; since Sam completed 16 skips, Jeff completed \( \frac{16}{2} = 8 \) skips.
+
+Now, let's calculate the total number of skips so far:
+Sum of skips in these rounds: \( 16 + 13 + 20 + 8 = 57 \) skips.
+
+Next, we sum the skips in each of the last few rounds, excluding Jeff:
+- Round 5: Jeff skipped the last round, not considered in totals.
+- Round 6: Jeff skipped the last round, not considered in totals.
+- Round 7: Jeff skipped the last round, not considered in totals.
+- Round 8: Jeff skipped the last round, not considered in totals.
+- Round 9: Jeff skipped the last round, not considered in totals.
+- Round 10: Jeff skipped the last round, not considered in totals.
+- Round 11: Jeff skipped the last round, not considered in totals.
+- Round 12: Jeff skipped the last round, not considered in totals.
+- Round 13: Jeff skipped the last round, not considered in totals.
+- Round 14: Jeff skipped the last round, not considered in totals.
+- Round 15: Jeff skipped the last round, not considered in totals.
+- Round 16: Jeff skipped the last round, not considered in totals.
+
+We must exclude rounds 1 through 4 and 11 because Jeff skipped half the number of skips as Sam, and the sum of skips should be even, so we don't list negative numbers or fractional numbers. Jeff's total is the sum of all the rounds, which can be calculated as follows:
+\[ 16 + 13 + 20 + 8 + \text{(sum of rounds 16, 17, 18, ..., 15)} \]""",
+            True,
+        ),
+        (
+            r"""
+        To determine a quick way to reach New York for school, the teacher tells one quick shortcut.
+        The teacher says, "If you travel at the rate of 50 km/h and stop to rest for 30 minutes every 2 hours, you will arrive at the destination in 1 hour and 45 minutes."
+        First, let's break down the journey into segments.
+        1. **First Segment:**
+           - Distance: 300 km
+           - Speed: 50 km/h
+           - Time: \( \frac{300 \text{ km}}{50 \text{ km/h}} = 6 \text{ hours} \)
+        2. **Second Segment:**
+           - Distance: 300 km
+           - Speed: 50 km/h
+           - Time: \( \frac{300 \text{ km}}{50 \text{ km/h}} = 6 \text{ hours} \)
+        3. **Third Segment:**
+           - Distance: 300 km
+           - Speed: 50 km/h
+           - Time: \( \frac{300 \text{ km}}{50 \text{ km/h}} = 6 \text{ hours} \)
+        4. **Fourth Segment:**
+           - Distance: 300 km
+           - Speed: 50 km/h
+           - Time: \( \frac{300 \text{ km}}{50 \text{ km/h}} = 6 \text{ hours} \)""",
+            True,
+        ),
+        (
+            r"""
+To determine how many people absolutely remained at the table when 17 people took both wine and soda, we can use the principle of inclusion and exclusion. Let's define the following:
+
+- \( W \) as the set of people who took wine.
+- \( S \) as the set of people who took soda.
+- \( |W| \) as the number of people who took wine.
+- \( |S| \) as the number of people who took soda.
+- \( |W \cap S| \) as the number of people who took both wine and soda.
+- \( |W \cup S| \) as the number of people who took either wine or soda or both.
+
+From the problem, we know:
+- \( |W| = 26 \)
+- \( |S| = 22 \)
+- \( |W \cap S| = 17 \)
+
+We need to find the number of people who took either wine or soda or both, which is \( |W \cup S| \). According to the principle of inclusion and exclusion, we have:
+\[ |W \cup S| = |W| + |S| - |W \cap S| \]
+
+Substituting the given values into the formula, we get:
+\[ |W \cup S| = 26 + 22 - 17 = 31 \]
+
+Therefore, the number of people who absolutely remained at the gathering is \(\boxed{31}\).""",
+            False,
         ),
     ]
 

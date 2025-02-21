@@ -56,7 +56,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             torch_dtype=torch_dtype,
             artifacts_path=artifacts_path,
             logger=logger,
-            is_master=self.global_rank == 0,
+            rank=self.global_rank,
         )
 
         self.policy_engine = policy_engine
@@ -132,7 +132,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             collected_samples: List[GRPOSample] = []
 
             with self._metrics.timer('generation'):
-                while len(collected_samples) < self.config.rollout_size:
+                while len(collected_samples) < self.config.rollout_size // self.world_size:
                     sample = self._get_next_data_item()
                     samples = self.generate_group_samples(
                         sample,

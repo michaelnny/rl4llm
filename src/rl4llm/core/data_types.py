@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -105,3 +106,17 @@ class GRPOSample(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+class SampleLog(BaseModel):
+    """Pydantic model for sample logging data."""
+
+    question: str
+    task_type: str
+    ground_truth: str
+    completion: str
+    accuracy_reward: Optional[float] = 0.0
+    format_reward: Optional[float] = 0.0
+    total_reward: Optional[float] = 0.0
+    completion_length: Optional[int] = 0
+    timestamp: datetime = Field(default_factory=datetime.utcnow)

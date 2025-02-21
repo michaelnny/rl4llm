@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/enhanced_grpo_qwen2.5_1.5b_gsm8k"
+  artifacts_path: "./runs/enhanced_grpo_qwen2.5_0.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -9,7 +9,7 @@ job:
   max_test_samples: 2048        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
@@ -57,7 +57,7 @@ grpo_config:
   explore_decay_steps: 500
   explore_start_ratio: 0.1
   explore_top_k: 100
-  explore_top_k_beta: 0.5             # Square root of probabilities
+  explore_top_k_beta: 0.4             # Square root of top-k probabilities during exploring start
 
   # evaluation
   eval_batch_size: 32

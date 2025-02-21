@@ -46,7 +46,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             torch_dtype=torch_dtype,
             artifacts_path=artifacts_path,
             logger=logger,
-            is_master=True,  # always set to True on single GPU
+            rank=0,  # always set on single GPU
         )
 
         self.policy_model = policy_model

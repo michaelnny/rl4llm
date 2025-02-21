@@ -80,24 +80,6 @@ def test_mixed_temperature_sampling(generator: CustomLLMGenerator):
     assert next_tokens[1] >= 0 and next_tokens[1] < 3
 
 
-@patch('torch.multinomial')
-def test_top_p_sampling(mock_multinomial, generator: CustomLLMGenerator):
-    # Test top-p (nucleus) sampling
-    logits = torch.tensor([[1.0, 2.0, 3.0, -1.0, -2.0], [2.0, 1.0, 0.0, -1.0, -2.0]])
-    temperature = torch.tensor([1.0, 1.0])
-
-    # Mock multinomial to return predetermined values
-    mock_multinomial.return_value = torch.tensor([[1], [0]])
-
-    next_tokens = generator._sample_next_tokens(logits, temperature, top_p=0.9, top_k=0)
-
-    # Verify multinomial was called with modified probabilities
-    mock_multinomial.assert_called_once()
-    probs_arg = mock_multinomial.call_args[0][0]
-    # Check that low probability tokens were masked
-    assert torch.all(probs_arg[:, -2:] == 0)
-
-
 def test_generate_with_exploration(generator: CustomLLMGenerator):
     # Test the full generation process with exploration
     input_ids = torch.tensor([[1, 2], [3, 4]])

@@ -65,6 +65,8 @@ class CustomLLMGenerator:
 
         return input_ids, attention_mask, unfinished_sequences
 
+    """it it fast but requires tuning the parameters, a lower beta will have better results during exploration"""
+
     def _sample_next_tokens(
         self,
         token_logits: torch.Tensor,
@@ -73,7 +75,7 @@ class CustomLLMGenerator:
         top_k: int,
         do_exploration: bool = False,
         explore_top_k: int = 0,
-        explore_top_k_beta: float = 0.5,
+        explore_top_k_beta: float = 0.4,
     ) -> torch.Tensor:
         """
         Sample the next token from the logits using temperature scaling, top-k filtering,
@@ -94,67 +96,141 @@ class CustomLLMGenerator:
         assert token_logits.dim() == 2
         assert token_logits.size(0) == temperature.size(0)
 
-        # Handle zero temperature case
+        batch_size, vocab_size = token_logits.shape
+
+        # Handle temperature = 0 case (greedy decoding)
         zero_temp_mask = temperature == 0
         if zero_temp_mask.all():
-            return token_logits.argmax(dim=-1, keepdim=True).squeeze(-1)
-
-        # Handle temperature=0 cases
-        greedy_tokens = None
-        if zero_temp_mask.any():
-            greedy_tokens = token_logits.argmax(dim=-1, keepdim=True).squeeze(-1)
-
-        # Apply temperature scaling
-        scaled_logits = token_logits / temperature.unsqueeze(1).clamp(min=1e-8)
+            return token_logits.argmax(dim=-1)
 
         if do_exploration and explore_top_k > 1:
-            # Get top-k values and indices for exploration
-            top_k_values, top_k_indices = torch.topk(scaled_logits, k=explore_top_k, dim=-1)
+            # Exploration mode: Top-k sampling with beta-adjusted probabilities
+            top_k = min(explore_top_k, vocab_size)
+            top_k_values, top_k_indices = torch.topk(token_logits, k=top_k, dim=-1)
 
-            # Convert to probabilities and apply beta power
-            probs = F.softmax(top_k_values, dim=-1)
-            probs = probs.pow(explore_top_k_beta)
-            probs = probs / probs.sum(dim=-1, keepdim=True)
+            # Compute softmax probabilities over top-k
+            logit_probs = F.softmax(top_k_values, dim=-1)
 
-            # Sample from the modified distribution
-            sampled_indices = torch.multinomial(probs, num_samples=1)
-            next_tokens = torch.gather(top_k_indices, -1, sampled_indices).squeeze(-1)
+            # Apply beta scaling for exploration
+            scaled_probs = logit_probs.pow(explore_top_k_beta)
+            scaled_probs = scaled_probs / scaled_probs.sum(dim=-1, keepdim=True)
+
+            # Sample from the top-k distribution
+            sampled_indices = torch.multinomial(scaled_probs, num_samples=1)
+            next_tokens = torch.gather(top_k_indices, dim=-1, index=sampled_indices).squeeze(-1)
         else:
-            # Apply top-k filtering
+            # Pre-scale logits with temperature (avoid division by zero)
+            scaled_logits = torch.where(
+                temperature.unsqueeze(1) > 0, token_logits / temperature.unsqueeze(1).clamp(min=1e-8), token_logits
+            )
+
+            # Standard sampling with top-k and top-p filtering
             if top_k > 0:
-                top_k_values, top_k_indices = torch.topk(scaled_logits, min(top_k, scaled_logits.shape[-1]), dim=-1)
-                indices_to_remove = torch.ones_like(scaled_logits, dtype=torch.bool)
-                indices_to_remove.scatter_(-1, top_k_indices, False)
-                scaled_logits.masked_fill_(indices_to_remove, float('-inf'))
+                k = min(top_k, vocab_size)
+                top_k_values, top_k_indices = torch.topk(scaled_logits, k=k, dim=-1)
+                scaled_logits = torch.full_like(scaled_logits, float('-inf'))
+                scaled_logits.scatter_(dim=-1, index=top_k_indices, src=top_k_values)
 
-            # Apply nucleus (top-p) filtering
             if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True)
-                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                # Vectorized nucleus sampling
+                sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True, dim=-1)
+                probs = F.softmax(sorted_logits, dim=-1)
+                cumulative_probs = torch.cumsum(probs, dim=-1)
 
-                # Create a mask for tokens to remove
-                sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
+                # Mask tokens exceeding top_p
+                mask = cumulative_probs <= top_p
+                mask = mask | (cumulative_probs == probs)  # Keep at least one token
+                sorted_logits = sorted_logits.masked_fill(~mask, float('-inf'))
 
-                # Scatter the mask back to original indices
-                indices_to_remove = torch.zeros_like(scaled_logits, dtype=torch.bool)
-                for i in range(token_logits.size(0)):
-                    indices_to_remove[i].scatter_(0, sorted_indices[i], sorted_indices_to_remove[i])
+                # Reconstruct filtered logits in original order
+                scaled_logits = torch.full_like(scaled_logits, float('-inf'))
+                scaled_logits.scatter_(dim=-1, index=sorted_indices, src=sorted_logits)
 
-                scaled_logits.masked_fill_(indices_to_remove, float('-inf'))
-
-            # Convert to probabilities and sample
+            # Sample from the filtered distribution
             probs = F.softmax(scaled_logits, dim=-1)
             next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
         # Replace tokens for temperature=0 cases
-        if greedy_tokens is not None:
+        if zero_temp_mask.any():
+            greedy_tokens = token_logits.argmax(dim=-1)
             assert greedy_tokens.shape == next_tokens.shape == zero_temp_mask.shape
             next_tokens = torch.where(zero_temp_mask, greedy_tokens, next_tokens)
 
         assert next_tokens.dim() == 1 and next_tokens.size(0) == token_logits.size(0)
         return next_tokens
+
+    """a more diverse sampling by processing one item at a time, but it's very slow"""
+
+    # def _sample_next_token(
+    #     self,
+    #     logits: torch.Tensor,  # Single item logits
+    #     temperature: float,
+    #     top_p: float,
+    #     top_k: int,
+    #     do_exploration: bool = False,
+    #     explore_top_k: int = 5,
+    #     explore_top_k_beta: float = 0.5,
+    # ) -> torch.Tensor:
+    #     """Sample next token for a single item in the batch."""
+    #     if temperature == 0:
+    #         return logits.argmax(dim=-1, keepdim=True)
+
+    #     if do_exploration and explore_top_k > 1:
+    #         top_k_values, top_k_indices = torch.topk(logits, k=explore_top_k, dim=-1)
+
+    #         # Convert to probabilities
+    #         probs = F.softmax(top_k_values, dim=-1)
+
+    #         # Simple but effective: raise probabilities to a power < 1
+    #         # This flattens the distribution, giving lower-probability tokens more chance
+    #         probs = probs.pow(explore_top_k_beta)
+    #         probs = probs / probs.sum()
+
+    #         # # Uniform sampling within top-k (original behavior if temp is 1.0)
+    #         # probs = torch.ones_like(top_k_values) / explore_top_k
+
+    #         sampled_indices = torch.multinomial(probs, num_samples=1)
+    #         return torch.gather(top_k_indices, -1, sampled_indices)
+    #     else:
+    #         logits = logits / temperature
+
+    #         if top_k > 0:
+    #             top_k_values, top_k_indices = torch.topk(logits, min(top_k, logits.shape[-1]), dim=-1)
+    #             indices_to_remove = torch.ones_like(logits, dtype=torch.bool)
+    #             indices_to_remove.scatter_(-1, top_k_indices, False)
+    #             logits.masked_fill_(indices_to_remove, float('-inf'))
+
+    #         if top_p < 1.0:
+    #             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+    #             cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+    #             sorted_indices_to_remove = cumulative_probs > top_p
+    #             sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+    #             sorted_indices_to_remove[0] = 0
+
+    #             logits[sorted_indices[sorted_indices_to_remove]] = float('-inf')
+
+    #         probs = F.softmax(logits, dim=-1)
+    #         return torch.multinomial(probs, num_samples=1)
+
+    # def _sample_next_tokens(
+    #     self,
+    #     token_logits: torch.Tensor,
+    #     temperature: torch.Tensor,
+    #     top_p: float,
+    #     top_k: int,
+    #     do_exploration: bool = False,
+    #     explore_top_k: int = 5,
+    #     explore_top_k_beta: float = 0.5,
+    # ) -> torch.Tensor:
+    #     """Sample next tokens for the entire batch."""
+    #     next_tokens = []
+    #     for logits, temp in zip(token_logits, temperature):
+    #         next_token = self._sample_next_token(
+    #             logits, temp.item(), top_p, top_k, do_exploration, explore_top_k, explore_top_k_beta
+    #         )
+    #         next_tokens.append(next_token)
+    #     return torch.cat(next_tokens, dim=0)
 
     @torch.no_grad()
     def generate(
@@ -206,6 +282,8 @@ class CustomLLMGenerator:
             temperature = torch.tensor(temperature, device=input_ids.device)
         else:
             temperature = temperature.to(input_ids.device)
+
+        assert temperature.size(0) == input_ids.size(0)
 
         while generated_tokens < max_new_tokens:
             # Get next token logits
@@ -262,41 +340,42 @@ if __name__ == '__main__':
     else:
         device = torch.device('cpu')
 
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to(device)
+    torch_dtype = torch.float32
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch_dtype).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    generator = CustomLLMGenerator(model, device)
+    generator = CustomLLMGenerator(model)
 
     # Example batch input
     message = [
-        [
-            {
-                'role': 'user',
-                'content': 'Data: Monthly Sales (Jan: $20k, Feb: $25k, Mar: $30k). Suggest a concise and impactful title for a bar chart representing this sales data.',
-            },
-        ],
-        [
-            {
-                'role': 'user',
-                'content': "I have a line chart showing website user engagement metrics: 'Bounce Rate' decreased from 60% to 45% over the last quarter, 'Average Session Duration' increased by 30 seconds, and 'Pages per Visit' remained stable.  What's the main positive conclusion from this chart?",
-            },
-        ],
-        [
-            {
-                'role': 'user',
-                'content': "A pie chart breaks down marketing spend: 40% on 'Social Media Ads', 30% on 'Search Engine Marketing', 20% on 'Email Campaigns', and the rest on 'Content Marketing'. Calculate the percentage allocated to 'Content Marketing'.",
-            },
-        ],
+        {
+            'role': 'user',
+            'content': 'Calen originally had 5 more pencils than does Caleb, and Caleb has 3 less than twice as many pencils as does Candy.  If Calen lost 10 pencils, which left him with 10 pencils, then how many pencils does Candy have?',
+        },
     ]
-    message_prompt = tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+
+    group_size = 16
+    batch_messages = [message] * group_size
+
+    message_prompt = tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(message_prompt, return_tensors='pt', padding=True).to(device)
 
     # Example batch-specific temperatures
-    temperatures = torch.tensor([0.0, 0.3, 0.5], dtype=torch.float16).to(device)
+    temperatures = torch.linspace(0.0, 0.9, steps=group_size, dtype=torch_dtype).to(device)
 
     # Generate text
     output = generator.generate(
-        inputs.input_ids, inputs.attention_mask, temperature=temperatures, max_new_tokens=256, top_p=1.0
+        inputs.input_ids,
+        inputs.attention_mask,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+        temperature=temperatures,
+        max_new_tokens=512,
+        top_p=1.0,
+        top_k=50,
+        explore_start_steps=50,
+        explore_top_k=100,
+        explore_top_k_beta=0.4,
     )
 
     # Decode the output tokens back to text
@@ -305,6 +384,5 @@ if __name__ == '__main__':
 
     # print("Generated Texts:")
     for i, text in enumerate(generated_texts):
-        print(f"Input: {message[i][0]['content']}")
-        print(f"Generated: '{text}'\n")
+        print(f"Generated [{i}]: '{text}'\n")
         print('\n\n--\n\n')
