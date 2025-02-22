@@ -69,7 +69,7 @@ Run on remote server
 ```bash
 
 # Login to remote server
-ssh ubuntu@composed-hibiscus-frog.1.cricket.hyperbolic.xyz -p 31339
+ssh ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz -p 31883
 
 # Install MPICH for deepspeed
 sudo apt update
@@ -79,7 +79,7 @@ pip3 install torch torchvision torchaudio
 
 
 # On local machine, copy project files to remote server
-rsync -avz -e "ssh -p 31339" --exclude='.*' --exclude='__pycache__/' --exclude='tests' --exclude='old_runs' --exclude='runs' ./rl4llm ubuntu@composed-hibiscus-frog.1.cricket.hyperbolic.xyz:/home/ubuntu
+rsync -avz -e "ssh -p 31883" --exclude='.*' --exclude='__pycache__/' --exclude='tests' --exclude='old_runs' --exclude='runs' ./rl4llm ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu
 
 
 # Install packages
@@ -96,13 +96,13 @@ Run training script
 cd /home/ubuntu/rl4llm
 
 # to download the model and quick smock runs
-PYTHONPATH=src TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=2 src/rl4llm/scripts/run_train_grpo_dist.py --config-file ./configs/ds_grpo_train_config.yaml
+PYTHONPATH=src TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 src/rl4llm/scripts/run_train_grpo_dist.py --config-file ./configs/ds_grpo_train_config.yaml
 
 
 
 # real run in background
 
-nohup sh -c "PYTHONPATH=src NCCL_P2P_DISABLE=1 deepspeed --num_gpus=8 src/rl4llm/scripts/run_train_grpo_dist.py --config-file ./configs/ds_grpo_train_config.yaml" &
+nohup sh -c "PYTHONPATH=src NCCL_P2P_DISABLE=1 deepspeed --num_gpus=4 src/rl4llm/scripts/run_train_grpo_dist.py --config-file ./configs/ds_grpo_train_config.yaml" &
 
 
 
@@ -117,7 +117,7 @@ Copy experiment runs logs from remove to local machine
 
 ```bash
 
-rsync -avz -e "ssh -p 31339"  --exclude='checkpoints' ubuntu@composed-hibiscus-frog.1.cricket.hyperbolic.xyz:/home/ubuntu/rl4llm/runs ./rl4llm
+rsync -avz -e "ssh -p 31883"  --exclude='checkpoints' ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu/rl4llm/runs ./rl4llm
 
 ```
 

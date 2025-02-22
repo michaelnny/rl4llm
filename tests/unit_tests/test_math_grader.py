@@ -38,6 +38,9 @@ def test_empty_inputs():
         ),
         (r'The final answer is: $\boxed{(\pi)}$', '\text{(E)}', 0.0),
         (r'The final answer is: $\boxed{3.92}$', '3', 0.0),
+        (r'The final answer is: $\boxed{1, -5, 4}$', '-5, 1, 4', 1.0),
+        (r'The final answer is: $\boxed{(9x^2 + x + 2)(-9x^2 + x + 2)}$', '(-9x^2+x+2)(9x^2+x+2)', 1.0),
+        (r'The final answer is: $\boxed{(x - 2)(x + 2)(x^2 + 4)(x^4 + 16)}$', '(x^4+16)(x^2+4)(x+2)(x-2)', 1.0),
         (
             r"""Finally, we subtract the total gallons used from the original amount of paint:
         \[

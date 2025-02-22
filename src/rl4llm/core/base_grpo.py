@@ -929,7 +929,7 @@ class BaseGRPOTrainer(ABC):
                 try:
                     formatted_text = self._format_sample_text(sample)
                     self._log_sample_to_tensorboard(
-                        f"{tb_tag}/sample",
+                        tb_tag,
                         formatted_text,
                         self.train_episode_count if is_training else self.eval_episode_count,
                     )
@@ -963,7 +963,7 @@ class BaseGRPOTrainer(ABC):
         """
         if self._writer:
             try:
-                self._writer.add_text(f'{tag}/sample', formatted_text, step)
+                self._writer.add_text(f'{tag}', formatted_text, step)
             except Exception as e:
                 self.logger.warning(f"Failed to log sample to TensorBoard: {e}")
 

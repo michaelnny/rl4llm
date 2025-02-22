@@ -26,13 +26,13 @@ grpo_config:
   normalize_group_rewards: true       # no need to normalize for binary rewards
   normalize_advantages: true
   kl_loss_coef: 0.01
-  sync_reference_interval: 400        # every N iteration
+  sync_reference_interval: 300        # every N iteration
 
   # for sample generation
   system_prompt: |
-    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your reasoning process. Present your final answer within \\boxed{}.
+    Think about the reasoning process in your mind before give a final answer to the problem. Present your final answer within \\boxed{}.
   # system_prompt: |
-  #   Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your reasoning process. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
+  #   Think about the reasoning process in your mind before give a final answer to the problem. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
     
   #   Example structure:
   #   <think> detailed reasoning process here ... </think>
@@ -40,9 +40,9 @@ grpo_config:
   xml_format: false
   min_completion_length: 100
 
-  max_new_tokens: 2048
+  max_new_tokens: 2560
   temperature: 0.9
-  top_p: 1.0
+  top_p: 0.95
   top_k: 50
   group_size: 32                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
@@ -50,17 +50,17 @@ grpo_config:
   # random start exploration
   explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
-  explore_decay_steps: 500
+  explore_decay_steps: 300
   explore_start_ratio: 0.05
   explore_top_k: 100
-  explore_top_k_beta: 0.5             # Square root of probabilities
+  explore_top_k_beta: 0.4             # Square root of probabilities
 
   # evaluation
-  eval_batch_size: 40
+  eval_batch_size: 32
   eval_interval: 100
 
   # others
-  checkpoint_interval: 200            # every N iteration
+  checkpoint_interval: 100            # every N iteration
 
 deepspeed_train_config:
   # memory_breakdown: true  # for debugging
@@ -80,10 +80,10 @@ deepspeed_train_config:
   scheduler:
     type: "WarmupDecayLR"
     params:
-      warmup_num_steps: 200
-      total_num_steps: 80000
-      warmup_min_lr: 1.0e-7
-      warmup_max_lr: 1.0e-6
+      warmup_num_steps: 160
+      total_num_steps: 8000
+      warmup_min_lr: 1.0e-8
+      warmup_max_lr: 5.0e-7
   zero_optimization:
     stage: 2
     contiguous_gradients: true
@@ -100,7 +100,6 @@ deepspeed_train_config:
     number_checkpoints: null
     synchronize_checkpoint_boundary: false
 
-  
 deepspeed_eval_config:          # for reference model
   # memory_breakdown: true      # for debugging
   steps_per_print: 1000000      # disable default logging
@@ -108,8 +107,8 @@ deepspeed_eval_config:          # for reference model
   train_batch_size: 128               # not used
   bf16:
     enabled: true
-  zero_optimization:
-    stage: 0
-    offload_param:
-      device: cpu
-      pin_memory: true
+  # zero_optimization:
+  #   stage: 0
+  #   offload_param:
+  #     device: cpu
+  #     pin_memory: true

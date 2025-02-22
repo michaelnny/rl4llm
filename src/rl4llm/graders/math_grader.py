@@ -1,7 +1,10 @@
 import logging
 import math
 import re
+from itertools import permutations
 from typing import List, Optional, Tuple, Union
+
+from sympy import expand, simplify, sympify
 
 logger = logging.getLogger(__name__)
 
@@ -429,6 +432,132 @@ def try_compare_fractions_equal(input_str1: str, input_str2: str) -> bool:
     return False
 
 
+def normalize_expression(expr: str) -> str:
+    """
+    Normalize a mathematical expression by removing spaces and standardizing formatting.
+    """
+    # Remove all whitespace
+    expr = re.sub(r'\s+', '', expr)
+
+    # Remove unnecessary parentheses around single terms
+    expr = re.sub(r'\(([^()+-/*]+)\)', r'\1', expr)
+
+    return expr
+
+
+def split_comma_separated_values(expr: str) -> List[str]:
+    """
+    Split comma-separated values and normalize each value.
+    """
+    parts = [part.strip() for part in expr.split(',')]
+    return [normalize_expression(part) for part in parts if part.strip()]
+
+
+def split_multiplicative_terms(expr: str) -> List[str]:
+    """
+    Split an expression into its multiplicative terms.
+    """
+    # Remove outer parentheses if they enclose the entire expression
+    expr = expr.strip()
+    if expr.startswith('(') and expr.endswith(')'):
+        count = 0
+        all_enclosed = True
+        for char in expr[1:-1]:
+            if char == '(':
+                count += 1
+            elif char == ')':
+                count -= 1
+            if count < 0:
+                all_enclosed = False
+                break
+        if all_enclosed and count == 0:
+            expr = expr[1:-1]
+
+    terms = []
+    current_term = ''
+    paren_count = 0
+
+    for char in expr:
+        if char == '(':
+            paren_count += 1
+            current_term += char
+        elif char == ')':
+            paren_count -= 1
+            current_term += char
+        elif char in ['*', '·'] and paren_count == 0:
+            if current_term:
+                terms.append(current_term)
+            current_term = ''
+        else:
+            current_term += char
+
+    if current_term:
+        terms.append(current_term)
+
+    # Handle implicit multiplication (adjacent parentheses)
+    final_terms = []
+    for term in terms:
+        parts = re.findall(r'\([^()]+\)', term)
+        if len(parts) > 1:
+            final_terms.extend(parts)
+        else:
+            final_terms.append(term)
+
+    return [normalize_expression(term) for term in final_terms]
+
+
+def are_expressions_equal(expr1: str, expr2: str) -> bool:
+    """
+    Check if two mathematical expressions are equal, considering different forms.
+    """
+    # First check if they're identical after normalization
+    if normalize_expression(expr1) == normalize_expression(expr2):
+        return True
+
+    # Handle comma-separated values
+    if ',' in expr1 and ',' in expr2:
+        values1 = split_comma_separated_values(expr1)
+        values2 = split_comma_separated_values(expr2)
+
+        if len(values1) != len(values2):
+            return False
+
+        # Try all possible permutations
+        for perm in permutations(values1):
+            if list(perm) == values2:
+                return True
+        return False
+
+    # Handle multiplicative expressions
+    terms1 = split_multiplicative_terms(expr1)
+    terms2 = split_multiplicative_terms(expr2)
+
+    if len(terms1) != len(terms2):
+        return False
+
+    # Try to match terms in any order
+    try:
+        # Convert terms to SymPy expressions for symbolic comparison
+        sympy_terms1 = [sympify(term) for term in terms1]
+        sympy_terms2 = [sympify(term) for term in terms2]
+
+        # Expand each term
+        expanded_terms1 = [expand(term) for term in sympy_terms1]
+        expanded_terms2 = [expand(term) for term in sympy_terms2]
+
+        # Try all possible permutations
+        for perm in permutations(expanded_terms1):
+            if all(simplify(a - b) == 0 for a, b in zip(perm, expanded_terms2)):
+                return True
+    except Exception:
+        # Fall back to string comparison if symbolic manipulation fails
+        for perm in permutations(terms1):
+            if list(perm) == terms2:
+                return True
+
+    return False
+
+
 def check_expressions_equivalent(expression1: Optional[str], expression2: Optional[str], verbose: bool = False) -> bool:
     """
     Checks if two mathematical expressions are equivalent after applying a series of normalization steps.
@@ -457,9 +586,20 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
     except Exception:
         pass
 
+    # Handle special cases of different order of expressions, like:
+    # '-5, 1, 4' vs '1, -5, 4'
+    # '(-9x^2+x+2)(9x^2+x+2)' vs '(9x^2 + x + 2)(-9x^2 + x + 2)'
+    # '(x^4+16)(x^2+4)(x+2)(x-2)' vs '(x - 2)(x + 2)(x^2 + 4)(x^4 + 16)'
     try:
-        # Try to evaluate the expressions as mathematical expressions
-        # example: '-\frac{1}{4}' vs '-0.25'
+        is_expre_equal = are_expressions_equal(expression1, expression2)
+        if is_expre_equal:
+            return True
+    except Exception:
+        pass
+
+    # Handle special case where one frac is in latex, and other is in float
+    # example: '-\frac{1}{4}' vs '-0.25'
+    try:
         is_frac_equal = try_compare_fractions_equal(expression1, expression2)
         if is_frac_equal:
             return True
