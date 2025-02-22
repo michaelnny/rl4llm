@@ -775,7 +775,7 @@ class BaseGRPOTrainer(ABC):
         # per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
 
         # Clamp log differences for stability
-        per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
+        per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-10, max=10)
         per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
         # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
 
@@ -887,7 +887,7 @@ class BaseGRPOTrainer(ABC):
             completion_texts (List[str]): Generated completions.
         """
 
-        metric_prefix = 'objective' if is_training else 'evaluation'
+        metric_prefix = 'objective/training' if is_training else 'objective/evaluation'
         metrics_batch = {
             f'{metric_prefix}/accuracy_reward': reward_output['accuracy_rewards'].tolist(),
             f'{metric_prefix}/format_reward': reward_output['format_rewards'].tolist(),
@@ -901,7 +901,7 @@ class BaseGRPOTrainer(ABC):
 
         # Log samples to external file and optionally to tensorboard
         tb_log_indices = random.sample(range(len(completion_texts)), k=1)
-        tb_tag = 'training' if is_training else 'evaluation'
+        tb_tag = 'sample/training' if is_training else 'sample/evaluation'
 
         ext_file_handler = self._train_sample_handler if is_training else self._eval_sample_handler
         for idx in range(len(completion_texts)):

@@ -1,25 +1,23 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_ds_enhanced_grpo_qwen2.5_0.5b_gsm8k"
+  artifacts_path: "./runs/enhanced_grpo_qwen2.5_7b_math"
   datasets: # List of math datasets to load
-    - "gsm"
-    # - "math"
+    # - "gsm"
+    - "math"
   # max_train_samples: 1600         # for a quick run
-  max_test_samples: 128       
+  # max_test_samples: 256       
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-7B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
 
 grpo_config:
   max_steps: 1000
-  rollout_size: 128
+  rollout_size: 1024
   num_updates: 1
-  batch_size: 8
-  gradient_accumulate_steps: 16
   # dynamic_discount: false           # compute dynamic discount based on completion length
   # min_gamma: 0.999                  # for compute dynamic discount
   # max_gamma: 0.9998                 # for compute dynamic discount
@@ -28,7 +26,7 @@ grpo_config:
   normalize_group_rewards: true       # no need to normalize for binary rewards
   normalize_advantages: true
   kl_loss_coef: 0.01
-  sync_reference_interval: 500        # every N iteration
+  sync_reference_interval: 400        # every N iteration
 
   # for sample generation
   system_prompt: |
@@ -42,8 +40,10 @@ grpo_config:
   xml_format: false
   min_completion_length: 100
 
-  max_new_tokens: 1024
+  max_new_tokens: 2048
   temperature: 0.9
+  top_p: 1.0
+  top_k: 50
   group_size: 32                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   group_temperature: true
@@ -56,8 +56,8 @@ grpo_config:
   explore_top_k_beta: 0.5             # Square root of probabilities
 
   # evaluation
-  eval_batch_size: 32
-  eval_interval: 2
+  eval_batch_size: 40
+  eval_interval: 100
 
   # others
   checkpoint_interval: 200            # every N iteration
@@ -92,7 +92,7 @@ deepspeed_train_config:
     reduce_scatter: true
     offload_optimizer:
       device: cpu
-      pin_memory: true
+      pin_memory: false
   activation_checkpointing:
     partition_activations: true
     cpu_checkpointing: true

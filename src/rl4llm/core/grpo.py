@@ -65,9 +65,9 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.test_loader = DataLoader(
             self.test_ds,
             batch_size=self.config.eval_batch_size,
-            pin_memory=True,
+            pin_memory=False,
             shuffle=False,
-            drop_last=True,
+            drop_last=False,
         )
 
     def run_one_iteration(self) -> None:

@@ -97,15 +97,14 @@ def main():
 
     dist.barrier()
     policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
+    ref_model, _ = create_model_and_tokenizer(config['model'], torch_dtype)
 
-    ref_model = deepcopy(policy_model)
     for p in ref_model.parameters():
         p.requires_grad = False
     ref_model = ref_model.eval()
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
-        optimizer=None,
         model_parameters=get_trainable_param_groups(
             policy_model, train_ds_config['optimizer']['params']['lr'], train_ds_config['optimizer']['params']['weight_decay']
         ),
@@ -121,7 +120,7 @@ def main():
         config_params=eval_ds_config,
     )
 
-    grpo_config = GRPOConfig(**config['grpo_config'])
+    grpo_config = GRPOConfig(**config['grpo_config'], batch_size=train_ds_config['train_micro_batch_size_per_gpu'])
 
     trainer = GRPOTrainer(
         config=grpo_config,
