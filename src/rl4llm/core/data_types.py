@@ -19,7 +19,11 @@ class GRPOConfig(BaseModel):
     min_completion_length: Optional[int] = Field(
         100, ge=10, le=1000, description='Minimum completion token length for compute reward'
     )
+
     xml_format: Optional[bool] = Field(False, description='Check R1 style XML format for compute reward')
+    max_prompt_length: Optional[int] = Field(
+        1024, ge=512, le=10240, description='Skip sample with prompt length greater than this to avoid peak memory spikes'
+    )
 
     # enhancements to encourage exploration
     group_temperature: Optional[bool] = Field(False, description='Use group temperatures to sample tokens during generation')

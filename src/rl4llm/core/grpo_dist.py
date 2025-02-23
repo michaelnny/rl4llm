@@ -132,8 +132,10 @@ class GRPOTrainer(BaseGRPOTrainer):
             assert not self.reference_model.training
             collected_samples: List[GRPOSample] = []
 
+            local_rollout_size = self.config.rollout_size // self.world_size
+
             with self._metrics.timer('generation'):
-                while len(collected_samples) < self.config.rollout_size // self.world_size:
+                while len(collected_samples) < local_rollout_size:
                     sample = self._get_next_data_item()
                     samples = self.generate_group_samples(
                         sample,
@@ -141,7 +143,11 @@ class GRPOTrainer(BaseGRPOTrainer):
                         reference_model=self.reference_model,
                         generator=self.llm_generator,
                     )
-                    collected_samples.extend(samples)
+                    if samples:
+                        collected_samples.extend(samples)
+
+                if len(collected_samples) > local_rollout_size:
+                    collected_samples = collected_samples[:local_rollout_size]
 
             self._metrics.add_metric('elapsed/generation_episodes', self.train_episode_count * self.world_size)
             self._metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)

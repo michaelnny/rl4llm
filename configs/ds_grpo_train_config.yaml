@@ -26,7 +26,7 @@ grpo_config:
   normalize_group_rewards: true       # no need to normalize for binary rewards
   normalize_advantages: true
   kl_loss_coef: 0.01
-  sync_reference_interval: 300        # every N iteration
+  sync_reference_interval: 200        # every N iteration
 
   # for sample generation
   system_prompt: |
@@ -39,12 +39,13 @@ grpo_config:
   #   <answer> summary answer here ... Thus, the final answer is \\boxed{} </answer>
   xml_format: false
   min_completion_length: 100
+  max_prompt_length: 1000              # Avoid too long sample question
 
-  max_new_tokens: 2560
+  max_new_tokens: 3000
   temperature: 0.9
   top_p: 0.95
   top_k: 50
-  group_size: 32                      # for each sample we generate a group of answers
+  group_size: 16                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   group_temperature: true
   # random start exploration
@@ -57,10 +58,10 @@ grpo_config:
 
   # evaluation
   eval_batch_size: 32
-  eval_interval: 100
+  eval_interval: 50
 
   # others
-  checkpoint_interval: 100            # every N iteration
+  checkpoint_interval: 50            # every N iteration
 
 deepspeed_train_config:
   # memory_breakdown: true  # for debugging
@@ -73,23 +74,26 @@ deepspeed_train_config:
   optimizer:
     type: Adam
     params:
-      lr: 1.0e-6                            
+      lr: 5.0e-7                            
       betas: [0.9, 0.95]
       eps: 1.0e-8
       weight_decay: 0.002
-  scheduler:
-    type: "WarmupDecayLR"
-    params:
-      warmup_num_steps: 160
-      total_num_steps: 8000
-      warmup_min_lr: 1.0e-8
-      warmup_max_lr: 5.0e-7
+  # scheduler:
+  #   type: "WarmupDecayLR"
+  #   params:
+  #     warmup_num_steps: 160
+  #     total_num_steps: 40000
+  #     warmup_min_lr: 1.0e-8
+  #     warmup_max_lr: 5.0e-7
   zero_optimization:
     stage: 2
     contiguous_gradients: true
     overlap_comm: true
     allgather_partitions: true
     reduce_scatter: true
+    # offload_param:
+    #   device: cpu
+    #   pin_memory: false
     offload_optimizer:
       device: cpu
       pin_memory: false

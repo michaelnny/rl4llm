@@ -122,7 +122,11 @@ class GRPOTrainer(BaseGRPOTrainer):
                         reference_model=self.reference_model,
                         generator=self.llm_generator,
                     )
-                    collected_samples.extend(samples)
+                    if samples:
+                        collected_samples.extend(samples)
+
+                if len(collected_samples) > self.config.rollout_size:
+                    collected_samples = collected_samples[: self.config.rollout_size]
 
             self._metrics.add_metric('elapsed/generation_episodes', self.train_episode_count)
             self._metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)

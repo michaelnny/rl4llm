@@ -43,6 +43,7 @@ grpo_config:
   # for format and structure reward calculation
   xml_format: false
   min_completion_length: 80
+  max_prompt_length: 1024              # Avoid too long sample question
 
   max_new_tokens: 1024
   temperature: 0.9
@@ -61,10 +62,10 @@ grpo_config:
 
   # evaluation
   eval_batch_size: 32
-  eval_interval: 100
+  eval_interval: 50
 
   # others
-  checkpoint_interval: 200            # every N iteration
+  checkpoint_interval: 50            # every N iteration
 
 optimizer:
   type: AdamW8bit
