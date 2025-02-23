@@ -875,9 +875,9 @@ class BaseGRPOTrainer(ABC):
         for metric_name, values in metrics_batch.items():
             self._metrics.add_metrics_batch(metric_name, values)
 
-        # Log samples to external file and optionally to tensorboard
-        tb_log_indices = random.sample(range(len(completion_texts)), k=1)
-        tb_tag = 'sample/training' if is_training else 'sample/evaluation'
+        # # Log samples to external file and optionally to tensorboard
+        # tb_log_indices = random.sample(range(len(completion_texts)), k=1)
+        # tb_tag = 'sample/training' if is_training else 'sample/evaluation'
 
         ext_file_handler = self._train_sample_handler if is_training else self._eval_sample_handler
         for idx in range(len(completion_texts)):
@@ -900,17 +900,17 @@ class BaseGRPOTrainer(ABC):
                 self.eval_episode_count += 1
                 ext_file_handler.log_entry(sample.model_dump())
 
-            # Log subset of samples to TensorBoard
-            if idx in tb_log_indices:
-                try:
-                    formatted_text = self._format_sample_text(sample)
-                    self._log_sample_to_tensorboard(
-                        tb_tag,
-                        formatted_text,
-                        self.train_episode_count if is_training else self.eval_episode_count,
-                    )
-                except Exception as e:
-                    self.logger.error(f"Failed to log sample to TensorBoard: {e}")
+            # # Log subset of samples to TensorBoard, disabled for performance reasons
+            # if idx in tb_log_indices:
+            #     try:
+            #         formatted_text = self._format_sample_text(sample)
+            #         self._log_sample_to_tensorboard(
+            #             tb_tag,
+            #             formatted_text,
+            #             self.train_episode_count if is_training else self.eval_episode_count,
+            #         )
+            #     except Exception as e:
+            #         self.logger.error(f"Failed to log sample to TensorBoard: {e}")
 
         ext_file_handler.flush()
 

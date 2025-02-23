@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/discounted_enhanced_grpo_qwen2.5_1.5b_gsm8k"
+  artifacts_path: "./runs/test_performance_enhanced_grpo_qwen2.5_1.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -16,13 +16,13 @@ model:
 
 grpo_config:
   max_steps: 1000
-  rollout_size: 1024
+  rollout_size: 512
   num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
-  dynamic_discount: true           # compute dynamic discount based on completion length
-  min_gamma: 0.999                  # for compute dynamic discount
-  max_gamma: 0.9998                 # for compute dynamic discount
+  # dynamic_discount: true           # compute dynamic discount based on completion length
+  # min_gamma: 0.999                  # for compute dynamic discount
+  # max_gamma: 0.9998                 # for compute dynamic discount
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       

@@ -1,7 +1,9 @@
 """Script to run RL GRPO fine-tuning on a single GPU."""
 
 import argparse
+import cProfile
 import os
+import pstats
 import sys
 from traceback import format_exc
 
@@ -96,20 +98,34 @@ def main():
         logger=logger,
     )
 
+    # Create a profiler instance
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    def handle_exit():
+        trainer.on_exit()
+
+        if profiler is not None:
+            profiler.disable()
+            # Save profiling stats
+            stats = pstats.Stats(profiler)
+            stats.sort_stats('cumulative').dump_stats('profile_stats.prof')
+            stats.print_stats()  # Print to console for immediate feedback
+
     try:
         trainer.train(log_hyper_params=config)
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
-        trainer.on_exit()
+        handle_exit()
         sys.exit(0)
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
         logger.error(format_exc())
-        trainer.on_exit()
+        handle_exit()
         sys.exit(1)
     finally:
-        trainer.on_exit()
         logger.info('Exiting main program.')
+        handle_exit()
 
 
 if __name__ == '__main__':

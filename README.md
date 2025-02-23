@@ -71,9 +71,9 @@ Run on remote server
 # Login to remote server
 ssh ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz -p 31883
 
-# Install MPICH for deepspeed
+# Install MPICH for deepspeed and remote file transfers
 sudo apt update
-sudo apt install -y python3-pip rsync libmpich-dev
+sudo apt install -y python3-pip libmpich-dev rsync zstd parallel
 
 pip3 install torch torchvision torchaudio
 
@@ -124,6 +124,24 @@ rsync -avz -e "ssh -p 31883"  --exclude='checkpoints' ubuntu@worrisome-cherry-ti
 
 ```
 
+
+```bash
+# compress checkpoint files before transfer
+tar -I 'zstd --ultra -22 -T0' -cvf model_checkpoint_iteration_50.tar.zst iteration_50/
+
+split -b 1G model_checkpoint_iteration_50.tar.zst model_checkpoint_iteration_50.tar.zst.part-
+
+
+
+# copy from remote server to local machine using parallel transfers
+ssh -p 31883 ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz "ls /home/ubuntu/rl4llm/runs/enhanced_grpo_qwen2.5_7b_math/checkpoints/model_checkpoint_iteration_50.tar.zst.part-*" | \
+parallel -j8 "scp -P 31883 ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:{} ./"
+
+
+# to decompress after transfer
+cat model_checkpoint_iteration_50.tar.zst.part-* > model_checkpoint_iteration_50.tar.zst
+tar -I zstd -xvf model_checkpoint_iteration_50.tar.zst
+```
 
 
 
