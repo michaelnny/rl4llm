@@ -1,25 +1,23 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_ds_enhanced_grpo_qwen2.5_0.5b_gsm8k"
+  artifacts_path: "./runs/enhanced_grpo_qwen2.5_7b_math"
   datasets: # List of math datasets to load
-    - "gsm"
-    # - "math"
+    # - "gsm"
+    - "math"
   # max_train_samples: 1600         # for a quick run
-  max_test_samples: 128       
+  # max_test_samples: 256       
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-7B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
 
 grpo_config:
   max_steps: 1000
-  rollout_size: 128
+  rollout_size: 1024
   num_updates: 1
-  batch_size: 8
-  gradient_accumulate_steps: 16
   # dynamic_discount: false           # compute dynamic discount based on completion length
   # min_gamma: 0.999                  # for compute dynamic discount
   # max_gamma: 0.9998                 # for compute dynamic discount
@@ -28,39 +26,42 @@ grpo_config:
   normalize_group_rewards: true       # no need to normalize for binary rewards
   normalize_advantages: true
   kl_loss_coef: 0.01
-  sync_reference_interval: 500        # every N iteration
+  sync_reference_interval: 200        # every N iteration
 
   # for sample generation
   system_prompt: |
-    Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your reasoning process. Present your final answer within \\boxed{}.
+    Think about the reasoning process in your mind before give a final answer to the problem. Present your final answer within \\boxed{}.
   # system_prompt: |
-  #   Think about the reasoning process in your mind before give a final answer to the problem. Explore those "hmm", "aha" moments to reflect on your reasoning process. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
+  #   Think about the reasoning process in your mind before give a final answer to the problem. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
     
   #   Example structure:
   #   <think> detailed reasoning process here ... </think>
   #   <answer> summary answer here ... Thus, the final answer is \\boxed{} </answer>
   xml_format: false
   min_completion_length: 100
+  max_prompt_length: 1000              # Avoid too long sample question
 
-  max_new_tokens: 1024
+  max_new_tokens: 3000
   temperature: 0.9
-  group_size: 32                      # for each sample we generate a group of answers
+  top_p: 0.95
+  top_k: 50
+  group_size: 16                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   group_temperature: true
   # random start exploration
   explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
-  explore_decay_steps: 500
+  explore_decay_steps: 300
   explore_start_ratio: 0.05
   explore_top_k: 100
-  explore_top_k_beta: 0.5             # Square root of probabilities
+  explore_top_k_beta: 0.4             # Square root of probabilities
 
   # evaluation
   eval_batch_size: 32
-  eval_interval: 2
+  eval_interval: 50
 
   # others
-  checkpoint_interval: 200            # every N iteration
+  checkpoint_interval: 50            # every N iteration
 
 deepspeed_train_config:
   # memory_breakdown: true  # for debugging
@@ -73,26 +74,29 @@ deepspeed_train_config:
   optimizer:
     type: Adam
     params:
-      lr: 1.0e-6                            
+      lr: 5.0e-7                            
       betas: [0.9, 0.95]
       eps: 1.0e-8
       weight_decay: 0.002
-  scheduler:
-    type: "WarmupDecayLR"
-    params:
-      warmup_num_steps: 200
-      total_num_steps: 80000
-      warmup_min_lr: 1.0e-7
-      warmup_max_lr: 1.0e-6
+  # scheduler:
+  #   type: "WarmupDecayLR"
+  #   params:
+  #     warmup_num_steps: 160
+  #     total_num_steps: 40000
+  #     warmup_min_lr: 1.0e-8
+  #     warmup_max_lr: 5.0e-7
   zero_optimization:
     stage: 2
     contiguous_gradients: true
     overlap_comm: true
     allgather_partitions: true
     reduce_scatter: true
+    # offload_param:
+    #   device: cpu
+    #   pin_memory: false
     offload_optimizer:
       device: cpu
-      pin_memory: true
+      pin_memory: false
   activation_checkpointing:
     partition_activations: true
     cpu_checkpointing: true
@@ -100,7 +104,6 @@ deepspeed_train_config:
     number_checkpoints: null
     synchronize_checkpoint_boundary: false
 
-  
 deepspeed_eval_config:          # for reference model
   # memory_breakdown: true      # for debugging
   steps_per_print: 1000000      # disable default logging
@@ -108,8 +111,8 @@ deepspeed_eval_config:          # for reference model
   train_batch_size: 128               # not used
   bf16:
     enabled: true
-  zero_optimization:
-    stage: 0
-    offload_param:
-      device: cpu
-      pin_memory: true
+  # zero_optimization:
+  #   stage: 0
+  #   offload_param:
+  #     device: cpu
+  #     pin_memory: true

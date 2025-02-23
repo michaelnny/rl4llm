@@ -50,7 +50,8 @@ class GRPOTrainer(BaseGRPOTrainer):
         )
 
         self.policy_model = policy_model
-        self.reference_model = self._create_reference_model(policy_model)
+
+        self.reference_model = self._create_reference_model(policy_model) if self.config.kl_loss_coef > 0 else None
 
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -65,9 +66,9 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.test_loader = DataLoader(
             self.test_ds,
             batch_size=self.config.eval_batch_size,
-            pin_memory=True,
+            pin_memory=False,
             shuffle=False,
-            drop_last=True,
+            drop_last=False,
         )
 
     def run_one_iteration(self) -> None:
@@ -110,7 +111,6 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         with self._generation_context(is_training=True):
             assert not self.policy_model.training
-            assert not self.reference_model.training
             collected_samples: List[GRPOSample] = []
 
             with self._metrics.timer('generation'):
@@ -122,7 +122,11 @@ class GRPOTrainer(BaseGRPOTrainer):
                         reference_model=self.reference_model,
                         generator=self.llm_generator,
                     )
-                    collected_samples.extend(samples)
+                    if samples:
+                        collected_samples.extend(samples)
+
+                if len(collected_samples) > self.config.rollout_size:
+                    collected_samples = collected_samples[: self.config.rollout_size]
 
             self._metrics.add_metric('elapsed/generation_episodes', self.train_episode_count)
             self._metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
@@ -206,10 +210,9 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.policy_model = self.policy_model.eval()
         self.policy_model = self.policy_model.to(self.device)
 
-        if is_training:
-            self.reference_model = self.reference_model.to(self.device)
-        else:
-            self.reference_model = self.reference_model.cpu()
+        if self.reference_model is not None:
+            to_device = self.device if is_training else torch.device('cpu')
+            self.reference_model = self.reference_model.to(to_device)
 
         # Clear gradients to free memory
         self.policy_model.zero_grad(set_to_none=True)
@@ -222,8 +225,9 @@ class GRPOTrainer(BaseGRPOTrainer):
         if not self.generation_mode:
             return
 
-        # Move reference model to CPU since it's not needed during training
-        self.reference_model = self.reference_model.cpu()
+        if self.reference_model is not None:
+            # Move reference model to CPU since it's not needed during training
+            self.reference_model = self.reference_model.cpu()
 
         # Ensure policy model is on GPU for training
         self.policy_model = self.policy_model.to(self.device)
@@ -297,6 +301,8 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""
+        if self.reference_model is None:
+            return
         self.reference_model.load_state_dict(self.policy_model.state_dict())
         for param in self.reference_model.parameters():
             param.requires_grad = False

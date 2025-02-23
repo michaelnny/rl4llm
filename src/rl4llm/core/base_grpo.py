@@ -5,7 +5,6 @@ import os
 import random
 from abc import ABC
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -112,9 +111,6 @@ class BaseGRPOTrainer(ABC):
         self._eval_sample_handler = FileHandler(eval_sample_file, 'jsonl', True)
         self._train_stats_handler = FileHandler(train_stats, 'csv', False)
 
-        # Executor setup
-        self._pool_executor = None  # Will be used later for post-processing
-
     def _setup_directories(self):
         """Helper method to create necessary directories"""
         self._tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
@@ -125,12 +121,6 @@ class BaseGRPOTrainer(ABC):
             os.makedirs(path, exist_ok=True)
 
     def on_exit(self):
-        if self._pool_executor is not None:
-            try:
-                self._pool_executor.shutdown(wait=True)
-            except Exception as e:
-                self.logger.warning(f"Failed to shutdown pool executor: {e}")
-
         self._train_sample_handler.close()
         self._eval_sample_handler.close()
         self._train_stats_handler.close()
@@ -228,6 +218,10 @@ class BaseGRPOTrainer(ABC):
         sample_message = self._prepare_single_message(question, self.config.system_prompt)
         batch_messages = [sample_message] * self.config.group_size
         inputs = self._tokenize_messages(batch_messages, for_eval=False)
+
+        if self.config.max_prompt_length >= 512 and inputs.input_ids.size(1) > self.config.max_prompt_length:
+            self.logger.warning(f"Skip sample with prompt size grater than {self.config.max_prompt_length}")
+            return []
 
         use_custom_generator = (
             generator is not None
@@ -523,7 +517,12 @@ class BaseGRPOTrainer(ABC):
         states = full_sequences[:, :-1]
         actions = full_sequences[:, 1:]
         pi_logprobs = self._compute_action_logprobs(policy_model, states, actions).cpu()
-        ref_logprobs = self._compute_action_logprobs(reference_model, states, actions).cpu()
+        torch.cuda.empty_cache()
+        if self.config.kl_loss_coef > 0 and reference_model:
+            ref_logprobs = self._compute_action_logprobs(reference_model, states, actions).cpu()
+            torch.cuda.empty_cache()
+        else:
+            ref_logprobs = torch.full_like(pi_logprobs, 1e-6).cpu()  # use a place holder to make sure code is compatible
 
         # TODO can we improve this code of post-processing sample creation??
 
@@ -660,29 +659,6 @@ class BaseGRPOTrainer(ABC):
             'total_rewards': total_rewards,
         }
 
-        # # Use ProcessPoolExecutor for CPU-bound reward computation
-        # executor = self._get_pool_executor()
-
-        # results = []
-        # for idx in range(len(completion_texts)):
-        #     result = executor.submit(
-        #         self._compute_reward_single_sample,
-        #         completion_texts[idx],
-        #         ground_truths[idx],
-        #         completion_tokens_count[idx],
-        #         self.config.min_completion_length,
-        #         self.config.xml_format,
-        #     )
-        #     results.append(result)
-
-        # # Collecting results from all futures
-        # accuracy_rewards = []
-        # format_rewards = []
-        # for future in results:
-        # reward_dict = future.result()
-        # accuracy_rewards.append(reward_dict['accuracy_reward'])
-        # format_rewards.append(reward_dict['format_reward'])
-
     @staticmethod
     def _compute_reward_single_sample(
         completion: str,
@@ -700,18 +676,6 @@ class BaseGRPOTrainer(ABC):
             xml_format=xml_format,
         )
         return {'accuracy_reward': accuracy_score, 'format_reward': format_score}
-
-    def _get_pool_executor(self) -> ProcessPoolExecutor:
-        """Initialize or return the ProcessPoolExecutor for reward computation, which is CPU heavy work.
-
-        Returns:
-            ProcessPoolExecutor: Executor for parallel reward computation.
-        """
-        if self._pool_executor is None:
-            num_workers = min(mp.cpu_count(), 16)
-            self._pool_executor = ProcessPoolExecutor(max_workers=num_workers)
-
-        return self._pool_executor
 
     def _compute_action_logprobs(
         self, model: PreTrainedModel, input_ids: torch.LongTensor, actions: torch.LongTensor
@@ -771,14 +735,6 @@ class BaseGRPOTrainer(ABC):
         ref_logprobs = batch.ref_logprobs.to(self.device)
         loss_mask = batch.loss_mask.to(self.device)
 
-        # Compute the KL divergence between the model and the reference model
-        # per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
-
-        # Clamp log differences for stability
-        per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
-        per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
-        # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
-
         if self.config.normalize_advantages:
             advantages = masked_whiten(advantages, loss_mask)
 
@@ -789,17 +745,37 @@ class BaseGRPOTrainer(ABC):
 
         # First average over the sequence length, then average over the batch
         pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
-        kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
 
-        kl_loss = self.config.kl_loss_coef * kl
-        loss = pg_loss + kl_loss
-
+        # Initialize metrics with common values
         metrics = {
-            'total_loss': loss.detach().item(),
+            'total_loss': 0.0,  # Will be updated after final loss computation
             'pg_loss': pg_loss.detach().item(),
-            'kl_loss': kl_loss.detach().item(),
-            'kl': kl.detach().item(),
         }
+
+        # Compute KL divergence if coefficient is positive
+        if self.config.kl_loss_coef > 0:
+            # Compute the KL divergence between the model and the reference model
+            # per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+
+            # Clamp log differences for stability
+            per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-10, max=10)
+            per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
+            # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
+
+            kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
+            kl_loss = self.config.kl_loss_coef * kl
+
+            loss = pg_loss + kl_loss
+            metrics.update(
+                {
+                    'total_loss': loss.detach().item(),
+                    'kl_loss': kl_loss.detach().item(),
+                    'kl': kl.detach().item(),
+                }
+            )
+        else:
+            loss = pg_loss
+            metrics['total_loss'] = loss.detach().item()
 
         return loss, metrics
 
@@ -887,7 +863,7 @@ class BaseGRPOTrainer(ABC):
             completion_texts (List[str]): Generated completions.
         """
 
-        metric_prefix = 'objective' if is_training else 'evaluation'
+        metric_prefix = 'objective/training' if is_training else 'objective/evaluation'
         metrics_batch = {
             f'{metric_prefix}/accuracy_reward': reward_output['accuracy_rewards'].tolist(),
             f'{metric_prefix}/format_reward': reward_output['format_rewards'].tolist(),
@@ -901,7 +877,7 @@ class BaseGRPOTrainer(ABC):
 
         # Log samples to external file and optionally to tensorboard
         tb_log_indices = random.sample(range(len(completion_texts)), k=1)
-        tb_tag = 'training' if is_training else 'evaluation'
+        tb_tag = 'sample/training' if is_training else 'sample/evaluation'
 
         ext_file_handler = self._train_sample_handler if is_training else self._eval_sample_handler
         for idx in range(len(completion_texts)):
@@ -929,7 +905,7 @@ class BaseGRPOTrainer(ABC):
                 try:
                     formatted_text = self._format_sample_text(sample)
                     self._log_sample_to_tensorboard(
-                        f"{tb_tag}/sample",
+                        tb_tag,
                         formatted_text,
                         self.train_episode_count if is_training else self.eval_episode_count,
                     )
@@ -963,7 +939,7 @@ class BaseGRPOTrainer(ABC):
         """
         if self._writer:
             try:
-                self._writer.add_text(f'{tag}/sample', formatted_text, step)
+                self._writer.add_text(f'{tag}', formatted_text, step)
             except Exception as e:
                 self.logger.warning(f"Failed to log sample to TensorBoard: {e}")
 

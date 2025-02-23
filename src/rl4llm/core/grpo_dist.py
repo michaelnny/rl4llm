@@ -75,9 +75,9 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.test_loader = DataLoader(
             self.test_ds,
             batch_size=self.config.eval_batch_size,
-            pin_memory=True,
+            pin_memory=False,
             shuffle=False,
-            drop_last=True,
+            drop_last=False,
         )
 
     def is_zero3_enabled(self) -> bool:
@@ -132,8 +132,10 @@ class GRPOTrainer(BaseGRPOTrainer):
             assert not self.reference_model.training
             collected_samples: List[GRPOSample] = []
 
+            local_rollout_size = self.config.rollout_size // self.world_size
+
             with self._metrics.timer('generation'):
-                while len(collected_samples) < self.config.rollout_size // self.world_size:
+                while len(collected_samples) < local_rollout_size:
                     sample = self._get_next_data_item()
                     samples = self.generate_group_samples(
                         sample,
@@ -141,7 +143,11 @@ class GRPOTrainer(BaseGRPOTrainer):
                         reference_model=self.reference_model,
                         generator=self.llm_generator,
                     )
-                    collected_samples.extend(samples)
+                    if samples:
+                        collected_samples.extend(samples)
+
+                if len(collected_samples) > local_rollout_size:
+                    collected_samples = collected_samples[:local_rollout_size]
 
             self._metrics.add_metric('elapsed/generation_episodes', self.train_episode_count * self.world_size)
             self._metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
@@ -160,9 +166,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             collate_fn=self._train_collate_function,
             drop_last=True,
         )
-
         self.policy_engine.optimizer.zero_grad()
-
         assert self.policy_engine.training
 
         dist.barrier()
@@ -305,6 +309,19 @@ class GRPOTrainer(BaseGRPOTrainer):
             self.run_evaluation()
             dist.barrier()
 
+    def _sync_reference_model(self):
+        """Sync reference model by copying latest policy model weights"""
+
+        if self.is_zero3_enabled():
+            raise NotImplementedError('Zero-3 is not supported yet')
+        else:
+            self.reference_model.load_state_dict(self.policy_model.state_dict())
+            for param in self.reference_model.parameters():
+                param.requires_grad = False
+            self.reference_model = self.reference_model.eval()
+            self.ref_update_count += 1
+            torch.cuda.empty_cache()
+
     # def _create_deepspeed_inference_engine(
     #     self,
     #     model: PreTrainedModel,
@@ -330,16 +347,3 @@ class GRPOTrainer(BaseGRPOTrainer):
     #     )
 
     #     return inference_engine
-
-    def _sync_reference_model(self):
-        """Sync reference model by copying latest policy model weights"""
-
-        if self.is_zero3_enabled():
-            raise NotImplementedError('Zero-3 is not supported yet')
-        else:
-            self.reference_model.load_state_dict(self.policy_model.state_dict())
-            for param in self.reference_model.parameters():
-                param.requires_grad = False
-            self.reference_model = self.reference_model.eval()
-            self.ref_update_count += 1
-            torch.cuda.empty_cache()

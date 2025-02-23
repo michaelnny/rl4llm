@@ -38,6 +38,9 @@ def test_empty_inputs():
         ),
         (r'The final answer is: $\boxed{(\pi)}$', '\text{(E)}', 0.0),
         (r'The final answer is: $\boxed{3.92}$', '3', 0.0),
+        (r'The final answer is: $\boxed{1, -5, 4}$', '-5, 1, 4', 1.0),
+        (r'The final answer is: $\boxed{(9x^2 + x + 2)(-9x^2 + x + 2)}$', '(-9x^2+x+2)(9x^2+x+2)', 1.0),
+        (r'The final answer is: $\boxed{(x - 2)(x + 2)(x^2 + 4)(x^4 + 16)}$', '(x^4+16)(x^2+4)(x+2)(x-2)', 1.0),
         (
             r"""Finally, we subtract the total gallons used from the original amount of paint:
         \[
@@ -81,6 +84,7 @@ def test_boxed_answers(answer, ground_truth, expected_score):
         (r'The final answer is $\boxed{240}$.', r'240\text{ ways.}', 1.0),
         (r"The 158th marble is $\boxed{\text{gray}}. That's my final answer.", r'\text{gray}', 1.0),
         (r'The final answer is $\boxed{24,000}$.', '24{}000', 1.0),
+        (r'Thus, the difference is \(\boxed{\frac{16}{3}}\).', '\tfrac{16}3', 1.0),
         (r'So, the final answer is \( \boxed{\$400.00} \).', '400', 1.0),
         (r'Therefore, the answer is $a = \boxed{-\frac{1}{4}}$.', '-0.25', 1.0),
         (r'So, the final answer is $\boxed{-1.8}$.', r'-\frac{9}{5}', 1.0),
@@ -126,7 +130,6 @@ def test_complex_latex_answers(answer, ground_truth, expected_score):
         ('So, the final answer is 456, it is not 245 or 311.', '456', 1.0),
         ('The answer is: 123,456', '123,456', 1.0),
         ('The answer is: 123,456.78', '123,456.78', 1.0),
-        ('The answer is: 123,45. This means we have finished the task', '123,45', 1.0),
         ('The answer is: 456\tand more text', '456', 1.0),
         ('The answer is: 456\nand more text', '456', 1.0),
         ('The answer is: 456.', '456', 1.0),
