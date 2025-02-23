@@ -518,8 +518,11 @@ class BaseGRPOTrainer(ABC):
         actions = full_sequences[:, 1:]
         pi_logprobs = self._compute_action_logprobs(policy_model, states, actions).cpu()
         torch.cuda.empty_cache()
-        ref_logprobs = self._compute_action_logprobs(reference_model, states, actions).cpu()
-        torch.cuda.empty_cache()
+        if self.config.kl_loss_coef > 0 and reference_model:
+            ref_logprobs = self._compute_action_logprobs(reference_model, states, actions).cpu()
+            torch.cuda.empty_cache()
+        else:
+            ref_logprobs = torch.full_like(pi_logprobs, 1e-6).cpu()  # use a place holder to make sure code is compatible
 
         # TODO can we improve this code of post-processing sample creation??
 
@@ -732,14 +735,6 @@ class BaseGRPOTrainer(ABC):
         ref_logprobs = batch.ref_logprobs.to(self.device)
         loss_mask = batch.loss_mask.to(self.device)
 
-        # Compute the KL divergence between the model and the reference model
-        # per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
-
-        # Clamp log differences for stability
-        per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-10, max=10)
-        per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
-        # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
-
         if self.config.normalize_advantages:
             advantages = masked_whiten(advantages, loss_mask)
 
@@ -750,17 +745,37 @@ class BaseGRPOTrainer(ABC):
 
         # First average over the sequence length, then average over the batch
         pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
-        kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
 
-        kl_loss = self.config.kl_loss_coef * kl
-        loss = pg_loss + kl_loss
-
+        # Initialize metrics with common values
         metrics = {
-            'total_loss': loss.detach().item(),
+            'total_loss': 0.0,  # Will be updated after final loss computation
             'pg_loss': pg_loss.detach().item(),
-            'kl_loss': kl_loss.detach().item(),
-            'kl': kl.detach().item(),
         }
+
+        # Compute KL divergence if coefficient is positive
+        if self.config.kl_loss_coef > 0:
+            # Compute the KL divergence between the model and the reference model
+            # per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+
+            # Clamp log differences for stability
+            per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-10, max=10)
+            per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
+            # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
+
+            kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
+            kl_loss = self.config.kl_loss_coef * kl
+
+            loss = pg_loss + kl_loss
+            metrics.update(
+                {
+                    'total_loss': loss.detach().item(),
+                    'kl_loss': kl_loss.detach().item(),
+                    'kl': kl.detach().item(),
+                }
+            )
+        else:
+            loss = pg_loss
+            metrics['total_loss'] = loss.detach().item()
 
         return loss, metrics
 

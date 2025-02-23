@@ -1,12 +1,12 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/enhanced_grpo_qwen2.5_1.5b_gsm8k"
+  artifacts_path: "./runs/discounted_enhanced_grpo_qwen2.5_1.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
   # max_train_samples: 2000         # for a quick run
-  max_test_samples: 2048        
+  # max_test_samples: 512        
 
 model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -29,7 +29,7 @@ grpo_config:
   normalize_advantages: true
   kl_loss_coef: 0.01
   clip_grad_norm: 1.0
-  sync_reference_interval: 400        # every N iteration
+  sync_reference_interval: 300        # every N iteration
 
   # for sample generation
   system_prompt: |
@@ -43,7 +43,7 @@ grpo_config:
   # for format and structure reward calculation
   xml_format: false
   min_completion_length: 80
-  max_prompt_length: 1024              # Avoid too long sample question
+  max_prompt_length: 512              # Avoid too long sample question
 
   max_new_tokens: 1024
   temperature: 0.9
@@ -55,7 +55,7 @@ grpo_config:
   # random start exploration
   explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
-  explore_decay_steps: 500
+  explore_decay_steps: 300
   explore_start_ratio: 0.05
   explore_top_k: 100
   explore_top_k_beta: 0.4             # Square root of top-k probabilities during exploring start

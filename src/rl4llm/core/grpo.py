@@ -50,7 +50,8 @@ class GRPOTrainer(BaseGRPOTrainer):
         )
 
         self.policy_model = policy_model
-        self.reference_model = self._create_reference_model(policy_model)
+
+        self.reference_model = self._create_reference_model(policy_model) if self.config.kl_loss_coef > 0 else None
 
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -110,7 +111,6 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         with self._generation_context(is_training=True):
             assert not self.policy_model.training
-            assert not self.reference_model.training
             collected_samples: List[GRPOSample] = []
 
             with self._metrics.timer('generation'):
@@ -210,10 +210,9 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.policy_model = self.policy_model.eval()
         self.policy_model = self.policy_model.to(self.device)
 
-        if is_training:
-            self.reference_model = self.reference_model.to(self.device)
-        else:
-            self.reference_model = self.reference_model.cpu()
+        if self.reference_model is not None:
+            to_device = self.device if is_training else torch.device('cpu')
+            self.reference_model = self.reference_model.to(to_device)
 
         # Clear gradients to free memory
         self.policy_model.zero_grad(set_to_none=True)
@@ -226,8 +225,9 @@ class GRPOTrainer(BaseGRPOTrainer):
         if not self.generation_mode:
             return
 
-        # Move reference model to CPU since it's not needed during training
-        self.reference_model = self.reference_model.cpu()
+        if self.reference_model is not None:
+            # Move reference model to CPU since it's not needed during training
+            self.reference_model = self.reference_model.cpu()
 
         # Ensure policy model is on GPU for training
         self.policy_model = self.policy_model.to(self.device)
@@ -301,6 +301,8 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""
+        if self.reference_model is None:
+            return
         self.reference_model.load_state_dict(self.policy_model.state_dict())
         for param in self.reference_model.parameters():
             param.requires_grad = False

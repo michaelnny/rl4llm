@@ -117,6 +117,9 @@ Copy experiment runs logs from remove to local machine
 
 ```bash
 
+rsync -avz -e "ssh -p 31883" --exclude='checkpoints' --exclude='samples' ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu/rl4llm/runs ./rl4llm
+
+
 rsync -avz -e "ssh -p 31883"  --exclude='checkpoints' ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu/rl4llm/runs ./rl4llm
 
 ```
