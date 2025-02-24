@@ -48,7 +48,7 @@ grpo_config:
   max_new_tokens: 1024
   temperature: 0.9
   top_p: 1.0
-  top_k: 50
+  top_k: 0
   group_size: 32                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   group_temperature: true
@@ -58,7 +58,7 @@ grpo_config:
   explore_decay_steps: 300
   explore_start_ratio: 0.1
   explore_top_k: 100
-  explore_noise: 0.1             
+  explore_noise: 0.25             
 
   # evaluation
   eval_batch_size: 32

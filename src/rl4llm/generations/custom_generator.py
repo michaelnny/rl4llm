@@ -181,7 +181,7 @@ class CustomLLMGenerator:
                 scaled_logits = torch.full_like(scaled_logits, float('-inf'))
                 scaled_logits.scatter_(dim=-1, index=top_k_indices, src=top_k_values)
 
-            if top_p < 1.0:
+            if top_p > 0 and top_p < 1.0:
                 # Vectorized nucleus sampling
                 sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True, dim=-1)
                 probs = F.softmax(sorted_logits, dim=-1)
