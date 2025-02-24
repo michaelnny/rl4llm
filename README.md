@@ -79,7 +79,7 @@ pip3 install torch torchvision torchaudio
 
 
 # On local machine, copy project files to remote server
-rsync -avz -e "ssh -p 31883" --exclude='.*' --exclude='__pycache__/' --exclude='notebooks' --exclude='tests' --exclude='old_runs' --exclude='runs' ./rl4llm ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu
+rsync -av -e "ssh -p 31883" --exclude='.*' --exclude='__pycache__/' --exclude='notebooks' --exclude='tests' --exclude='old_runs' --exclude='runs' ./rl4llm ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu
 
 
 # Install packages
@@ -116,10 +116,10 @@ Copy experiment runs logs from remove to local machine
 
 ```bash
 
-rsync -avz -e "ssh -p 31883" --exclude='checkpoints' --exclude='samples' ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu/rl4llm/runs ./rl4llm
+rsync -av -e "ssh -p 31883" --exclude='checkpoints' --exclude='samples' ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu/rl4llm/runs ./
 
 
-rsync -avz -e "ssh -p 31883"  --exclude='checkpoints' ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu/rl4llm/runs ./rl4llm
+rsync -av -e "ssh -p 31883"  --exclude='checkpoints' ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu/rl4llm/runs ./
 
 ```
 

@@ -42,10 +42,10 @@ grpo_config:
   #   <answer> summary answer here ... Thus, the final answer is \\boxed{} </answer>
   # for format and structure reward calculation
   xml_format: false
-  min_completion_length: 80
-  max_prompt_length: 512              # skip sample question that's too long 
+  min_completion_length: 100
+  max_prompt_length: 1000              # skip sample question that's too long 
 
-  max_new_tokens: 1024
+  max_new_tokens: 2000
   temperature: 0.9
   top_p: 1.0
   top_k: 0
@@ -65,15 +65,15 @@ grpo_config:
   eval_interval: 50
 
   # others
-  checkpoint_interval: 50            # every N iteration
+  checkpoint_interval: 100            # every N iteration
 
 optimizer:
   type: AdamW8bit
   params:
-    lr: 1.0e-6
-    betas: [0.9, 0.95]
+    lr: 9.0e-7
+    betas: [0.9, 0.999]
     eps: 1.0e-8
-    weight_decay: 0.0002
+    weight_decay: 0.00002
 
 scheduler:
   type: "OneCycleLR"

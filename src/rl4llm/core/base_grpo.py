@@ -261,7 +261,7 @@ class BaseGRPOTrainer(ABC):
 
             explore_epsilon = self._get_exploration_epsilon()
             enable_exploration = (
-                (self.config.explore_start_ratio > 0) and (explore_epsilon > 0) and (random.random() < self.explore_epsilon)
+                (self.config.explore_start_ratio > 0) and (explore_epsilon > 0) and (random.random() < explore_epsilon)
             )
 
             # add random start exploration params
@@ -732,7 +732,6 @@ class BaseGRPOTrainer(ABC):
         ref_logprobs = batch.ref_logprobs.to(self.device)
         advantages = batch.advantages.to(self.device)
         behavior_logprobs = batch.pi_logprobs.to(self.device)
-        ref_logprobs = batch.ref_logprobs.to(self.device)
         loss_mask = batch.loss_mask.to(self.device)
 
         if self.config.normalize_advantages:
@@ -748,7 +747,6 @@ class BaseGRPOTrainer(ABC):
 
         # Initialize metrics with common values
         metrics = {
-            'total_loss': 0.0,  # Will be updated after final loss computation
             'pg_loss': pg_loss.detach().item(),
         }
 
@@ -775,7 +773,6 @@ class BaseGRPOTrainer(ABC):
             )
         else:
             loss = pg_loss
-            metrics['total_loss'] = loss.detach().item()
 
         return loss, metrics
 

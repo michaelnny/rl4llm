@@ -18,7 +18,6 @@ def check_invalid_format(text: str) -> bool:
         stripped_text.startswith(('\\\\', '\\boxed', 'The answer is', 'The correct answer is')),  # start with direct answer
         stripped_text[0].isdigit(),  # start with numerical answer, or bullet point
         has_repetitions(stripped_text),  # check for n-gram repetitions
-        # has_irregular_words(stripped_text, 25),  # check for very long words, not working so well for latex and Chinese
     ]
 
     return any(invalid_conditions)
