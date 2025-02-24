@@ -32,9 +32,7 @@ class GRPOConfig(BaseModel):
     explore_decay_steps: Optional[int] = Field(0, ge=0, le=1000000, description='Exploration epsilon decay steps')
     explore_start_ratio: Optional[float] = Field(0, ge=0, le=1.0, description='Ratio of random start steps to do exploration')
     explore_top_k: Optional[int] = Field(50, ge=10, le=200, description='Unified top-k for both exploration')
-    explore_top_k_beta: Optional[float] = Field(
-        0.5, ge=0.0, le=1.0, description='Square root of probabilities during exploration'
-    )
+    explore_noise: Optional[float] = Field(0.1, ge=0.0, le=0.3, description='Amount of noise to inject during exploration')
 
     """For RL GRPO training"""
     max_steps: int = Field(10000, ge=1, description='How long to run the training')
@@ -121,3 +119,4 @@ class SampleLog(BaseModel):
     format_reward: Optional[float] = 0.0
     total_reward: Optional[float] = 0.0
     completion_length: Optional[int] = 0
+    step: Optional[int] = 0

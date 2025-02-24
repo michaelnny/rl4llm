@@ -65,6 +65,42 @@ class CustomLLMGenerator:
 
         return input_ids, attention_mask, unfinished_sequences
 
+    def _add_dirichlet_noise(self, probs: torch.Tensor, eps: float = 0.05, alpha: float = 0.03) -> torch.Tensor:
+        """
+        Add Dirichlet noise to probability distribution.
+
+        Args:
+            probs (torch.Tensor): The original probability distribution to add noise to.
+            eps (float, optional): The epsilon value for noise scaling (default: 0.05).
+            alpha (float, optional): The alpha value for the Dirichlet distribution (default: 0.03).
+        
+        Returns:
+            torch.Tensor: The noisy probability distribution with Dirichlet noise.
+        """
+        assert eps > 0
+        assert alpha > 0
+        # Store the original dtype
+        orig_dtype = probs.dtype
+
+        # Convert probs to float (if not already) for numerical stability
+        probs = probs.float()
+
+        # Create an alpha vector for the Dirichlet distribution with the same shape as probs
+        alphas = torch.full_like(probs, fill_value=alpha)
+
+        # Instantiate a Dirichlet distribution and sample noise
+        dirichlet_dist = torch.distributions.Dirichlet(alphas)
+        noise = dirichlet_dist.sample()
+
+        # Combine the original probabilities with the noise
+        noisy_probs = (1 - eps) * probs + eps * noise
+
+        # Re-normalize to ensure the probabilities sum to 1
+        noisy_probs = noisy_probs / noisy_probs.sum()
+
+        # Convert the result back to the original dtype
+        return noisy_probs.to(orig_dtype)
+
     """it it fast but requires tuning the parameters, a lower beta will have better results during exploration"""
 
     def _sample_next_tokens(
@@ -75,7 +111,7 @@ class CustomLLMGenerator:
         top_k: int,
         do_exploration: bool = False,
         explore_top_k: int = 0,
-        explore_top_k_beta: float = 0.4,
+        explore_noise: float = 0.1,
     ) -> torch.Tensor:
         """
         Sample the next token from the logits using temperature scaling, top-k filtering,
@@ -88,7 +124,7 @@ class CustomLLMGenerator:
             top_k (int): The number of top-k candidates to consider for sampling.
             do_exploration (bool, optional): Whether to perform exploration (default: False).
             explore_top_k (int, optional): The number of top-k candidates to explore when exploration is enabled.
-            explore_top_k_beta (float, optional): A scaling factor for the exploration probabilities.
+            explore_noise (float, optional): Noise factor for exploration probabilities (default: 0.1).
 
         Returns:
             torch.Tensor: The sampled token IDs for the next step in the sequence.
@@ -103,20 +139,34 @@ class CustomLLMGenerator:
         if zero_temp_mask.all():
             return token_logits.argmax(dim=-1)
 
-        if do_exploration and explore_top_k > 1:
-            # Exploration mode: Top-k sampling with beta-adjusted probabilities
+        if do_exploration and explore_top_k > 1 and explore_noise > 0:
+            # # Exploration mode: Top-k sampling with beta-adjusted probabilities
+            # top_k = min(explore_top_k, vocab_size)
+            # top_k_values, top_k_indices = torch.topk(token_logits, k=top_k, dim=-1)
+
+            # # Compute softmax probabilities over top-k
+            # logit_probs = F.softmax(top_k_values, dim=-1)
+
+            # # Apply beta scaling for exploration
+            # scaled_probs = logit_probs.pow(explore_noise)
+            # scaled_probs = scaled_probs / scaled_probs.sum(dim=-1, keepdim=True)
+
+            # Exploration mode: Top-k sampling with inverse probability transformation
             top_k = min(explore_top_k, vocab_size)
             top_k_values, top_k_indices = torch.topk(token_logits, k=top_k, dim=-1)
 
             # Compute softmax probabilities over top-k
-            logit_probs = F.softmax(top_k_values, dim=-1)
+            probs = F.softmax(top_k_values, dim=-1)
 
-            # Apply beta scaling for exploration
-            scaled_probs = logit_probs.pow(explore_top_k_beta)
-            scaled_probs = scaled_probs / scaled_probs.sum(dim=-1, keepdim=True)
+            # # Inverse probability transformation
+            # epsilon = 1e-6  # Small constant to avoid division by zero
+            # inverted_probs = 1 / (probs + epsilon)
+            # inverted_probs = inverted_probs / inverted_probs.sum(dim=-1, keepdim=True)
+
+            noised_probs = self._add_dirichlet_noise(probs, explore_noise)
 
             # Sample from the top-k distribution
-            sampled_indices = torch.multinomial(scaled_probs, num_samples=1)
+            sampled_indices = torch.multinomial(noised_probs, num_samples=1)
             next_tokens = torch.gather(top_k_indices, dim=-1, index=sampled_indices).squeeze(-1)
         else:
             # Pre-scale logits with temperature (avoid division by zero)
@@ -169,7 +219,7 @@ class CustomLLMGenerator:
     #     top_k: int,
     #     do_exploration: bool = False,
     #     explore_top_k: int = 5,
-    #     explore_top_k_beta: float = 0.5,
+    #     explore_noise: float = 0.1,
     # ) -> torch.Tensor:
     #     """Sample next token for a single item in the batch."""
     #     if temperature == 0:
@@ -183,7 +233,7 @@ class CustomLLMGenerator:
 
     #         # Simple but effective: raise probabilities to a power < 1
     #         # This flattens the distribution, giving lower-probability tokens more chance
-    #         probs = probs.pow(explore_top_k_beta)
+    #         probs = probs.pow(explore_noise)
     #         probs = probs / probs.sum()
 
     #         # # Uniform sampling within top-k (original behavior if temp is 1.0)
@@ -221,13 +271,13 @@ class CustomLLMGenerator:
     #     top_k: int,
     #     do_exploration: bool = False,
     #     explore_top_k: int = 5,
-    #     explore_top_k_beta: float = 0.5,
+    #     explore_noise: float = 0.5,
     # ) -> torch.Tensor:
     #     """Sample next tokens for the entire batch."""
     #     next_tokens = []
     #     for logits, temp in zip(token_logits, temperature):
     #         next_token = self._sample_next_token(
-    #             logits, temp.item(), top_p, top_k, do_exploration, explore_top_k, explore_top_k_beta
+    #             logits, temp.item(), top_p, top_k, do_exploration, explore_top_k, explore_noise
     #         )
     #         next_tokens.append(next_token)
     #     return torch.cat(next_tokens, dim=0)
@@ -244,8 +294,8 @@ class CustomLLMGenerator:
         top_k: int = 0,
         max_new_tokens: int = 50,
         explore_start_steps: int = 0,
-        explore_top_k: int = 5,
-        explore_top_k_beta: float = 0.5,
+        explore_top_k: int = 50,
+        explore_noise: float = 0.1,
         **kwargs,
     ) -> GenerateDecoderOnlyOutput:
         """
@@ -262,8 +312,8 @@ class CustomLLMGenerator:
             top_k (int, optional): Number of top-k candidates to sample from (default: 50).
             max_new_tokens (int, optional): The maximum number of new tokens to generate (default: 50).
             explore_start_steps (int, optional): Number of initial steps to perform exploration (default: 0).
-            explore_top_k (int, optional): Number of top-k candidates to consider during exploration (default: 5).
-            explore_top_k_beta (float, optional): Scaling factor for exploration probabilities (default: 0.5).
+            explore_top_k (int, optional): Number of top-k candidates to consider during exploration (default: 50).
+            explore_noise (float, optional): Noise factor for exploration probabilities (default: 0.1).
             **kwargs: Additional keyword arguments for model inference (unused here).
 
         Returns:
@@ -308,7 +358,7 @@ class CustomLLMGenerator:
                 top_k=top_k,
                 do_exploration=do_exploration,
                 explore_top_k=explore_top_k,
-                explore_top_k_beta=explore_top_k_beta,
+                explore_noise=explore_noise,
             )
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(
@@ -375,7 +425,7 @@ if __name__ == '__main__':
         top_k=50,
         explore_start_steps=50,
         explore_top_k=100,
-        explore_top_k_beta=0.4,
+        explore_noise=0.4,
     )
 
     # Decode the output tokens back to text

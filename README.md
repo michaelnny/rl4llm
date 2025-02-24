@@ -79,7 +79,7 @@ pip3 install torch torchvision torchaudio
 
 
 # On local machine, copy project files to remote server
-rsync -avz -e "ssh -p 31883" --exclude='.*' --exclude='__pycache__/' --exclude='tests' --exclude='old_runs' --exclude='runs' ./rl4llm ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu
+rsync -avz -e "ssh -p 31883" --exclude='.*' --exclude='__pycache__/' --exclude='notebooks' --exclude='tests' --exclude='old_runs' --exclude='runs' ./rl4llm ubuntu@worrisome-cherry-tiger.1.cricket.hyperbolic.xyz:/home/ubuntu
 
 
 # Install packages
@@ -102,7 +102,7 @@ PYTHONPATH=src TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_P2P_DISABLE=1 deepspeed --
 
 # real run in background
 
-nohup sh -c "PYTHONPATH=src NCCL_P2P_DISABLE=1 deepspeed --num_gpus=4 src/rl4llm/scripts/run_train_grpo_dist.py --config-file ./configs/ds_grpo_train_config.yaml" &
+nohup sh -c "PYTHONPATH=src NCCL_P2P_DISABLE=1 deepspeed --num_gpus=4 src/rl4llm/scripts/run_train_grpo_dist.py --config-file ./configs/ds_grpo_train_config.yaml" >> enhanced_grpo.log &
 
 
 

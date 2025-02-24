@@ -161,10 +161,10 @@ class BaseGRPOTrainer(ABC):
             'eos_token_id': self.eos_token_id,
             'pad_token_id': self.pad_token_id,
             'max_new_tokens': self.config.max_new_tokens,
-            'temperature': 0.0,  # Greedy sampling for evaluation
+            'temperature': None,
             'top_p': None,
             'top_k': None,
-            'do_sample': False,
+            'do_sample': False,  # Greedy sampling for evaluation
             'use_cache': True,
             'output_scores': False,
             'output_logits': False,
@@ -268,7 +268,7 @@ class BaseGRPOTrainer(ABC):
             if enable_exploration:
                 generation_kwargs['explore_start_steps'] = self._get_explore_start_steps()
                 generation_kwargs['explore_top_k'] = self.config.explore_top_k
-                generation_kwargs['explore_top_k_beta'] = self.config.explore_top_k_beta
+                generation_kwargs['explore_noise'] = self.config.explore_noise
 
         outputs = generator.generate(**generation_kwargs)
 
@@ -891,6 +891,7 @@ class BaseGRPOTrainer(ABC):
                 format_reward=reward_output['format_rewards'][idx].item(),
                 total_reward=reward_output['total_rewards'][idx].item(),
                 completion_length=completion_lengths[idx].item(),
+                step=self.iteration_count,
             )
 
             if is_training:

@@ -85,6 +85,12 @@ def main():
     else:
         logger.info(f'Number of testing samples: {len(test_ds)}')
 
+    # Ensure the number of samples in the test dataset can be evenly divided by the world_size
+    if len(test_ds) % world_size != 0:
+        new_test_sample_size = (len(test_ds) // world_size) * world_size
+        logger.info(f"Adjusting test dataset size to {new_test_sample_size} to be evenly divisible by world size {world_size}")
+        test_ds = test_ds.select(range(new_test_sample_size))
+
     # shard datasets across ranks, so each rank only works on a small subset of the data
     shared_train_ds = train_ds.shard(world_size, local_rank)
     shared_test_ds = test_ds.shard(world_size, local_rank)

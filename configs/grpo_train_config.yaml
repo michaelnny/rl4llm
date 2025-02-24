@@ -43,11 +43,11 @@ grpo_config:
   # for format and structure reward calculation
   xml_format: false
   min_completion_length: 80
-  max_prompt_length: 512              # Avoid too long sample question
+  max_prompt_length: 512              # skip sample question that's too long 
 
   max_new_tokens: 1024
   temperature: 0.9
-  top_p: 0.95
+  top_p: 1.0
   top_k: 50
   group_size: 32                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
@@ -56,9 +56,9 @@ grpo_config:
   explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
   explore_decay_steps: 300
-  explore_start_ratio: 0.05
+  explore_start_ratio: 0.1
   explore_top_k: 100
-  explore_top_k_beta: 0.4             # Square root of top-k probabilities during exploring start
+  explore_noise: 0.1             
 
   # evaluation
   eval_batch_size: 32
@@ -73,7 +73,7 @@ optimizer:
     lr: 1.0e-6
     betas: [0.9, 0.95]
     eps: 1.0e-8
-    weight_decay: 0.002
+    weight_decay: 0.0002
 
 scheduler:
   type: "OneCycleLR"

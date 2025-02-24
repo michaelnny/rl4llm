@@ -58,7 +58,7 @@ def test_exploration_sampling(generator: CustomLLMGenerator):
     torch.manual_seed(42)
 
     next_tokens = generator._sample_next_tokens(
-        logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=3, explore_top_k_beta=0.5
+        logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=3, explore_noise=0.5
     )
 
     # Assert shape is correct

@@ -77,7 +77,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             batch_size=self.config.eval_batch_size,
             pin_memory=False,
             shuffle=False,
-            drop_last=False,
+            drop_last=True,
         )
 
     def is_zero3_enabled(self) -> bool:
@@ -119,8 +119,10 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def run_evaluation(self):
         """Evaluate the model on the test dataset"""
+        dist.barrier()
         with self._generation_context(is_training=False):
             self.evaluate_policy(self.policy_model, self.test_loader)
+        dist.barrier()
 
     def generate_train_samples(
         self,
@@ -307,7 +309,6 @@ class GRPOTrainer(BaseGRPOTrainer):
         if self.iteration_count % self.config.eval_interval == 0:
             self.logger.info('Run evaluation...')
             self.run_evaluation()
-            dist.barrier()
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""
