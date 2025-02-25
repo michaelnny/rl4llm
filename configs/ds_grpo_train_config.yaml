@@ -39,9 +39,9 @@ grpo_config:
   #   <answer> summary answer here ... Thus, the final answer is \\boxed{} </answer>
   xml_format: false
   min_completion_length: 100
-  max_prompt_length: 1000              # skip sample question that's too long 
+  max_prompt_length: 800              # skip sample question that's too long 
 
-  max_new_tokens: 2000
+  max_new_tokens: 4000
   temperature: 0.9
   top_p: 1.0
   top_k: 0
@@ -57,7 +57,7 @@ grpo_config:
   explore_noise: 0.25             
 
   # evaluation
-  eval_batch_size: 64
+  eval_batch_size: 32
   eval_interval: 50
 
   # others
@@ -66,7 +66,7 @@ grpo_config:
 deepspeed_train_config:
   # memory_breakdown: true  # for debugging
   steps_per_print: 1000000 # disable default logging
-  train_micro_batch_size_per_gpu: 16
+  train_micro_batch_size_per_gpu: 8
   train_batch_size: 128
   gradient_clipping: 1.0
   bf16:
