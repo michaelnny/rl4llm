@@ -34,7 +34,6 @@ class GRPOTrainer(BaseGRPOTrainer):
         self,
         config: GRPOConfig,
         policy_engine: DeepSpeedEngine,
-        reference_engine: DeepSpeedEngine,
         tokenizer: PreTrainedTokenizer,
         train_ds: Dataset,
         test_ds: Dataset,
@@ -61,10 +60,11 @@ class GRPOTrainer(BaseGRPOTrainer):
         )
 
         self.policy_engine = policy_engine
-        self.reference_engine = reference_engine
 
         self.policy_model: PreTrainedModel = self.policy_engine.module
-        self.reference_model: PreTrainedModel = self.reference_engine.module
+        self.reference_model: PreTrainedModel = (
+            self._create_reference_model(self.policy_model) if self.config.kl_loss_coef > 0 else None
+        )
         self.llm_generator = CustomLLMGenerator(self.policy_model)
 
         # we only sample one item at a time for training, so no need loader
@@ -156,12 +156,11 @@ class GRPOTrainer(BaseGRPOTrainer):
 
             return collected_samples
 
-    def train_policy(self, samples: List[GRPOSample]) -> None:
+    def train_policy(self, train_samples: List[GRPOSample]) -> None:
         """Train the policy model using the collected samples."""
 
-        random.shuffle(samples)
         data_loader = DataLoader(
-            samples,
+            train_samples,
             batch_size=self.config.batch_size,
             shuffle=True,
             pin_memory=self.device.type == 'cuda',
@@ -169,7 +168,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             drop_last=True,
         )
         self.policy_engine.optimizer.zero_grad()
-        assert self.policy_engine.training
+        assert self.policy_model.training
 
         dist.barrier()
 
@@ -186,12 +185,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def save_checkpoint(self, save_dir: str):
         """Save policy model checkpoint following HF conventions"""
-        if self.is_zero3_enabled():
-            # self.logger.info('Saving policy model checkpoint using DeepSpeed...')
-            raise NotImplementedError
-
-        else:
-            self.policy_model.save_pretrained(save_dir)
+        self.policy_model.save_pretrained(save_dir)
 
     @contextmanager
     def _generation_context(self, is_training: bool = True):
@@ -223,13 +217,11 @@ class GRPOTrainer(BaseGRPOTrainer):
             return
 
         self.policy_engine.eval()
-        self.reference_engine.eval()
         # Ensure both models are on GPU for generation
         self.policy_engine = self.policy_engine.to(self.device)
-        if is_training:
-            self.reference_engine = self.reference_engine.to(self.device)
-        else:
-            self.reference_engine = self.reference_engine.cpu()
+        if self.reference_model is not None:
+            to_device = self.device if is_training else torch.device('cpu')
+            self.reference_model = self.reference_model.to(to_device)
 
         # Clear gradients to free memory
         self.policy_engine.optimizer.zero_grad(set_to_none=True)
@@ -242,8 +234,9 @@ class GRPOTrainer(BaseGRPOTrainer):
         if not self.generation_mode:
             return
 
-        # Move reference model to CPU since it's not needed during training
-        self.reference_engine = self.reference_engine.cpu()
+        if self.reference_model is not None:
+            # Move reference model to CPU since it's not needed during training
+            self.reference_model = self.reference_model.cpu()
 
         # Ensure policy model is on GPU for training
         self.policy_engine = self.policy_engine.to(self.device)
@@ -312,16 +305,14 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""
-
-        if self.is_zero3_enabled():
-            raise NotImplementedError('Zero-3 is not supported yet')
-        else:
-            self.reference_model.load_state_dict(self.policy_model.state_dict())
-            for param in self.reference_model.parameters():
-                param.requires_grad = False
-            self.reference_model = self.reference_model.eval()
-            self.ref_update_count += 1
-            torch.cuda.empty_cache()
+        if self.reference_model is None:
+            return
+        self.reference_model.load_state_dict(self.policy_model.state_dict())
+        for param in self.reference_model.parameters():
+            param.requires_grad = False
+        self.reference_model = self.reference_model.eval()
+        self.ref_update_count += 1
+        torch.cuda.empty_cache()
 
     # def _create_deepspeed_inference_engine(
     #     self,

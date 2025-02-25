@@ -136,7 +136,6 @@ class GRPOTrainer(BaseGRPOTrainer):
     def train_policy(self, train_samples: List[GRPOSample]) -> None:
         """Train the policy model using the collected samples."""
 
-        random.shuffle(train_samples)
         data_loader = DataLoader(
             train_samples,
             batch_size=self.config.batch_size,
@@ -290,14 +289,6 @@ class GRPOTrainer(BaseGRPOTrainer):
         if self.iteration_count % self.config.eval_interval == 0:
             self.logger.info('Run evaluation...')
             self.run_evaluation()
-
-    def _create_reference_model(self, policy_model: PreTrainedModel) -> PreTrainedModel:
-        """Create a reference model from the policy model"""
-        ref_model = deepcopy(policy_model)
-        for param in ref_model.parameters():
-            param.requires_grad = False
-        ref_model = ref_model.eval()
-        return ref_model
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""

@@ -98,19 +98,19 @@ def main():
         logger=logger,
     )
 
-    # Create a profiler instance
-    profiler = cProfile.Profile()
-    profiler.enable()
+    # # Create a profiler instance
+    # profiler = cProfile.Profile()
+    # profiler.enable()
 
     def handle_exit():
         trainer.on_exit()
 
-        if profiler is not None:
-            profiler.disable()
-            # Save profiling stats
-            stats = pstats.Stats(profiler)
-            stats.sort_stats('cumulative').dump_stats('profile_stats.prof')
-            stats.print_stats()  # Print to console for immediate feedback
+        # if profiler is not None:
+        #     profiler.disable()
+        #     # Save profiling stats
+        #     stats = pstats.Stats(profiler)
+        #     stats.sort_stats('cumulative').dump_stats('profile_stats.prof')
+        #     stats.print_stats()  # Print to console for immediate feedback
 
     try:
         trainer.train(log_hyper_params=config)

@@ -5,6 +5,7 @@ import os
 import random
 from abc import ABC
 from collections import deque
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -643,7 +644,7 @@ class BaseGRPOTrainer(ABC):
                 completion_texts[idx],
                 ground_truths[idx],
                 completion_tokens_count[idx],
-                self.config.min_completion_length,
+                50,
                 self.config.xml_format,
             )
             accuracy_rewards.append(out_dict['accuracy_reward'])
@@ -664,7 +665,7 @@ class BaseGRPOTrainer(ABC):
         completion: str,
         ground_truth: str,
         completion_len: int,
-        min_completion_length: int = 50,
+        min_completion_length: int,
         xml_format: bool = False,
     ) -> Dict[str, float]:
         """Compute rewards for a single completion in a separate process."""
@@ -804,6 +805,14 @@ class BaseGRPOTrainer(ABC):
         moving_average_length = self._get_average_completion_length()
         explore_start_steps = max(int(moving_average_length * self.config.explore_start_ratio), 10)
         return explore_start_steps
+
+    def _create_reference_model(self, policy_model: PreTrainedModel) -> PreTrainedModel:
+        """Create a reference model from the policy model"""
+        ref_model = deepcopy(policy_model)
+        for param in ref_model.parameters():
+            param.requires_grad = False
+        ref_model = ref_model.eval()
+        return ref_model
 
     def _train_collate_function(self, batch: List[GRPOSample]) -> GRPOSample:
         """Collate function for DataLoader during training"""

@@ -1,27 +1,27 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/enhanced_grpo_qwen2.5_7b_math"
+  artifacts_path: "./runs/grpo_qwen2_1.5b_gsm8k"
   datasets: # List of math datasets to load
-    # - "gsm"
-    - "math"
-  # max_train_samples: 1600         # for a quick run
-  # max_test_samples: 256       
+    - "gsm"
+    # - "math"
+  max_train_samples: 8000         # for a quick run
+  max_test_samples: 512       
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-7B-Instruct"
+  pretrained_model: "Qwen/Qwen2-1.5B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
 
 grpo_config:
   max_steps: 500
-  rollout_size: 1024
+  rollout_size: 64
   num_updates: 3
-  dynamic_discount: false           # compute dynamic discount based on completion length
-  min_gamma: 0.999                  # for compute dynamic discount
-  max_gamma: 0.9997                 # for compute dynamic discount
-  max_completion_length: 3000       # for compute dynamic discount
+  # dynamic_discount: false           # compute dynamic discount based on completion length
+  # min_gamma: 0.999                  # for compute dynamic discount
+  # max_gamma: 0.9997                 # for compute dynamic discount
+  # max_completion_length: 2000       # for compute dynamic discount
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       # no need to normalize for binary rewards
@@ -30,33 +30,27 @@ grpo_config:
   sync_reference_interval: 300        # every N iteration
 
   # for sample generation
+  max_prompt_length: 600              # skip sample question that's too long
+  xml_format: false                   # check for R1 style XML format
   system_prompt: |
     Think about the reasoning process in your mind before give a final answer to the problem. Present your final answer within \\boxed{}.
   # system_prompt: |
   #   Think about the reasoning process in your mind before give a final answer to the problem. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
-    
-  #   Example structure:
-  #   <think> detailed reasoning process here ... </think>
-  #   <answer> summary answer here ... Thus, the final answer is \\boxed{} </answer>
   
-  xml_format: false
-  min_completion_length: 100
-  
-  max_prompt_length: 1000              # skip sample question that's too long 
-  max_new_tokens: 3000
-  temperature: 0.9
+  max_new_tokens: 1200
+  temperature: 0.6
   # top_p: 1.0
   # top_k: 0
   group_size: 16                      # for each sample we generate a group of answers
-  # # group temperature where some are more 'exploitive'
-  group_temperature: true
-  # random start exploration
-  explore_init_epsilon: 0.9
-  explore_min_epsilon: 0.1
-  explore_decay_steps: 100
-  explore_start_ratio: 0.1
-  explore_top_k: 200
-  explore_noise: 0.25             
+  # # # group temperature where some are more 'exploitive'
+  # group_temperature: true
+  # # random start exploration
+  # explore_init_epsilon: 0.9
+  # explore_min_epsilon: 0.1
+  # explore_decay_steps: 100
+  # explore_start_ratio: 0.1
+  # explore_top_k: 200
+  # explore_noise: 0.25             
 
   # evaluation
   eval_batch_size: 32
@@ -65,10 +59,10 @@ grpo_config:
   # others
   checkpoint_interval: 50            # every N iteration
 
-deepspeed_train_config:
+deepspeed_config:
   # memory_breakdown: true  # for debugging
   steps_per_print: 1000000 # disable default logging
-  train_micro_batch_size_per_gpu: 8
+  train_micro_batch_size_per_gpu: 4
   train_batch_size: 128
   gradient_clipping: 1.0
   bf16:
@@ -107,15 +101,3 @@ deepspeed_train_config:
     number_checkpoints: null
     synchronize_checkpoint_boundary: false
 
-deepspeed_eval_config:          # for reference model
-  # memory_breakdown: true      # for debugging
-  steps_per_print: 1000000      # disable default logging
-  train_micro_batch_size_per_gpu: 8   # not used
-  train_batch_size: 128               # not used
-  bf16:
-    enabled: true
-  # zero_optimization:
-  #   stage: 0
-  #   offload_param:
-  #     device: cpu
-  #     pin_memory: true

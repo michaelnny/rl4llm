@@ -16,13 +16,9 @@ class GRPOConfig(BaseModel):
     top_k: Optional[int] = Field(0, ge=0, le=50000, description='Sampling top-k for generation')
     top_p: Optional[float] = Field(1.0, ge=0.0, le=1.0, description='Sampling top-p for generation')
     group_size: int = Field(8, ge=4, le=256, description='Number of group outcomes for single question')
-    min_completion_length: Optional[int] = Field(
-        100, ge=10, le=1000, description='Minimum completion token length for compute reward'
-    )
-
     xml_format: Optional[bool] = Field(False, description='Check R1 style XML format for compute reward')
     max_prompt_length: Optional[int] = Field(
-        1024, ge=512, le=10240, description='Skip sample with prompt length greater than this to avoid peak memory spikes'
+        1024, ge=256, le=10240, description='Skip sample with prompt length greater than this to avoid peak memory spikes'
     )
 
     # enhancements to encourage exploration

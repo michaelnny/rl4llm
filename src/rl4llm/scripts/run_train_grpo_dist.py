@@ -52,7 +52,7 @@ def main():
 
     config = load_yaml_config_file(args.config_file)
 
-    train_ds_config = config['deepspeed_train_config']
+    deepspeed_config = config['deepspeed_config']
 
     # Initialize DeepSpeed distributed environment
     deepspeed.init_distributed(verbose=False)
@@ -103,35 +103,20 @@ def main():
 
     dist.barrier()
     policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
-    ref_model, _ = create_model_and_tokenizer(config['model'], torch_dtype)
-
-    for p in ref_model.parameters():
-        p.requires_grad = False
-    ref_model = ref_model.eval()
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
         model_parameters=get_trainable_param_groups(
-            policy_model, train_ds_config['optimizer']['params']['lr'], train_ds_config['optimizer']['params']['weight_decay']
+            policy_model, deepspeed_config['optimizer']['params']['lr'], deepspeed_config['optimizer']['params']['weight_decay']
         ),
-        config_params=train_ds_config,
+        config_params=deepspeed_config,
     )
 
-    eval_ds_config = config['deepspeed_eval_config']
-
-    ref_engine, *_ = deepspeed.initialize(
-        model=ref_model,
-        optimizer=None,
-        model_parameters=None,
-        config_params=eval_ds_config,
-    )
-
-    grpo_config = GRPOConfig(**config['grpo_config'], batch_size=train_ds_config['train_micro_batch_size_per_gpu'])
+    grpo_config = GRPOConfig(**config['grpo_config'], batch_size=deepspeed_config['train_micro_batch_size_per_gpu'])
 
     trainer = GRPOTrainer(
         config=grpo_config,
         policy_engine=policy_engine,
-        reference_engine=ref_engine,
         tokenizer=tokenizer,
         train_ds=shared_train_ds,
         test_ds=shared_test_ds,

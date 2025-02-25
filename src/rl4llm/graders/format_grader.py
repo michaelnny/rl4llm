@@ -16,14 +16,14 @@ def check_invalid_format(text: str) -> bool:
         stripped_text.startswith(('```', '`')),  # start with code block
         stripped_text.endswith(('```', '`')),
         stripped_text.startswith(('\\\\', '\\boxed', 'The answer is', 'The correct answer is')),  # start with direct answer
-        stripped_text[0].isdigit(),  # start with numerical answer, or bullet point
+        # stripped_text[0].isdigit(),  # start with numerical answer, or bullet point
         has_repetitions(stripped_text),  # check for n-gram repetitions
     ]
 
     return any(invalid_conditions)
 
 
-def format_structure_grader(completion: str, seq_length: int, min_length: int = 100, xml_format: bool = False) -> float:
+def format_structure_grader(completion: str, seq_length: int, min_length: int = 50, xml_format: bool = False) -> float:
     """Checks for general rules like format, length etc"""
     score = 0.0
     completion_text = completion.strip()
