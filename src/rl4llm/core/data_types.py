@@ -48,7 +48,7 @@ class GRPOConfig(BaseModel):
     min_gamma: float = Field(0.999, ge=0.0, le=1.0, description='Min value of dynamic discount for compute returns')
     max_gamma: float = Field(0.9999, ge=0.0, le=1.0, description='Max value of dynamic discount for compute returns')
     max_completion_length: int = Field(
-        5000, ge=1024, le=51200, description='Maximum to scale the dynamic discount compute returns'
+        1000, ge=500, le=51200, description='Maximum to scale the dynamic discount compute returns'
     )
 
     sync_reference_interval: int = Field(0, ge=0, le=1000, description='Interval to update reference model using latest policy')

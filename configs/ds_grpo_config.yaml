@@ -1,0 +1,103 @@
+# RL GRPO config
+job:
+  seed: 117
+  artifacts_path: "./runs/grpo_qwen2.5_1.5b_gsm8k"
+  datasets: # List of math datasets to load
+    - "gsm"
+    # - "math"
+  max_train_samples: 8000         # for a quick run
+  max_test_samples: 512       
+
+model:
+  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
+  load_in_4bit: false
+  gradient_checkpointing: true
+  flash_attention: true
+
+grpo_config:
+  max_steps: 500
+  rollout_size: 64
+  num_updates: 3
+  # dynamic_discount: false           # compute dynamic discount based on completion length
+  # min_gamma: 0.999                  # for compute dynamic discount
+  # max_gamma: 0.9997                 # for compute dynamic discount
+  # max_completion_length: 1000       # for compute dynamic discount
+  gamma: 1.0                          # fixed discount
+  clip_eps: 0.2                       # PPO policy clip parameter
+  normalize_group_rewards: true       # no need to normalize for binary rewards
+  normalize_advantages: false
+  kl_loss_coef: 0.01
+  sync_reference_interval: 300        # every N iteration
+
+  # for sample generation
+  max_prompt_length: 600              # skip sample question that's too long
+  xml_format: false                   # check for R1 style XML format
+  system_prompt: |
+    Think about the reasoning process in your mind before give a final answer to the problem. Present your final answer within \\boxed{}.
+  # system_prompt: |
+  #   Think about the reasoning process in your mind before give a final answer to the problem. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
+  
+  max_new_tokens: 1200
+  temperature: 0.6
+  # top_p: 1.0
+  # top_k: 0
+  group_size: 16                      # for each sample we generate a group of answers
+  # # # group temperature where some are more 'exploitive'
+  # group_temperature: true
+  # # random start exploration
+  # explore_init_epsilon: 0.9
+  # explore_min_epsilon: 0.1
+  # explore_decay_steps: 100
+  # explore_start_ratio: 0.1
+  # explore_top_k: 200
+  # explore_noise: 0.25             
+
+  # evaluation
+  eval_batch_size: 32
+  eval_interval: 50
+
+  # others
+  checkpoint_interval: 50            # every N iteration
+
+deepspeed_config:
+  # memory_breakdown: true  # for debugging
+  steps_per_print: 1000000 # disable default logging
+  train_micro_batch_size_per_gpu: 4
+  train_batch_size: 128
+  gradient_clipping: 1.0
+  bf16:
+    enabled: true
+  optimizer:
+    type: AdamW
+    params:
+      lr: 9.0e-7                      
+      betas: [0.9, 0.999]
+      eps: 1.0e-8
+      weight_decay: 0.0
+      adam_w_mode: true
+  # scheduler:
+  #   type: "WarmupDecayLR"
+  #   params:
+  #     warmup_num_steps: 200
+  #     total_num_steps: 10000
+  #     warmup_min_lr: 1.0e-8
+  #     warmup_max_lr: 9.0e-7
+  zero_optimization:
+    stage: 2
+    contiguous_gradients: true
+    overlap_comm: true
+    allgather_partitions: true
+    reduce_scatter: true
+    # offload_param:
+    #   device: cpu
+    #   pin_memory: false
+    offload_optimizer:
+      device: cpu
+      pin_memory: false
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: true
+    contiguous_memory_optimization: true
+    number_checkpoints: null
+    synchronize_checkpoint_boundary: false
+

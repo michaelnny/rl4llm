@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/ds_grpo_train_config.yaml',
+        default='./configs/ds_grpo_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )

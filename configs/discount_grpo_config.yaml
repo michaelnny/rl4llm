@@ -1,15 +1,15 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/grpo_qwen2_1.5b_gsm8k"
+  artifacts_path: "./runs/discount_grpo_qwen2.5_1.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
-  # max_train_samples: 2000         # for a quick run
+  max_train_samples: 8000         # for a quick run
   max_test_samples: 512        
 
 model:
-  pretrained_model: "Qwen/Qwen2-1.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
@@ -20,10 +20,11 @@ grpo_config:
   num_updates: 3
   batch_size: 4
   gradient_accumulate_steps: 16
-  # dynamic_discount: true            # compute dynamic discount based on completion length
-  # min_gamma: 0.999                  # for compute dynamic discount
-  # max_gamma: 0.9998                 # for compute dynamic discount
-  gamma: 1.0                          # fixed discount
+  dynamic_discount: true            # compute dynamic discount based on completion length
+  min_gamma: 0.999                  # for compute dynamic discount
+  max_gamma: 0.9997                 # for compute dynamic discount
+  max_completion_length: 1000       # for compute dynamic discount
+  # gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       
   normalize_advantages: false
@@ -44,7 +45,7 @@ grpo_config:
   # top_p: 1.0
   # top_k: 0
   group_size: 16                      # for each sample we generate a group of answers
-  # group temperature where some are more 'exploitive'
+  # # group temperature where some are more 'exploitive'
   # group_temperature: true
   # # random start exploration
   # explore_init_epsilon: 0.9
@@ -59,7 +60,7 @@ grpo_config:
   eval_interval: 50
 
   # others
-  checkpoint_interval: 50            # every N iteration
+  checkpoint_interval: 100            # every N iteration
 
 optimizer:
   type: AdamW8bit
