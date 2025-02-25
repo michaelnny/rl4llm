@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_performance_enhanced_grpo_qwen2.5_1.5b_gsm8k"
+  artifacts_path: "./runs/enhanced_grpo_qwen2.5_1.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -16,17 +16,18 @@ model:
 
 grpo_config:
   max_steps: 1000
-  rollout_size: 512
-  num_updates: 1
+  rollout_size: 1024
+  num_updates: 3
   batch_size: 8
   gradient_accumulate_steps: 16
   # dynamic_discount: true           # compute dynamic discount based on completion length
   # min_gamma: 0.999                  # for compute dynamic discount
   # max_gamma: 0.9998                 # for compute dynamic discount
+  # max_completion_length: 1000
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       
-  normalize_advantages: true
+  normalize_advantages: false
   kl_loss_coef: 0.01
   clip_grad_norm: 1.0
   sync_reference_interval: 300        # every N iteration
@@ -45,17 +46,17 @@ grpo_config:
   min_completion_length: 100
   max_prompt_length: 1000              # skip sample question that's too long 
 
-  max_new_tokens: 2000
+  max_new_tokens: 1500
   temperature: 0.9
-  top_p: 1.0
-  top_k: 0
+  # top_p: 1.0
+  # top_k: 0
   group_size: 32                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   group_temperature: true
   # random start exploration
   explore_init_epsilon: 0.9
   explore_min_epsilon: 0.1
-  explore_decay_steps: 300
+  explore_decay_steps: 100
   explore_start_ratio: 0.1
   explore_top_k: 100
   explore_noise: 0.25             
@@ -73,11 +74,11 @@ optimizer:
     lr: 9.0e-7
     betas: [0.9, 0.999]
     eps: 1.0e-8
-    weight_decay: 0.00002
+    weight_decay: 0.0
 
-scheduler:
-  type: "OneCycleLR"
-  params:
-    warmup_fraction: 0.02
-    initial_lr_fraction: 0.1
-    final_lr_fraction: 0.1
+# scheduler:
+#   type: "OneCycleLR"
+#   params:
+#     warmup_fraction: 0.02
+#     initial_lr_fraction: 0.1
+#     final_lr_fraction: 0.1

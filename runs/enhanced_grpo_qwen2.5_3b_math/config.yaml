@@ -57,7 +57,7 @@ grpo_config:
   group_size: 32
   group_temperature: true
   kl_loss_coef: 0.01
-  max_new_tokens: 3000
+  max_new_tokens: 4000
   max_prompt_length: 800
   max_steps: 1000
   min_completion_length: 100

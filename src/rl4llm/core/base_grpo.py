@@ -783,7 +783,7 @@ class BaseGRPOTrainer(ABC):
             float: Moving average length, defaulting to 200.0 if no data.
         """
         if len(self._completion_lengths) < 10:
-            return 200.0
+            return 400.0
 
         values = np.array(list(self._completion_lengths))
 
@@ -802,8 +802,8 @@ class BaseGRPOTrainer(ABC):
             int: Number of steps to start exploration.
         """
         moving_average_length = self._get_average_completion_length()
-        max_explore_start_steps = max(int(moving_average_length * self.config.explore_start_ratio), 10)
-        return random.randint(max(max_explore_start_steps // 2, 10), max_explore_start_steps)
+        explore_start_steps = max(int(moving_average_length * self.config.explore_start_ratio), 10)
+        return explore_start_steps
 
     def _train_collate_function(self, batch: List[GRPOSample]) -> GRPOSample:
         """Collate function for DataLoader during training"""
