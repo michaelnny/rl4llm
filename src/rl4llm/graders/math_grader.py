@@ -227,7 +227,7 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
 def math_problem_grader(
     full_answer: str,
     ground_truth: str,
-    last_n: int = 3,
+    last_n: int = 2,
 ) -> float:
     """
     Enhanced grader that handles multiple answer formats and extraction methods.

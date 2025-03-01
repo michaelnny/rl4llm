@@ -1,0 +1,80 @@
+# RL GRPO config
+job:
+  seed: 117
+  artifacts_path: "./runs/grpo_qwen2.5_3b_math"
+  datasets: # List of math datasets to load
+    # - "gsm"
+    - "math"
+  # max_train_samples: 8000         # for a quick run
+  max_test_samples: 1024        
+
+model:
+  pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
+  load_in_4bit: true
+  gradient_checkpointing: true
+  flash_attention: true
+
+grpo_config:
+  max_steps: 500
+  rollout_size: 512
+  num_updates: 1
+  batch_size: 8
+  gradient_accumulate_steps: 16
+  # dynamic_discount: true            # compute dynamic discount based on completion length
+  # min_gamma: 0.999                  # for compute dynamic discount
+  # max_gamma: 0.9997                 # for compute dynamic discount
+  # max_completion_length: 4000       # for compute dynamic discount
+  gamma: 1.0                          # fixed discount
+  clip_eps: 0.2                       # PPO policy clip parameter
+  normalize_group_rewards: true       
+  normalize_advantages: false
+  kl_loss_coef: 0.01
+  clip_grad_norm: 0.0
+  sync_reference_interval: 120        # every N iteration
+
+  # for sample generation
+  max_prompt_length: 500              # skip sample question that's too long
+  xml_format: true                   # check for R1 style XML format
+  # system_prompt: |
+  #   A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
+  #   The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
+  system_prompt: |
+    A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
+    The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
+    The reasoning process and answer are enclosed within <think> </think> and
+    <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
+    <answer> answer here </answer>.
+  max_new_tokens: 2500
+  temperature: 0.7
+  group_size: 8                      # for each sample we generate a group of answers
+  # group temperature where some are more 'exploitive'
+  # group_temperature: true
+  # random start exploration
+  # explore_init_epsilon: 0.9
+  # explore_min_epsilon: 0.05
+  # explore_decay_steps: 100
+  # explore_start_ratio: 0.1          # how many initial start steps to do explorations
+  # explore_top_k: 500                # Top K tokens to explore
+  # explore_entropy_ratio: 0.2        # minimum entropy ratio during exploration
+
+  # evaluation
+  eval_batch_size: 32
+  eval_interval: 1
+
+  # others
+  checkpoint_interval: 100            # every N iteration
+
+optimizer:
+  type: AdamW8bit
+  params:
+    lr: 1.0e-6
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 0.0
+
+# scheduler:
+#   type: "OneCycleLR"
+#   params:
+#     warmup_fraction: 0.02
+#     initial_lr_fraction: 0.1
+#     final_lr_fraction: 0.5

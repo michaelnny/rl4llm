@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/ds_grpo_train_config.yaml',
+        default='./configs/ds_grpo_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -52,7 +52,7 @@ def main():
 
     config = load_yaml_config_file(args.config_file)
 
-    train_ds_config = config['deepspeed_train_config']
+    deepspeed_config = config['deepspeed_config']
 
     # Initialize DeepSpeed distributed environment
     deepspeed.init_distributed(verbose=False)
@@ -85,6 +85,12 @@ def main():
     else:
         logger.info(f'Number of testing samples: {len(test_ds)}')
 
+    # Ensure the number of samples in the test dataset can be evenly divided by the world_size
+    if len(test_ds) % world_size != 0:
+        new_test_sample_size = (len(test_ds) // world_size) * world_size
+        logger.info(f"Adjusting test dataset size to {new_test_sample_size} to be evenly divisible by world size {world_size}")
+        test_ds = test_ds.select(range(new_test_sample_size))
+
     # shard datasets across ranks, so each rank only works on a small subset of the data
     shared_train_ds = train_ds.shard(world_size, local_rank)
     shared_test_ds = test_ds.shard(world_size, local_rank)
@@ -97,35 +103,20 @@ def main():
 
     dist.barrier()
     policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
-    ref_model, _ = create_model_and_tokenizer(config['model'], torch_dtype)
-
-    for p in ref_model.parameters():
-        p.requires_grad = False
-    ref_model = ref_model.eval()
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
         model_parameters=get_trainable_param_groups(
-            policy_model, train_ds_config['optimizer']['params']['lr'], train_ds_config['optimizer']['params']['weight_decay']
+            policy_model, deepspeed_config['optimizer']['params']['lr'], deepspeed_config['optimizer']['params']['weight_decay']
         ),
-        config_params=train_ds_config,
+        config_params=deepspeed_config,
     )
 
-    eval_ds_config = config['deepspeed_eval_config']
-
-    ref_engine, *_ = deepspeed.initialize(
-        model=ref_model,
-        optimizer=None,
-        model_parameters=None,
-        config_params=eval_ds_config,
-    )
-
-    grpo_config = GRPOConfig(**config['grpo_config'], batch_size=train_ds_config['train_micro_batch_size_per_gpu'])
+    grpo_config = GRPOConfig(**config['grpo_config'], batch_size=deepspeed_config['train_micro_batch_size_per_gpu'])
 
     trainer = GRPOTrainer(
         config=grpo_config,
         policy_engine=policy_engine,
-        reference_engine=ref_engine,
         tokenizer=tokenizer,
         train_ds=shared_train_ds,
         test_ds=shared_test_ds,

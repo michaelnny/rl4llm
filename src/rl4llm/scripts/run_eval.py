@@ -2,14 +2,13 @@
 
 import argparse
 import random
-from tqdm import tqdm
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rl4llm.data import load_and_combine_datasets
-
 from rl4llm.utils import create_model_and_tokenizer, get_runtime_device, save_to_jsonl_file, set_seed, setup_logger
 
 
@@ -108,10 +107,10 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
 
     eval_decoding = {
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "top_k": args.top_k,
-        "max_new_tokens": args.max_new_tokens,
+        'temperature': args.temperature,
+        'top_p': args.top_p,
+        'top_k': args.top_k,
+        'max_new_tokens': args.max_new_tokens,
     }
 
     with tqdm(
@@ -124,39 +123,9 @@ def main():
     ) as pbar:
         pass
 
-    # eval_kwargs = {
-    #     'generator': generator,
-    #     'eval_dataset': work_ds,
-    #     'max_samples': len(work_ds),
-    #     'batch_size': args.batch_size,
-    #     'decoding_config': eval_decoding,
-    #     'user_prompt': USER_PROMPT,
-    # }
-
-    # samples, eval_stats = run_model_evaluation(**eval_kwargs)
-    # logger.info(f"Evaluation stats: {eval_stats}")
-
     # if args.sample_path:
     #     logger.info(f"Saving samples to: {args.sample_path}")
     #     save_to_jsonl_file(samples, args.sample_path)
-
-    # logger.info('Correct samples...')
-    # correct_samples = [d for d in samples if d['is_correct']]
-    # for sample in random.choices(correct_samples, k=10):
-    #     print(f"Question:\n{sample['question']}")
-    #     print(f"Ground truth: {sample['ground_truth']}")
-    #     print(f"Graded score: {sample['grade_score']}")
-    #     print(f"Full answer:\n{sample['full_answer']}")
-    #     print('\n\n---\n\n')
-
-    # logger.info('Incorrect samples...')
-    # incorrect_samples = [d for d in samples if not d['is_correct']]
-    # for sample in random.choices(incorrect_samples, k=10):
-    #     print(f"Question:\n{sample['question']}")
-    #     print(f"Ground truth: {sample['ground_truth']}")
-    #     print(f"Graded score: {sample['grade_score']}")
-    #     print(f"Full answer:\n{sample['full_answer']}")
-    #     print('\n\n---\n\n')
 
 
 if __name__ == '__main__':
