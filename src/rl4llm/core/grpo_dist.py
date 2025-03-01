@@ -101,14 +101,16 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self._metrics.reset()
 
+        if self.iteration_count == 0:
+            # do an initial evaluation before apply any training
+            self.run_evaluation()
+
         with self._metrics.timer('step'):
             dist.barrier()
             samples = self.generate_train_samples()
             dist.barrier()
             with torch.autograd.set_detect_anomaly(True):
                 self.train_policy(samples)
-
-        self.iteration_count += 1
 
         self._handle_post_train()
 
@@ -117,11 +119,14 @@ class GRPOTrainer(BaseGRPOTrainer):
         if self.is_master:
             self._log_training_stats(metrics, self.iteration_count)
 
+        self.iteration_count += 1
+
         dist.barrier()
 
     def run_evaluation(self):
         """Evaluate the model on the test dataset"""
         dist.barrier()
+        self.logger.info('Run evaluation...')
         with self._generation_context(is_training=False):
             self.evaluate_policy(self.policy_model, self.test_loader)
         dist.barrier()
@@ -187,6 +192,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def save_checkpoint(self, save_dir: str):
         """Save policy model checkpoint following HF conventions"""
+        logger.info('Saving policy model checkpoint...')
         self.policy_model.save_pretrained(save_dir)
 
     @contextmanager
@@ -290,25 +296,23 @@ class GRPOTrainer(BaseGRPOTrainer):
             return
 
         if self.iteration_count % self.config.sync_reference_interval == 0:
-            logger.info('Updating reference model...')
             self._sync_reference_model()
             dist.barrier()
 
         if self.iteration_count % self.config.checkpoint_interval == 0:
             if self.is_master:
-                logger.info('Saving policy model checkpoint...')
                 save_dir = os.path.join(self._checkpoint_dir, f"iteration_{self.iteration_count}")
                 self.save_checkpoint(save_dir)
             dist.barrier()
 
         if self.iteration_count % self.config.eval_interval == 0:
-            self.logger.info('Run evaluation...')
             self.run_evaluation()
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""
         if self.reference_model is None:
             return
+        self.logger.info('Updating reference model...')
         self.reference_model.load_state_dict(self.policy_model.state_dict())
         for param in self.reference_model.parameters():
             param.requires_grad = False
