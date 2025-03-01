@@ -59,4 +59,16 @@ class MetricsCollector:
                     summary[f"{name}_std"] = np.std(values).item()
                     # summary[f"{name}_var"] = np.var(values).item()
 
+                    if 'completion_length' in name:
+                        max_value = np.max(values).item()
+                        max_count = np.sum(values == max_value).item()  # Count how many times the max value occurs
+
+                        # If the max value occurs more than once, calculate the ratio
+                        ratio_to_max_occurrences = max_count / len(values) if max_count > 1 else 0.0
+
+                        summary[f"{name}_max_ratio"] = ratio_to_max_occurrences
+                        summary[f"{name}_max"] = max_value
+                        summary[f"{name}_min"] = np.min(values).item()
+                        summary[f"{name}_p90"] = np.percentile(values, 90).item()
+                        summary[f"{name}_p99"] = np.percentile(values, 99).item()
         return summary

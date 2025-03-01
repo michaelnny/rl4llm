@@ -65,130 +65,58 @@ class CustomLLMGenerator:
 
         return input_ids, attention_mask, unfinished_sequences
 
-    def _add_dirichlet_noise(self, probs: torch.Tensor, noise_eps: float = 0.25, alpha: float = 0.1) -> torch.Tensor:
+    def _entropy_adaptive_top_k_sampling(
+        self, logits: torch.Tensor, top_k: int = 50, min_entropy_ratio: float = 0.3
+    ) -> torch.Tensor:
         """
-        Add Dirichlet noise to probability distribution.
+        Entropy-adaptive sampling limited to top-k tokens.
 
         Args:
-            probs (torch.Tensor): The original probability distribution to add noise to.
-            noise_eps (float, optional): The epsilon value for noise scaling (default: 0.25).
-            alpha (float, optional): The alpha value for the Dirichlet distribution (default: 0.1).
+            logits: Original logits [batch_size, vocab_size]
+            top_k: Number of top tokens to consider
+            min_entropy_ratio: Target minimum entropy as ratio of maximum possible top-k entropy
 
         Returns:
-            torch.Tensor: The noisy probability distribution with Dirichlet noise.
+            Sampled token indices
         """
-        assert noise_eps > 0
-        assert alpha > 0
-        # assert num_mask >= 0
-        # assert 0 < scale_factor < 1
+        batch_size, vocab_size = logits.shape
+        k = min(top_k, vocab_size)
 
-        orig_dtype = probs.dtype
-        probs = probs.float()
+        # Get top-k values and indices
+        top_k_values, top_k_indices = torch.topk(logits, k=k, dim=-1)
 
-        # # Get top n indices for each item in batch and scale down the top n token probs
-        # _, top_indices = torch.topk(probs, num_mask, dim=-1)
-        # top_mask = torch.zeros_like(probs).scatter_(-1, top_indices, 1.0)
-        # modified_probs = probs * (scale_factor * top_mask + (1 - top_mask))
+        # Convert to probabilities
+        top_k_probs = F.softmax(top_k_values, dim=-1)
 
-        # # Renormalize the modified probabilities
-        # modified_probs = modified_probs / modified_probs.sum(dim=-1, keepdim=True)
+        # Calculate entropy of top-k distribution
+        eps = 1e-10
+        entropy = -torch.sum(top_k_probs * torch.log2(top_k_probs + eps), dim=-1)
 
-        # Sample noise from Dirichlet distribution
-        alphas = torch.full_like(probs, fill_value=alpha)
-        dirichlet_dist = torch.distributions.Dirichlet(alphas)
-        noise = dirichlet_dist.sample()
+        # Maximum possible entropy for k tokens is log2(k)
+        max_entropy = torch.log2(torch.tensor(k, dtype=torch.float, device=logits.device))
 
-        # Combine modified probabilities with noise
-        noisy_probs = (1 - noise_eps) * probs + noise_eps * noise
-        noisy_probs = noisy_probs / noisy_probs.sum(dim=-1, keepdim=True)
+        # Calculate entropy ratio and adaptive temperature
+        entropy_ratio = entropy / max_entropy
+        target_ratio = torch.tensor(min_entropy_ratio, device=logits.device)
 
-        return noisy_probs.to(orig_dtype)
+        # Derive temperature to achieve target entropy ratio
+        adaptive_temp = torch.clamp(
+            target_ratio / torch.clamp(entropy_ratio, min=1e-5),
+            min=1.0,  # Never shrink the distribution
+            max=20.0,  # Reasonable upper limit for temperature
+        )
 
-    """a more diverse sampling by processing one item at a time, but it's very slow"""
+        # Apply temperature scaling to top-k logits
+        scaled_logits = top_k_values / adaptive_temp.unsqueeze(-1)
 
-    # def _sample_next_token(
-    #     self,
-    #     logits: torch.Tensor,  # Single item logits
-    #     temperature: float,
-    #     top_p: float,
-    #     top_k: int,
-    #     do_exploration: bool = False,
-    #     explore_top_k: int = 0,
-    #     explore_noise: float = 0.0,
-    # ) -> torch.Tensor:
-    #     """Sample next token for a single item in the batch."""
-    #     if temperature == 0:
-    #         return logits.argmax(dim=-1, keepdim=True)
+        # Sample from adjusted distribution
+        scaled_probs = F.softmax(scaled_logits, dim=-1)
+        sampled_indices = torch.multinomial(scaled_probs, num_samples=1)
 
-    #     if do_exploration and explore_top_k > 1:
-    #         top_k_values, top_k_indices = torch.topk(logits, k=explore_top_k, dim=-1)
-    #         probs = F.softmax(top_k_values, dim=-1)
+        # Map back to original token indices
+        next_tokens = torch.gather(top_k_indices, dim=1, index=sampled_indices).squeeze(-1)
 
-    #         # Add dirichlet noise
-    #         if explore_noise > 0:
-    #             probs = self._add_dirichlet_noise(
-    #                 probs, noise_eps=explore_noise
-    #             )
-
-    #         sampled_indices = torch.multinomial(probs, num_samples=1)
-    #         return torch.gather(top_k_indices, -1, sampled_indices)
-    #     else:
-    #         logits = logits / temperature
-
-    #         if top_k > 0:
-    #             top_k_values, top_k_indices = torch.topk(logits, min(top_k, logits.shape[-1]), dim=-1)
-    #             indices_to_remove = torch.ones_like(logits, dtype=torch.bool)
-    #             indices_to_remove.scatter_(-1, top_k_indices, False)
-    #             logits.masked_fill_(indices_to_remove, float('-inf'))
-
-    #         if top_p < 1.0:
-    #             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-    #             cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-    #             sorted_indices_to_remove = cumulative_probs > top_p
-    #             sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
-    #             sorted_indices_to_remove[0] = 0
-
-    #             logits[sorted_indices[sorted_indices_to_remove]] = float('-inf')
-
-    #         probs = F.softmax(logits, dim=-1)
-    #         return torch.multinomial(probs, num_samples=1)
-
-    # def _sample_next_batch_tokens(
-    #     self,
-    #     token_logits: torch.Tensor,
-    #     temperature: torch.Tensor,
-    #     top_p: float,
-    #     top_k: int,
-    #     do_exploration: bool = False,
-    #     explore_top_k: int = 0,
-    #     explore_noise: float = 0.0,
-    # ) -> torch.Tensor:
-    #     """
-    #     Sample the next token from the logits using temperature scaling, top-k filtering,
-    #     and nucleus sampling. Supports exploration with specific parameters.
-
-    #     Args:
-    #         token_logits (torch.Tensor): The logits for the next token to be sampled, shape [batch_size, vocab_size].
-    #         temperature (torch.Tensor): The temperature for scaling the logits, shape [batch_size].
-    #         top_p (float): The cumulative probability threshold for nucleus sampling.
-    #         top_k (int): The number of top-k candidates to consider for sampling.
-    #         do_exploration (bool, optional): Whether to perform exploration (default: False).
-    #         explore_top_k (int, optional): The number of top-k candidates to explore when exploration is enabled.
-    #         explore_noise (float, optional): Noise factor for exploration probabilities (default: 0.1).
-
-    #     Returns:
-    #         torch.Tensor: The sampled token IDs for the next step in the sequence.
-    #     """
-    #     next_tokens = []
-    #     for logits, temp in zip(token_logits, temperature):
-    #         next_token = self._sample_next_token(
-    #             logits, temp.item(), top_p, top_k, do_exploration, explore_top_k, explore_noise
-    #         )
-    #         next_tokens.append(next_token)
-    #     return torch.cat(next_tokens, dim=0)
-
-    """it it fast but requires tuning the parameters, a lower beta will have better results during exploration"""
+        return next_tokens
 
     def _sample_next_batch_tokens(
         self,
@@ -198,7 +126,7 @@ class CustomLLMGenerator:
         top_k: int,
         do_exploration: bool = False,
         explore_top_k: int = 0,
-        explore_noise: float = 0.0,
+        explore_entropy_ratio: float = 0.0,
     ) -> torch.Tensor:
         """
         Sample the next token from the logits using temperature scaling, top-k filtering,
@@ -211,7 +139,7 @@ class CustomLLMGenerator:
             top_k (int): The number of top-k candidates to consider for sampling.
             do_exploration (bool, optional): Whether to perform exploration (default: False).
             explore_top_k (int, optional): The number of top-k candidates to explore when exploration is enabled.
-            explore_noise (float, optional): Noise factor for exploration probabilities (default: 0.0).
+            explore_entropy_ratio (float, optional): Target minimum entropy as ratio of maximum possible top-k entropy (default: 0.0).
 
         Returns:
             torch.Tensor: The sampled token IDs for the next step in the sequence.
@@ -226,26 +154,11 @@ class CustomLLMGenerator:
         if zero_temp_mask.all():
             return token_logits.argmax(dim=-1)
 
-        if do_exploration and explore_top_k > 1:
-            # Exploration mode: Top-k sampling with inverse probability transformation
-            top_k = min(explore_top_k, vocab_size)
-            top_k_values, top_k_indices = torch.topk(token_logits, k=top_k, dim=-1)
-
-            # Compute softmax probabilities over top-k
-            probs = F.softmax(top_k_values, dim=-1)
-
-            # # Inverse probability transformation
-            # epsilon = 1e-6  # Small constant to avoid division by zero
-            # inverted_probs = 1 / (probs + epsilon)
-            # inverted_probs = inverted_probs / inverted_probs.sum(dim=-1, keepdim=True)
-
-            # Add dirichlet noise
-            if explore_noise > 0:
-                probs = self._add_dirichlet_noise(probs, noise_eps=explore_noise)
-
-            # Sample from the top-k distribution
-            sampled_indices = torch.multinomial(probs, num_samples=1)
-            next_tokens = torch.gather(top_k_indices, dim=-1, index=sampled_indices).squeeze(-1)
+        if do_exploration:
+            # Use entropy-adaptive sampling with a single parameter
+            next_tokens = self._entropy_adaptive_top_k_sampling(
+                token_logits, top_k=explore_top_k, min_entropy_ratio=explore_entropy_ratio
+            )
         else:
             # Pre-scale logits with temperature (avoid division by zero)
             scaled_logits = torch.where(
@@ -253,13 +166,13 @@ class CustomLLMGenerator:
             )
 
             # Standard sampling with top-k and top-p filtering
-            if top_k > 0:
+            if top_k is not None and top_k > 0:
                 k = min(top_k, vocab_size)
                 top_k_values, top_k_indices = torch.topk(scaled_logits, k=k, dim=-1)
                 scaled_logits = torch.full_like(scaled_logits, float('-inf'))
                 scaled_logits.scatter_(dim=-1, index=top_k_indices, src=top_k_values)
 
-            if top_p > 0 and top_p < 1.0:
+            if top_p is not None and (top_p > 0 and top_p < 1.0):
                 # Vectorized nucleus sampling
                 sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True, dim=-1)
                 probs = F.softmax(sorted_logits, dim=-1)
@@ -300,7 +213,8 @@ class CustomLLMGenerator:
         max_new_tokens: int = 50,
         explore_start_steps: int = 0,
         explore_top_k: int = 100,
-        explore_noise: float = 0.1,
+        explore_entropy_ratio: float = 0.1,
+        explore_skip_first_n: int = 3,
         **kwargs,
     ) -> GenerateDecoderOnlyOutput:
         """
@@ -318,7 +232,8 @@ class CustomLLMGenerator:
             max_new_tokens (int, optional): The maximum number of new tokens to generate (default: 50).
             explore_start_steps (int, optional): Number of initial steps to perform exploration (default: 0).
             explore_top_k (int, optional): Number of top-k candidates to consider during exploration (default: 50).
-            explore_noise (float, optional): Noise factor for exploration probabilities (default: 0.1).
+            explore_entropy_ratio (float, optional): Target minimum entropy as ratio of maximum possible top-k entropy (default: 0.1).
+            explore_skip_first (int, optional): Skip explore on the first N token, for example in R1 style the first might be `<think>` token.
             **kwargs: Additional keyword arguments for model inference (unused here).
 
         Returns:
@@ -354,6 +269,8 @@ class CustomLLMGenerator:
 
             # Determine if we should do exploration
             do_exploration = explore_start_steps > 0 and generated_tokens < explore_start_steps
+            if explore_skip_first_n and generated_tokens < explore_skip_first_n:  # skip explore on the <think> token
+                do_exploration = False
 
             # Sample next tokens
             next_tokens = self._sample_next_batch_tokens(
@@ -363,7 +280,7 @@ class CustomLLMGenerator:
                 top_k=top_k,
                 do_exploration=do_exploration,
                 explore_top_k=explore_top_k,
-                explore_noise=explore_noise,
+                explore_entropy_ratio=explore_entropy_ratio,
             )
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(
@@ -430,7 +347,7 @@ if __name__ == '__main__':
         top_k=50,
         explore_start_steps=50,
         explore_top_k=100,
-        explore_noise=0.4,
+        explore_entropy_ratio=0.4,
     )
 
     # Decode the output tokens back to text

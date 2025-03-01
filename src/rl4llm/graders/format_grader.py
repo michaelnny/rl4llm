@@ -5,48 +5,47 @@ from .text_utils import has_irregular_words, has_repetitions
 xml_pattern = r'^<think>(.*?)</think>\s*<answer>(.*?)</answer>$'
 
 
-def check_invalid_format(text: str) -> bool:
-    # Avoid processing if text is empty after stripping
-    stripped_text = text.strip()
-    if not stripped_text:
-        return True
+def validate_xml_structure(completion_text: str) -> bool:
+    # Strip any code block markers
+    text = re.sub(r'```.*?\n|```', '', completion_text, flags=re.DOTALL)
 
-    # Check for invalid formatting
-    invalid_conditions = [
-        stripped_text.startswith(('```', '`')),  # start with code block
-        stripped_text.endswith(('```', '`')),
-        stripped_text.startswith(('\\\\', '\\boxed', 'The answer is', 'The correct answer is')),  # start with direct answer
-        # stripped_text[0].isdigit(),  # start with numerical answer, or bullet point
-        has_repetitions(stripped_text),  # check for n-gram repetitions
-    ]
+    # Count the number of tag pairs
+    think_tags = re.findall(r'<think>', text)
+    answer_tags = re.findall(r'<answer>', text)
 
-    return any(invalid_conditions)
+    # If there's more than one pair, reject
+    if len(think_tags) > 1 or len(answer_tags) > 1:
+        return False  # Multiple tag pairs found
+
+    if not completion_text.startswith('<think>') or not completion_text.endswith('</answer>'):
+        return False
+
+    # Check if a single valid pair exists with non-empty content
+    xml_pattern = r'^<think>(.*?)</think>\s*<answer>(.*?)</answer>$'
+    match = re.match(xml_pattern, text, re.DOTALL | re.MULTILINE)
+
+    if not match:
+        return False  # No valid pair or incorrect structure
+
+    # Check that content inside tags is not empty (after stripping whitespace)
+    think_content = match.group(1).strip()
+    answer_content = match.group(2).strip()
+
+    if not think_content or not answer_content:
+        return False  # Empty content in one or both tags
+
+    # if has_repetitions(think_content) or has_repetitions(answer_content):
+    if has_repetitions(answer_content):
+        return False
+
+    return True
 
 
-def format_structure_grader(completion: str, seq_length: int, min_length: int = 50, xml_format: bool = False) -> float:
+def format_structure_grader(completion: str) -> float:
     """Checks for general rules like format, length etc"""
-    score = 0.0
-    completion_text = completion.strip()
+    score = 1.0
 
-    if xml_format:
-        match = re.match(xml_pattern, completion_text, re.DOTALL | re.MULTILINE)
-        if not match:
-            return -0.5  # if XML doesn't match
+    if not validate_xml_structure(completion.strip()):
+        return 0.0
 
-        think_content = match.group(1).strip() if match.group(1) else ''
-        answer_content = match.group(2).strip() if match.group(2) else ''
-
-        if (
-            not think_content
-            or not answer_content
-            or check_invalid_format(think_content)
-            or check_invalid_format(answer_content)
-        ):
-            return -0.5
-
-    else:
-        if seq_length < min_length or check_invalid_format(completion_text):
-            return -0.5
-
-    # no conditions are violated
     return score

@@ -79,6 +79,9 @@ class BaseGRPOTrainer(ABC):
         self.rank = rank
         self.is_master = rank == 0
 
+        # For custom exploring start where we skip do exploration for the <think> token
+        self.first_token_len = len(self.tokenizer.encode('<think>')) if self.config.xml_format else 0
+
         # For moving average of completion lengths
         self._completion_lengths = deque(maxlen=1000)
 
@@ -239,8 +242,8 @@ class BaseGRPOTrainer(ABC):
             'pad_token_id': self.pad_token_id,
             'max_new_tokens': self.config.max_new_tokens,
             'temperature': self.config.temperature,
-            'top_p': self.config.top_p,
-            'top_k': self.config.top_k,
+            'top_p': 1.0,  # self.config.top_p,
+            'top_k': 0,  # self.config.top_k,
             'do_sample': True,
             'use_cache': True,
             'output_scores': False,
@@ -255,7 +258,7 @@ class BaseGRPOTrainer(ABC):
                 # this idea is similar how we do it in distributed RL training in classical RL
                 # where we have multiple agents running in parallel, some agents are more exploratory than others
                 temperature = torch.linspace(
-                    0.0, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
+                    0.3, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
                 )
                 # over written to use group temperatures
                 generation_kwargs['temperature'] = temperature
@@ -269,7 +272,8 @@ class BaseGRPOTrainer(ABC):
             if enable_exploration:
                 generation_kwargs['explore_start_steps'] = self._get_explore_start_steps()
                 generation_kwargs['explore_top_k'] = self.config.explore_top_k
-                generation_kwargs['explore_noise'] = self.config.explore_noise
+                generation_kwargs['explore_entropy_ratio'] = self.config.explore_entropy_ratio
+                generation_kwargs['explore_skip_first_n'] = self.first_token_len
 
         outputs = generator.generate(**generation_kwargs)
 
@@ -362,7 +366,7 @@ class BaseGRPOTrainer(ABC):
         """Compute gradient norm for the given model"""
         return compute_grad_norm(model)
 
-    def _prepare_single_message(self, question: str, system_prompt: str) -> List[Dict[str, str]]:
+    def _prepare_single_message(self, question: str, system_prompt: str = None) -> List[Dict[str, str]]:
         """Prepare a single message for tokenization.
 
         Args:
@@ -534,7 +538,7 @@ class BaseGRPOTrainer(ABC):
         # -1 is the pad token
         # the, the loss mask will be [0, 0, 0, 1, 1, 1, 0, 0, 0]
         loss_mask = (actions != self.pad_token_id).bool()
-        loss_mask[:, : prompt_length - 1] = 0
+        loss_mask[:, : prompt_length - 1] = False
 
         samples = []
 
@@ -612,7 +616,7 @@ class BaseGRPOTrainer(ABC):
         completion_texts = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
 
         # Compute rewards
-        reward_output = self._compute_rewards(completion_texts, ground_truths, completion_lengths.tolist())
+        reward_output = self._compute_rewards(completion_texts, ground_truths)
 
         return {
             'completion_ids': completion_ids,
@@ -621,21 +625,18 @@ class BaseGRPOTrainer(ABC):
             'reward_output': reward_output,
         }
 
-    def _compute_rewards(
-        self, completion_texts: List[str], ground_truths: List[str], completion_tokens_count: List[int]
-    ) -> Dict[str, torch.Tensor]:
+    def _compute_rewards(self, completion_texts: List[str], ground_truths: List[str]) -> Dict[str, torch.Tensor]:
         """Compute rewards for completions against ground truth(s)
 
         Args:
             completion_texts: List of generated completion texts
             ground_truths: A list of ground truths
-            completion_tokens_count: List of completion lengths
 
         Returns:
             Dict: containing accuracy, format and total rewards
 
         """
-        assert len(completion_texts) == len(ground_truths) == len(completion_tokens_count)
+        assert len(completion_texts) == len(ground_truths)
 
         accuracy_rewards = []
         format_rewards = []
@@ -643,8 +644,6 @@ class BaseGRPOTrainer(ABC):
             out_dict = self._compute_reward_single_sample(
                 completion_texts[idx],
                 ground_truths[idx],
-                completion_tokens_count[idx],
-                50,
                 self.config.xml_format,
             )
             accuracy_rewards.append(out_dict['accuracy_reward'])
@@ -664,18 +663,12 @@ class BaseGRPOTrainer(ABC):
     def _compute_reward_single_sample(
         completion: str,
         ground_truth: str,
-        completion_len: int,
-        min_completion_length: int,
         xml_format: bool = False,
     ) -> Dict[str, float]:
         """Compute rewards for a single completion in a separate process."""
         accuracy_score = math_problem_grader(completion, ground_truth)
-        format_score = format_structure_grader(
-            completion,
-            seq_length=completion_len,
-            min_length=min_completion_length,
-            xml_format=xml_format,
-        )
+        # scale format reward since we have binary reward for the accuracy
+        format_score = 0.5 * format_structure_grader(completion) if xml_format else 0.0
         return {'accuracy_reward': accuracy_score, 'format_reward': format_score}
 
     def _compute_action_logprobs(
@@ -881,9 +874,9 @@ class BaseGRPOTrainer(ABC):
         for metric_name, values in metrics_batch.items():
             self._metrics.add_metrics_batch(metric_name, values)
 
-        # # Log samples to external file and optionally to tensorboard
-        # tb_log_indices = random.sample(range(len(completion_texts)), k=1)
-        # tb_tag = 'sample/training' if is_training else 'sample/evaluation'
+        # Log samples to external file, and optionally log to tensorboard
+        tb_log_indices = random.sample(range(len(completion_texts)), k=1) if random.random() > 0.5 else []
+        tb_tag = 'sample/training' if is_training else 'sample/evaluation'
 
         ext_file_handler = self._train_sample_handler if is_training else self._eval_sample_handler
         for idx in range(len(completion_texts)):
@@ -907,17 +900,17 @@ class BaseGRPOTrainer(ABC):
                 self.eval_episode_count += 1
                 ext_file_handler.log_entry(sample.model_dump())
 
-            # # Log subset of samples to TensorBoard, disabled for performance reasons
-            # if idx in tb_log_indices:
-            #     try:
-            #         formatted_text = self._format_sample_text(sample)
-            #         self._log_sample_to_tensorboard(
-            #             tb_tag,
-            #             formatted_text,
-            #             self.train_episode_count if is_training else self.eval_episode_count,
-            #         )
-            #     except Exception as e:
-            #         self.logger.error(f"Failed to log sample to TensorBoard: {e}")
+            # Log subset of samples to TensorBoard
+            if tb_log_indices and idx in tb_log_indices:
+                try:
+                    formatted_text = self._format_sample_text(sample)
+                    self._log_sample_to_tensorboard(
+                        tb_tag,
+                        formatted_text,
+                        self.train_episode_count if is_training else self.eval_episode_count,
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to log sample to TensorBoard: {e}")
 
         ext_file_handler.flush()
 
@@ -926,7 +919,8 @@ class BaseGRPOTrainer(ABC):
         return (
             f"**Question [{sample.task_type}]**: {sample.question}\n\n"
             f"**Ground Truth**: {sample.ground_truth}\n\n"
-            f"**Accuracy Reward**: {sample.accuracy_reward:.2f}, **Format Reward**: {sample.format_reward:.2f}, **Total Reward**: {sample.total_reward:.2f}\n\n"
+            f"**Accuracy Reward**: {sample.accuracy_reward:.2f}\n\n"
+            f"**Format Reward**: {sample.format_reward:.2f}\n\n"
             f"**Generated Completion**:\n```json\n{sample.completion}\n```"
         )
 

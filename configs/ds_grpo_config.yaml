@@ -31,12 +31,16 @@ grpo_config:
 
   # for sample generation
   max_prompt_length: 600              # skip sample question that's too long
-  xml_format: false                   # check for R1 style XML format
-  system_prompt: |
-    Think about the reasoning process in your mind before give a final answer to the problem. Present your final answer within \\boxed{}.
+  xml_format: true                   # check for R1 style XML format
   # system_prompt: |
-  #   Think about the reasoning process in your mind before give a final answer to the problem. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
-  
+  #   A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
+  #   The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
+  system_prompt: |
+    A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
+    The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
+    The reasoning process and answer are enclosed within <think> </think> and
+    <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
+    <answer> answer here </answer>.
   max_new_tokens: 1200
   temperature: 0.6
   # top_p: 1.0
@@ -50,7 +54,7 @@ grpo_config:
   # explore_decay_steps: 100
   # explore_start_ratio: 0.1
   # explore_top_k: 200
-  # explore_noise: 0.25             
+  # explore_entropy_ratio: 0.25             
 
   # evaluation
   eval_batch_size: 32

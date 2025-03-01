@@ -1,12 +1,12 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/standard_grpo_qwen2.5_1.5b_gsm8k"
+  artifacts_path: "./runs/grpo_qwen2.5_1.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
   max_train_samples: 8000         # for a quick run
-  max_test_samples: 512        
+  max_test_samples: 1024        
 
 model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -17,8 +17,8 @@ model:
 grpo_config:
   max_steps: 500
   rollout_size: 1024
-  num_updates: 3
-  batch_size: 4
+  num_updates: 1
+  batch_size: 8
   gradient_accumulate_steps: 16
   # dynamic_discount: true            # compute dynamic discount based on completion length
   # min_gamma: 0.999                  # for compute dynamic discount
@@ -29,31 +29,35 @@ grpo_config:
   normalize_group_rewards: true       
   normalize_advantages: false
   kl_loss_coef: 0.01
-  clip_grad_norm: 1.0
-  sync_reference_interval: 300        # every N iteration
+  clip_grad_norm: 0.0
+  sync_reference_interval: 120        # every N iteration
 
   # for sample generation
-  max_prompt_length: 600              # skip sample question that's too long
-  xml_format: false                   # check for R1 style XML format
-  system_prompt: |
-    Think about the reasoning process in your mind before give a final answer to the problem. Present your final answer within \\boxed{}.
+  max_prompt_length: 500              # skip sample question that's too long
+  xml_format: true                   # check for R1 style XML format
   # system_prompt: |
-  #   Think about the reasoning process in your mind before give a final answer to the problem. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively. Present your final answer within \\boxed{}.
-
-  max_new_tokens: 1200
-  temperature: 0.6
+  #   A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
+  #   The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
+  system_prompt: |
+    A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
+    The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
+    The reasoning process and answer are enclosed within <think> </think> and
+    <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
+    <answer> answer here </answer>.
+  max_new_tokens: 1024
+  temperature: 0.9
   # top_p: 1.0
   # top_k: 0
   group_size: 16                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   # group_temperature: true
-  # # random start exploration
+  # random start exploration
   # explore_init_epsilon: 0.9
-  # explore_min_epsilon: 0.1
-  # explore_decay_steps: 200
-  # explore_start_ratio: 0.1
-  # explore_top_k: 100
-  # explore_noise: 0.25             
+  # explore_min_epsilon: 0.05
+  # explore_decay_steps: 100
+  # explore_start_ratio: 0.1          # how many initial start steps to do explorations
+  # explore_top_k: 500                # Top K tokens to explore
+  # explore_entropy_ratio: 0.2        # minimum entropy ratio during exploration
 
   # evaluation
   eval_batch_size: 32
@@ -65,7 +69,7 @@ grpo_config:
 optimizer:
   type: AdamW8bit
   params:
-    lr: 9.0e-7
+    lr: 1.0e-6
     betas: [0.9, 0.999]
     eps: 1.0e-8
     weight_decay: 0.0
