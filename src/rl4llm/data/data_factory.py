@@ -245,7 +245,12 @@ def load_math_dataset(
             'task_type': 'MATH',
         }
 
+    def skip_easy_samples(item) -> bool:
+        return item['level'] >= 3
+
     train_ds = train_ds.map(extract_math_ground_truth)
+    train_ds = train_ds.filter(skip_easy_samples)
+
     test_ds = test_ds.map(extract_math_ground_truth)
 
     # Select only the columns you want in the final dataset

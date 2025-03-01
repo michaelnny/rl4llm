@@ -55,20 +55,21 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self.optimizer = optimizer
         self.scheduler = scheduler
-
         self.llm_generator = CustomLLMGenerator(self.policy_model)
 
-        # we only sample one item at a time for training, so no need loader
-        self.train_ds = train_ds.shuffle(seed=None)
-        self.train_iter = iter(self.train_ds)
+        self.logger.info('Preprocessing datasets...')
+        self.train_ds = self.preprocess_dataset(train_ds)
+        self.test_ds = self.preprocess_dataset(test_ds)
 
-        self.test_ds = test_ds
+        # we only sample one item at a time for training, so no need loader
+        self.train_iter = iter(self.train_ds)
         self.test_loader = DataLoader(
             self.test_ds,
             batch_size=self.config.eval_batch_size,
+            collate_fn=self._eval_collate_function,
             pin_memory=False,
             shuffle=False,
-            drop_last=False,
+            drop_last=True,
         )
 
     def run_one_iteration(self) -> None:
@@ -267,7 +268,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             return item
         except StopIteration:
             # Epoch finished! Reshuffle and recreate the iterator
-            self.train_ds = self.train_ds.shuffle(seed=None)
+            random.shuffle(self.train_ds)
             self.train_iter = iter(self.train_ds)
             item = next(self.train_iter)  # Get the first item of the new epoch
             return item

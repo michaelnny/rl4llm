@@ -1,29 +1,29 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/grpo_qwen2.5_1.5b_gsm8k"
+  artifacts_path: "./runs/grpo_qwen2.5_3b_math"
   datasets: # List of math datasets to load
-    - "gsm"
-    # - "math"
-  max_train_samples: 8000         # for a quick run
+    # - "gsm"
+    - "math"
+  # max_train_samples: 8000         # for a quick run
   max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
-  load_in_4bit: false
+  pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
+  load_in_4bit: true
   gradient_checkpointing: true
   flash_attention: true
 
 grpo_config:
   max_steps: 500
-  rollout_size: 1024
+  rollout_size: 512
   num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
   # dynamic_discount: true            # compute dynamic discount based on completion length
   # min_gamma: 0.999                  # for compute dynamic discount
   # max_gamma: 0.9997                 # for compute dynamic discount
-  # max_completion_length: 1000       # for compute dynamic discount
+  # max_completion_length: 4000       # for compute dynamic discount
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       
@@ -44,11 +44,9 @@ grpo_config:
     The reasoning process and answer are enclosed within <think> </think> and
     <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
     <answer> answer here </answer>.
-  max_new_tokens: 1024
-  temperature: 0.9
-  # top_p: 1.0
-  # top_k: 0
-  group_size: 16                      # for each sample we generate a group of answers
+  max_new_tokens: 2500
+  temperature: 0.7
+  group_size: 8                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   # group_temperature: true
   # random start exploration
@@ -61,7 +59,7 @@ grpo_config:
 
   # evaluation
   eval_batch_size: 32
-  eval_interval: 50
+  eval_interval: 1
 
   # others
   checkpoint_interval: 100            # every N iteration
