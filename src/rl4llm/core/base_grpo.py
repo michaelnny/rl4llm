@@ -930,7 +930,7 @@ class BaseGRPOTrainer(ABC):
         # Minor cleanup of sample logging
         handler = self._train_sample_handler if is_training else self._eval_sample_handler
         tb_tag = f'{phase}_samples'
-        tb_indices = random.sample(range(len(completion_texts)), k=1) if random.random() > 0.75 else []
+        tb_indices = random.sample(range(len(completion_texts)), k=1) if random.random() > 0.5 else []
 
         for idx in range(len(completion_texts)):
             sample = SampleLog(
@@ -939,7 +939,7 @@ class BaseGRPOTrainer(ABC):
                 ground_truth=ground_truths[idx],
                 completion=completion_texts[idx],
                 accuracy_reward=accuracy_rewards[idx].item(),
-                format_reward=accuracy_rewards[idx].item(),
+                format_reward=format_rewards[idx].item(),
                 total_reward=total_rewards[idx].item(),
                 completion_length=completion_lengths[idx].item(),
                 step=self.iteration_count,

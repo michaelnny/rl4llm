@@ -25,9 +25,7 @@ Start training job
 
 ```bash
 
-nohup sh -c "PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 python3 -m rl4llm.scripts.run_train_grpo --config-file ./configs/grpo_config.yaml" >> standard_grpo.log &
-
-
+nohup sh -c "PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 python3 -m rl4llm.scripts.run_train_grpo --config-file ./configs/grpo_config.yaml" > standard_grpo.log &
 
 
 ```

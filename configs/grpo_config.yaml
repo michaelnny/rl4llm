@@ -1,16 +1,16 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/grpo_qwen2.5_3b_math"
+  artifacts_path: "./runs/grpo_qwen2.5_1.5b_gsm8k"
   datasets: # List of math datasets to load
-    # - "gsm"
-    - "math"
+    - "gsm"
+    # - "math"
   # max_train_samples: 8000         # for a quick run
   max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
-  load_in_4bit: true
+  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
+  load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
 
@@ -30,7 +30,7 @@ grpo_config:
   normalize_advantages: false
   kl_loss_coef: 0.01
   clip_grad_norm: 0.0
-  sync_reference_interval: 120        # every N iteration
+  sync_reference_interval: 250        # every N iteration
 
   # for sample generation
   max_prompt_length: 500              # skip sample question that's too long
@@ -44,9 +44,9 @@ grpo_config:
     The reasoning process and answer are enclosed within <think> </think> and
     <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
     <answer> answer here </answer>.
-  max_new_tokens: 2500
+  max_new_tokens: 1500
   temperature: 0.7
-  group_size: 8                      # for each sample we generate a group of answers
+  group_size: 16                      # for each sample we generate a group of answers
   # group temperature where some are more 'exploitive'
   # group_temperature: true
   # random start exploration
@@ -59,7 +59,7 @@ grpo_config:
 
   # evaluation
   eval_batch_size: 32
-  eval_interval: 1
+  eval_interval: 50
 
   # others
   checkpoint_interval: 100            # every N iteration

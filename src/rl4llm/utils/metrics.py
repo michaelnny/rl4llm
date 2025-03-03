@@ -44,7 +44,7 @@ class MetricsCollector:
         """Get all metrics"""
         return {name: values for name, values in self._metrics.items()}
 
-    def get_summary(self, skip_list: List[str] = ['loss', 'grad_norm']) -> Dict[str, float]:
+    def get_summary(self, skip_list: List[str] = ['loss', 'grad_norm', 'prompt_length', 'total_reward']) -> Dict[str, float]:
         """Get summary of all metrics"""
         summary = {}
 
