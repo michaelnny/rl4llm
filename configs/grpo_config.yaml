@@ -18,8 +18,8 @@ grpo_config:
   max_steps: 500
   rollout_size: 512
   num_updates: 1
-  batch_size: 8
-  gradient_accumulate_steps: 16
+  batch_size: 4
+  gradient_accumulate_steps: 32
   # dynamic_discount: true            # compute dynamic discount based on completion length
   # min_gamma: 0.999                  # for compute dynamic discount
   # max_gamma: 0.9997                 # for compute dynamic discount

@@ -1,5 +1,6 @@
 """Base GRPO trainer with common functionality for both single and distributed training"""
 
+import gc
 import logging
 import multiprocessing as mp
 import os
@@ -144,18 +145,18 @@ class BaseGRPOTrainer(ABC):
             self._log_hyper_params_to_tensorboard(log_hyper_params)
 
         for _ in tqdm(range(self.config.max_steps), desc='Training steps', disable=not self.is_master):
-            self.run_one_iteration()
+            self.step()
 
-    def run_one_iteration(self):
+    def step(self):
         """Run a single training iteration. Must be implemented by subclasses."""
         raise NotImplementedError('Subclasses must implement this method')
 
-    def train_policy(self, samples: List[GRPOSample]) -> None:
+    def _train_policy(self, samples: List[GRPOSample]) -> None:
         """Train the policy model using collected samples. Must be implemented by subclasses."""
         raise NotImplementedError('Subclasses must implement this method')
 
     @torch.no_grad()
-    def evaluate_policy(self, policy_model: PreTrainedModel, test_loader: DataLoader) -> None:
+    def _evaluate_policy(self, policy_model: PreTrainedModel, test_loader: DataLoader) -> None:
         """Evaluate the policy model on a test dataset.
 
         Args:
@@ -191,7 +192,7 @@ class BaseGRPOTrainer(ABC):
                 self._process_evaluation_outputs(questions, ground_truths, task_types, input_ids, outputs.sequences)
 
     @torch.no_grad()
-    def generate_group_samples(
+    def _generate_group_samples(
         self,
         item: Dict[str, str],
         policy_model: PreTrainedModel,
@@ -279,7 +280,7 @@ class BaseGRPOTrainer(ABC):
 
         outputs = generator.generate(**generation_kwargs)
 
-        torch.cuda.empty_cache()
+        self._clean_up()
 
         return self._process_training_outputs(
             question,
@@ -416,26 +417,6 @@ class BaseGRPOTrainer(ABC):
             {'role': 'user', 'content': question.strip()},
         ]
 
-    def _tokenize_function(self, example: Dict) -> Dict:
-        """
-        Tokenize a single example from the dataset.
-
-        Args:
-            example (dict): A single example from the dataset, e.g., {'question': '...', ...}
-
-        Returns:
-            dict: Tokenized inputs including 'input_ids' and 'attention_mask'
-        """
-        message = self._prepare_single_message(example['question'], self.config.system_prompt)
-        inputs = self.tokenizer.apply_chat_template(
-            message, tokenize=True, return_tensors='pt', return_dict=True, padding=False, add_generation_prompt=True
-        )
-
-        # Return a dictionary with squeezed tensors (remove batch dimension)
-        example['input_ids'] = inputs['input_ids'].squeeze(0)
-        example['attention_mask'] = inputs['attention_mask'].squeeze(0)
-        return example
-
     def _get_exploration_epsilon(self) -> float:
         """Computes exploration epsilon based on the current iteration step count."""
         if self.config.explore_decay_steps == 0:
@@ -485,12 +466,7 @@ class BaseGRPOTrainer(ABC):
             task_types=task_types,
             questions=questions,
             ground_truths=ground_truths,
-            accuracy_rewards=outputs['accuracy_rewards'],
-            format_rewards=outputs['format_rewards'],
-            total_rewards=outputs['total_rewards'],
-            prompt_lengths=outputs['prompt_lengths'],
-            completion_lengths=outputs['completion_lengths'],
-            completion_texts=outputs['completion_texts'],
+            **outputs,
         )
 
     def _process_training_outputs(
@@ -538,12 +514,7 @@ class BaseGRPOTrainer(ABC):
             task_types=task_types,
             questions=questions,
             ground_truths=ground_truths,
-            accuracy_rewards=outputs['accuracy_rewards'],
-            format_rewards=outputs['format_rewards'],
-            total_rewards=outputs['total_rewards'],
-            prompt_lengths=outputs['prompt_lengths'],
-            completion_lengths=outputs['completion_lengths'],
-            completion_texts=outputs['completion_texts'],
+            **outputs,
         )
 
         completion_lengths = outputs['completion_lengths']
@@ -560,10 +531,10 @@ class BaseGRPOTrainer(ABC):
         states = full_sequences[:, :-1]
         actions = full_sequences[:, 1:]
         pi_logprobs = self._compute_action_logprobs(policy_model, states, actions).cpu()
-        torch.cuda.empty_cache()
+        self._clean_up()
         if self.config.kl_loss_coef > 0 and reference_model:
             ref_logprobs = self._compute_action_logprobs(reference_model, states, actions).cpu()
-            torch.cuda.empty_cache()
+            self._clean_up()
         else:
             ref_logprobs = torch.full_like(pi_logprobs, 1e-6).cpu()  # use a place holder to make sure code is compatible
 
@@ -775,7 +746,7 @@ class BaseGRPOTrainer(ABC):
 
         # Initialize metrics with common values
         metrics = {
-            'pg_loss': pg_loss.detach().item(),
+            'loss/pg': pg_loss.detach().item(),
         }
 
         # Compute KL divergence if coefficient is positive
@@ -794,8 +765,8 @@ class BaseGRPOTrainer(ABC):
             loss = pg_loss + kl_loss
             metrics.update(
                 {
-                    'total_loss': loss.detach().item(),
-                    'kl_loss': kl_loss.detach().item(),
+                    'loss/total': loss.detach().item(),
+                    'loss/kl': kl_loss.detach().item(),
                     'kl': kl.detach().item(),
                 }
             )
@@ -811,7 +782,7 @@ class BaseGRPOTrainer(ABC):
             float: Moving average length, defaulting to 200.0 if no data.
         """
         if len(self._completion_lengths) < 10:
-            return 400.0
+            return 300.0
 
         values = np.array(list(self._completion_lengths))
 
@@ -1016,3 +987,8 @@ class BaseGRPOTrainer(ABC):
                         self._writer.add_scalar(f"{name}", value, step)
             except Exception as e:
                 self.logger.warning(f"Failed to log stats to TensorBoard: {e}")
+
+    def _clean_up(self) -> None:
+        """Clean up GPU cache"""
+        torch.cuda.empty_cache()
+        gc.collect()

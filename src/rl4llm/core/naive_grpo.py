@@ -116,7 +116,7 @@ class GRPOTrainer:
         with self.metrics.timer('step'):
             samples = self.generate_samples()
             with torch.autograd.set_detect_anomaly(True):
-                self.train_policy(samples)
+                self._train_policy(samples)
 
         self.iteration_count += 1
 
@@ -127,7 +127,7 @@ class GRPOTrainer:
         self._handle_post_train()
 
     @torch.no_grad()
-    def generate_group_samples(self, sample: Dict[str, str]) -> List[GRPOSample]:
+    def _generate_group_samples(self, sample: Dict[str, str]) -> List[GRPOSample]:
         """Generate responses for a batch of questions and ground truth answers
 
         Args:
@@ -285,7 +285,7 @@ class GRPOTrainer:
             with self.metrics.timer('generation'):
                 while len(collected_samples) < self.config.rollout_size:
                     item = self._get_next_data_item()
-                    samples = self.generate_group_samples(item)
+                    samples = self._generate_group_samples(item)
                     collected_samples.extend(samples)
 
             self.metrics.add_metric('elapsed/generation_episodes', self.episode_count)
@@ -293,7 +293,7 @@ class GRPOTrainer:
 
             return collected_samples
 
-    def train_policy(self, samples: List[GRPOSample]) -> None:
+    def _train_policy(self, samples: List[GRPOSample]) -> None:
         random.shuffle(samples)
 
         _collate_fn = partial(self._collate_function, pad_token_id=self.pad_token_id, torch_dtype=self.torch_dtype)
@@ -374,7 +374,7 @@ class GRPOTrainer:
         finally:
             self._prepare_for_training()
 
-    def save_checkpoint(self, save_dir: str):
+    def _save_checkpoint(self, save_dir: str):
         """Save policy model checkpoint following HF conventions"""
         self.policy_model.save_pretrained(save_dir)
 
@@ -484,7 +484,7 @@ class GRPOTrainer:
         if self.iteration_count % self.config.checkpoint_interval == 0:
             logger.info('Saving policy model checkpoint...')
             save_dir = os.path.join(self.checkpoint_dir, f"iteration_{self.iteration_count}")
-            self.save_checkpoint(save_dir)
+            self._save_checkpoint(save_dir)
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""

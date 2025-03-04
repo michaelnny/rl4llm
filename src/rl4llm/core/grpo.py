@@ -72,7 +72,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             drop_last=True,
         )
 
-    def run_one_iteration(self) -> None:
+    def step(self) -> None:
         """
         Runs one iteration of the RL GRPO algorithm.
 
@@ -87,14 +87,14 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self._metrics.reset()
 
-        # if self.iteration_count == 0:
-        #     # do an initial evaluation before apply any training
-        #     self.run_evaluation()
+        if self.iteration_count == 0:
+            # do an initial evaluation before apply any training
+            self._evaluation()
 
         with self._metrics.timer('step'):
-            samples = self.generate_train_samples()
+            samples = self._generate_training_samples()
             with torch.autograd.set_detect_anomaly(True):
-                self.train_policy(samples)
+                self._train_policy(samples)
 
         self._handle_post_train()
 
@@ -104,13 +104,13 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self.iteration_count += 1
 
-    def run_evaluation(self):
+    def _evaluation(self):
         """Evaluate the model on the test dataset"""
         self.logger.info('Run evaluation...')
         with self._generation_context(is_training=False):
-            self.evaluate_policy(self.policy_model, self.test_loader)
+            self._evaluate_policy(self.policy_model, self.test_loader)
 
-    def generate_train_samples(
+    def _generate_training_samples(
         self,
     ) -> List[GRPOSample]:
         """Generates samples using the current policy."""
@@ -122,7 +122,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             with self._metrics.timer('generation'):
                 while len(collected_samples) < self.config.rollout_size:
                     sample = self._get_next_data_item()
-                    samples = self.generate_group_samples(
+                    samples = self._generate_group_samples(
                         sample,
                         policy_model=self.policy_model,
                         reference_model=self.reference_model,
@@ -139,7 +139,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
             return collected_samples
 
-    def train_policy(self, train_samples: List[GRPOSample]) -> None:
+    def _train_policy(self, train_samples: List[GRPOSample]) -> None:
         """Train the policy model using the collected samples."""
 
         data_loader = DataLoader(
@@ -190,7 +190,7 @@ class GRPOTrainer(BaseGRPOTrainer):
         self._metrics.add_metric('elapsed/reference_update', self.ref_update_count)
         self._metrics.add_metric('training/learning_rate', self.optimizer.param_groups[0]['lr'])
 
-    def save_checkpoint(self, save_dir: str):
+    def _save_checkpoint(self, save_dir: str):
         """Save policy model checkpoint following HF conventions"""
         self.logger.info('Saving policy model checkpoint...')
         self.policy_model.save_pretrained(save_dir)
@@ -221,9 +221,9 @@ class GRPOTrainer(BaseGRPOTrainer):
             self.reference_model = self.reference_model.to(to_device)
 
         # Clear gradients to free memory
-        self.policy_model.zero_grad(set_to_none=True)
+        self.optimizer.zero_grad(set_to_none=True)
 
-        torch.cuda.empty_cache()
+        self._clean_up()
         self.generation_mode = True
 
     def _prepare_for_training(self):
@@ -237,10 +237,11 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         # Ensure policy model is on GPU for training
         self.policy_model = self.policy_model.to(self.device)
-
         self.policy_model = self.policy_model.train()
+        # Clear gradients to free memory
+        self.optimizer.zero_grad(set_to_none=True)
 
-        torch.cuda.empty_cache()
+        self._clean_up()
         self.generation_mode = False
 
     def _train_one_batch(self, batch: GRPOSample) -> None:
@@ -289,10 +290,10 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         if self.iteration_count % self.config.checkpoint_interval == 0:
             save_dir = os.path.join(self._checkpoint_dir, f"iteration_{self.iteration_count}")
-            self.save_checkpoint(save_dir)
+            self._save_checkpoint(save_dir)
 
         if self.iteration_count % self.config.eval_interval == 0:
-            self.run_evaluation()
+            self._evaluation()
 
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""
@@ -304,4 +305,4 @@ class GRPOTrainer(BaseGRPOTrainer):
             param.requires_grad = False
         self.reference_model = self.reference_model.eval()
         self.ref_update_count += 1
-        torch.cuda.empty_cache()
+        self._clean_up()
