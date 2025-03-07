@@ -509,6 +509,11 @@ class BaseGRPOTrainer(ABC):
             full_sequences=full_sequences,
         )
 
+        # discard invalid samples
+        if torch.sum(outputs['total_rewards']) == 0:
+            self.logger.warning('Skipping samples with all zero rewards')
+            return []
+
         self._log_sample_metrics(
             is_training=True,
             task_types=task_types,
@@ -694,7 +699,7 @@ class BaseGRPOTrainer(ABC):
         assert input_ids.shape == actions.shape
 
         attention_mask = (input_ids != self.pad_token_id).bool()
-        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.float()
         # this runs into CUDA OOM
         # logprobs = torch.log_softmax(logits, dim=-1)
         # return torch.gather(logprobs, dim=2, index=actions.unsqueeze(2)).squeeze(2)
@@ -755,7 +760,7 @@ class BaseGRPOTrainer(ABC):
             # per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
 
             # Clamp log differences for stability
-            per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-10, max=10)
+            per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
             per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
             # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
 
@@ -801,8 +806,11 @@ class BaseGRPOTrainer(ABC):
             int: Number of steps to start exploration.
         """
         moving_average_length = self._get_average_completion_length()
-        explore_start_steps = max(int(moving_average_length * self.config.explore_start_ratio), 10)
-        return explore_start_steps
+        start_size = max(int(moving_average_length * 0.5), 1)
+        end_size = max(int(moving_average_length), 1)
+        if end_size == start_size:
+            end_size += 1
+        return random.randint(start_size, end_size)
 
     def _create_reference_model(self, policy_model: PreTrainedModel) -> PreTrainedModel:
         """Create a reference model from the policy model"""
