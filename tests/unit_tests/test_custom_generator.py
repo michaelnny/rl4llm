@@ -62,13 +62,13 @@ def test_exploration_sampling_edge_cases(generator: CustomLLMGenerator):
     # explore_top_k larger than vocab size
     torch.manual_seed(42)
     tokens = generator._sample_next_batch_tokens(
-        logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=10, explore_entropy_ratio=0.5
+        logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=10, explore_beta=0.5
     )
     assert tokens.shape == (1,) and 0 <= tokens.item() < 3
 
     # Zero entropy ratio (should still sample valid tokens)
     tokens = generator._sample_next_batch_tokens(
-        logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=3, explore_entropy_ratio=0.0
+        logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=3, explore_beta=0.0
     )
     assert tokens.shape == (1,) and 0 <= tokens.item() < 3
 
@@ -116,8 +116,8 @@ def test_generate_exploration_skip(generator: CustomLLMGenerator):
         max_new_tokens=3,
         explore_start_steps=2,
         explore_top_k=3,
-        explore_entropy_ratio=0.5,
-        explore_skip_first_n=1,
+        explore_beta=0.5,
+        explore_skip_n=1,
     )
 
     assert output.sequences.shape == (1, 5)  # 2 initial + 3 new
@@ -169,7 +169,7 @@ def test_batch_consistency_with_exploration(generator: CustomLLMGenerator):
         max_new_tokens=2,
         explore_start_steps=1,
         explore_top_k=2,
-        explore_entropy_ratio=0.5,
+        explore_beta=0.5,
     )
 
     assert isinstance(output, GenerateDecoderOnlyOutput)

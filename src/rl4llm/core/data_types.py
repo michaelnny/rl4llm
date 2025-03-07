@@ -11,15 +11,16 @@ class GRPOConfig(BaseModel):
 
     """For RL sample generation"""
     system_prompt: Optional[str] = Field(None, description='System prompt for generation')
-    max_new_tokens: Optional[int] = Field(4096, ge=50, description='Maximum number of new tokens to generate')
-    temperature: Optional[float] = Field(0.9, gt=0.0, le=1.0, description='Sampling temperature for generation')
-    top_k: Optional[int] = Field(0, ge=0, le=50000, description='Sampling top-k for generation')
-    top_p: Optional[float] = Field(1.0, ge=0.0, le=1.0, description='Sampling top-p for generation')
-    group_size: int = Field(8, ge=4, le=256, description='Number of group outcomes for single question')
-    xml_format: Optional[bool] = Field(False, description='Check R1 style XML format for compute reward')
     max_prompt_length: Optional[int] = Field(
         1024, ge=256, le=10240, description='Skip sample with prompt length greater than this to avoid peak memory spikes'
     )
+    max_new_tokens: Optional[int] = Field(4096, ge=50, description='Maximum number of new tokens to generate')
+    temperature: Optional[float] = Field(0.9, gt=0.0, le=1.0, description='Sampling temperature for generation')
+    repetition_penalty: Optional[float] = Field(1.0, gt=0.0, le=2.0, description='Repetition penalty for generation')
+    top_p: Optional[float] = Field(1.0, ge=0.0, le=1.0, description='Sampling top-p for generation')
+    top_k: Optional[int] = Field(50, ge=-1, le=1000, description='Sampling top-k for generation')
+    group_size: int = Field(8, ge=4, le=256, description='Number of group outcomes for single question')
+    xml_format: Optional[bool] = Field(False, description='Check R1 style XML format for compute reward')
 
     # enhancements to encourage exploration
     group_temperature: Optional[bool] = Field(False, description='Use group temperatures to sample tokens during generation')
@@ -28,8 +29,8 @@ class GRPOConfig(BaseModel):
     explore_decay_steps: Optional[int] = Field(0, ge=0, le=1000000, description='Exploration epsilon decay steps')
     explore_start_ratio: Optional[float] = Field(0, ge=0, le=1.0, description='Ratio of random start steps to do exploration')
     explore_top_k: Optional[int] = Field(100, ge=10, le=2000, description='Unified top-k for both exploration')
-    explore_entropy_ratio: Optional[float] = Field(
-        0.3, ge=0.0, le=1.0, description='Amount of noise to inject during exploration'
+    explore_beta: Optional[float] = Field(
+        0.5, ge=0.0, le=1.0, description='Controls how much to favor less likely tokens (0.0 to 1.0), 1.0 = fully inverted distribution'
     )
 
     """For RL GRPO training"""

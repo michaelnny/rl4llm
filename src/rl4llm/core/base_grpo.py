@@ -245,8 +245,8 @@ class BaseGRPOTrainer(ABC):
             'pad_token_id': self.pad_token_id,
             'max_new_tokens': self.config.max_new_tokens,
             'temperature': self.config.temperature,
-            'top_p': 1.0,  # self.config.top_p,
-            'top_k': 0,  # self.config.top_k,
+            'top_p': self.config.top_p,
+            'top_k': self.config.top_k,
             'do_sample': True,
             'use_cache': True,
             'output_scores': False,
@@ -275,8 +275,8 @@ class BaseGRPOTrainer(ABC):
             if enable_exploration:
                 generation_kwargs['explore_start_steps'] = self._get_explore_start_steps()
                 generation_kwargs['explore_top_k'] = self.config.explore_top_k
-                generation_kwargs['explore_entropy_ratio'] = self.config.explore_entropy_ratio
-                generation_kwargs['explore_skip_first_n'] = self.think_token_len
+                generation_kwargs['explore_beta'] = self.config.explore_beta
+                generation_kwargs['explore_skip_n'] = self.think_token_len
 
         outputs = generator.generate(**generation_kwargs)
 

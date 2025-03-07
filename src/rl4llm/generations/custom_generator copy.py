@@ -65,74 +65,20 @@ class CustomLLMGenerator:
 
         return input_ids, attention_mask, unfinished_sequences
 
-    # def _entropy_adaptive_top_k_sampling(
-    #     self, logits: torch.Tensor, top_k: int = 50, min_entropy_ratio: float = 0.3
-    # ) -> torch.Tensor:
-    #     """
-    #     Entropy-adaptive sampling limited to top-k tokens.
-
-    #     Args:
-    #         logits: Original logits [batch_size, vocab_size]
-    #         top_k: Number of top tokens to consider
-    #         min_entropy_ratio: Target minimum entropy as ratio of maximum possible top-k entropy
-
-    #     Returns:
-    #         Sampled token indices
-    #     """
-    #     batch_size, vocab_size = logits.shape
-    #     k = min(top_k, vocab_size)
-
-    #     # Get top-k values and indices
-    #     top_k_values, top_k_indices = torch.topk(logits, k=k, dim=-1)
-
-    #     # Convert to probabilities
-    #     top_k_probs = F.softmax(top_k_values, dim=-1)
-
-    #     # Calculate entropy of top-k distribution
-    #     eps = 1e-10
-    #     entropy = -torch.sum(top_k_probs * torch.log2(top_k_probs + eps), dim=-1)
-
-    #     # Maximum possible entropy for k tokens is log2(k)
-    #     max_entropy = torch.log2(torch.tensor(k, dtype=torch.float, device=logits.device))
-
-    #     # Calculate entropy ratio and adaptive temperature
-    #     entropy_ratio = entropy / max_entropy
-    #     target_ratio = torch.tensor(min_entropy_ratio, device=logits.device)
-
-    #     # Derive temperature to achieve target entropy ratio
-    #     adaptive_temp = torch.clamp(
-    #         target_ratio / torch.clamp(entropy_ratio, min=1e-5),
-    #         min=1.0,  # Never shrink the distribution
-    #         max=20.0,  # Reasonable upper limit for temperature
-    #     )
-
-    #     # Apply temperature scaling to top-k logits
-    #     scaled_logits = top_k_values / adaptive_temp.unsqueeze(-1)
-
-    #     # Sample from adjusted distribution
-    #     scaled_probs = F.softmax(scaled_logits, dim=-1)
-    #     sampled_indices = torch.multinomial(scaled_probs, num_samples=1)
-
-    #     # Map back to original token indices
-    #     next_tokens = torch.gather(top_k_indices, dim=1, index=sampled_indices).squeeze(-1)
-
-    #     return next_tokens
-
-    def _inverted_top_k_sampling(self, logits: torch.Tensor, top_k: int = 50, explore_beta: float = 0.7) -> torch.Tensor:
+    def _entropy_adaptive_top_k_sampling(
+        self, logits: torch.Tensor, top_k: int = 50, min_entropy_ratio: float = 0.3
+    ) -> torch.Tensor:
         """
-        Top-k sampling with inverted probability distribution to promote diversity.
+        Entropy-adaptive sampling limited to top-k tokens.
 
         Args:
             logits: Original logits [batch_size, vocab_size]
             top_k: Number of top tokens to consider
-            explore_beta: Controls how much to favor less likely tokens (0.0 to 1.0)
-                            0.0 = original distribution, 1.0 = fully inverted distribution
+            min_entropy_ratio: Target minimum entropy as ratio of maximum possible top-k entropy
 
         Returns:
             Sampled token indices
         """
-        assert top_k > 1
-        assert 0.0 <= explore_beta <= 1.0
         batch_size, vocab_size = logits.shape
         k = min(top_k, vocab_size)
 
@@ -142,15 +88,30 @@ class CustomLLMGenerator:
         # Convert to probabilities
         top_k_probs = F.softmax(top_k_values, dim=-1)
 
-        # Invert the probabilities
-        inverted_probs = 1.0 - top_k_probs
-        final_probs = (1.0 - explore_beta) * top_k_probs + explore_beta * inverted_probs
+        # Calculate entropy of top-k distribution
+        eps = 1e-10
+        entropy = -torch.sum(top_k_probs * torch.log2(top_k_probs + eps), dim=-1)
 
-        # Ensure probabilities sum to 1
-        final_probs = final_probs / (torch.sum(final_probs, dim=-1, keepdim=True) + 1e-8)
+        # Maximum possible entropy for k tokens is log2(k)
+        max_entropy = torch.log2(torch.tensor(k, dtype=torch.float, device=logits.device))
 
-        # Sample from inverted distribution
-        sampled_indices = torch.multinomial(final_probs, num_samples=1)
+        # Calculate entropy ratio and adaptive temperature
+        entropy_ratio = entropy / max_entropy
+        target_ratio = torch.tensor(min_entropy_ratio, device=logits.device)
+
+        # Derive temperature to achieve target entropy ratio
+        adaptive_temp = torch.clamp(
+            target_ratio / torch.clamp(entropy_ratio, min=1e-5),
+            min=1.0,  # Never shrink the distribution
+            max=20.0,  # Reasonable upper limit for temperature
+        )
+
+        # Apply temperature scaling to top-k logits
+        scaled_logits = top_k_values / adaptive_temp.unsqueeze(-1)
+
+        # Sample from adjusted distribution
+        scaled_probs = F.softmax(scaled_logits, dim=-1)
+        sampled_indices = torch.multinomial(scaled_probs, num_samples=1)
 
         # Map back to original token indices
         next_tokens = torch.gather(top_k_indices, dim=1, index=sampled_indices).squeeze(-1)
@@ -165,7 +126,7 @@ class CustomLLMGenerator:
         top_k: int,
         do_exploration: bool = False,
         explore_top_k: int = 0,
-        explore_beta: float = 0.0,
+        explore_entropy_ratio: float = 0.0,
     ) -> torch.Tensor:
         """
         Sample the next token from the logits using temperature scaling, top-k filtering,
@@ -178,7 +139,7 @@ class CustomLLMGenerator:
             top_k (int): The number of top-k candidates to consider for sampling.
             do_exploration (bool, optional): Whether to perform exploration (default: False).
             explore_top_k (int, optional): The number of top-k candidates to explore when exploration is enabled.
-            explore_beta (float, optional): Inverted probability weight (default: 0.0).
+            explore_entropy_ratio (float, optional): Target minimum entropy as ratio of maximum possible top-k entropy (default: 0.0).
 
         Returns:
             torch.Tensor: The sampled token IDs for the next step in the sequence.
@@ -195,7 +156,9 @@ class CustomLLMGenerator:
 
         if do_exploration:
             # Use entropy-adaptive sampling with a single parameter
-            next_tokens = self._inverted_top_k_sampling(token_logits, top_k=explore_top_k, explore_beta=explore_beta)
+            next_tokens = self._entropy_adaptive_top_k_sampling(
+                token_logits, top_k=explore_top_k, min_entropy_ratio=explore_entropy_ratio
+            )
         else:
             # Pre-scale logits with temperature (avoid division by zero)
             scaled_logits = torch.where(
@@ -250,7 +213,7 @@ class CustomLLMGenerator:
         max_new_tokens: int = 50,
         explore_start_steps: int = 0,
         explore_top_k: int = 100,
-        explore_beta: float = 0.5,
+        explore_entropy_ratio: float = 0.1,
         explore_skip_n: int = 3,
         **kwargs,
     ) -> GenerateDecoderOnlyOutput:
@@ -269,8 +232,8 @@ class CustomLLMGenerator:
             max_new_tokens (int, optional): The maximum number of new tokens to generate (default: 50).
             explore_start_steps (int, optional): Number of initial steps to perform exploration (default: 0).
             explore_top_k (int, optional): Number of top-k candidates to consider during exploration (default: 50).
-            explore_beta (float, optional): Inverted probability weight (default: 0.5).
-            explore_skip_n (int, optional): Skip explore on the first N token, for example in R1 style the first might be `<think>` token.
+            explore_entropy_ratio (float, optional): Target minimum entropy as ratio of maximum possible top-k entropy (default: 0.1).
+            explore_skip_first (int, optional): Skip explore on the first N token, for example in R1 style the first might be `<think>` token.
             **kwargs: Additional keyword arguments for model inference (unused here).
 
         Returns:
@@ -317,7 +280,7 @@ class CustomLLMGenerator:
                 top_k=top_k,
                 do_exploration=do_exploration,
                 explore_top_k=explore_top_k,
-                explore_beta=explore_beta,
+                explore_entropy_ratio=explore_entropy_ratio,
             )
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(
@@ -384,7 +347,7 @@ if __name__ == '__main__':
         top_k=50,
         explore_start_steps=50,
         explore_top_k=100,
-        explore_beta=0.4,
+        explore_entropy_ratio=0.4,
     )
 
     # Decode the output tokens back to text

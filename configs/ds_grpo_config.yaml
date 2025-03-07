@@ -30,11 +30,9 @@ grpo_config:
   sync_reference_interval: 120        # every N iteration
 
   # for sample generation
-  max_prompt_length: 500              # skip sample question that's too long
+  max_prompt_length: 1000              # skip sample question that's too long
+  group_size: 8                      # for each sample we generate a group of answers
   xml_format: true                   # check for R1 style XML format
-  # system_prompt: |
-  #   A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
-  #   The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
   system_prompt: |
     A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
     The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
@@ -42,17 +40,18 @@ grpo_config:
     <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
     <answer> answer here </answer>.
   max_new_tokens: 3500
-  temperature: 0.6
-  group_size: 8                      # for each sample we generate a group of answers
-  # # # group temperature where some are more 'exploitive'
-  # group_temperature: true
-  # # random start exploration
-  # explore_init_epsilon: 0.9
-  # explore_min_epsilon: 0.1
+  temperature: 0.7
+  repetition_penalty: 1.0
+  top_p: 0.95
+  top_k: 50
+  
+  # group_temperature: true           # group temperature where some are more 'exploitive'
+  # explore_init_epsilon: 0.9         # random start exploration
+  # explore_min_epsilon: 0.05
   # explore_decay_steps: 100
-  # explore_start_ratio: 0.1
-  # explore_top_k: 200
-  # explore_entropy_ratio: 0.25             
+  # explore_start_ratio: 0.1          # how many initial start steps to do explorations
+  # explore_top_k: 500                # Top K tokens to explore
+  # explore_beta: 0.7                 # inverted probability weight          
 
   # evaluation
   eval_batch_size: 32

@@ -34,10 +34,8 @@ grpo_config:
 
   # for sample generation
   max_prompt_length: 500              # skip sample question that's too long
+  group_size: 16                      # for each sample we generate a group of answers
   xml_format: true                   # check for R1 style XML format
-  # system_prompt: |
-  #   A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
-  #   The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
   system_prompt: |
     A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
     The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
@@ -46,16 +44,17 @@ grpo_config:
     <answer> answer here </answer>.
   max_new_tokens: 1500
   temperature: 0.7
-  group_size: 16                      # for each sample we generate a group of answers
-  # group temperature where some are more 'exploitive'
-  # group_temperature: true
-  # random start exploration
-  # explore_init_epsilon: 0.9
+  repetition_penalty: 1.0
+  top_p: 0.95
+  top_k: 50
+  
+  # group_temperature: true           # group temperature where some are more 'exploitive'
+  # explore_init_epsilon: 0.9         # random start exploration
   # explore_min_epsilon: 0.05
   # explore_decay_steps: 100
   # explore_start_ratio: 0.1          # how many initial start steps to do explorations
   # explore_top_k: 500                # Top K tokens to explore
-  # explore_entropy_ratio: 0.2        # minimum entropy ratio during exploration
+  # explore_beta: 0.7                 # inverted probability weight    
 
   # evaluation
   eval_batch_size: 32
