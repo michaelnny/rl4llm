@@ -65,59 +65,6 @@ class CustomLLMGenerator:
 
         return input_ids, attention_mask, unfinished_sequences
 
-    # def _entropy_adaptive_top_k_sampling(
-    #     self, logits: torch.Tensor, top_k: int = 50, min_entropy_ratio: float = 0.3
-    # ) -> torch.Tensor:
-    #     """
-    #     Entropy-adaptive sampling limited to top-k tokens.
-
-    #     Args:
-    #         logits: Original logits [batch_size, vocab_size]
-    #         top_k: Number of top tokens to consider
-    #         min_entropy_ratio: Target minimum entropy as ratio of maximum possible top-k entropy
-
-    #     Returns:
-    #         Sampled token indices
-    #     """
-    #     batch_size, vocab_size = logits.shape
-    #     k = min(top_k, vocab_size)
-
-    #     # Get top-k values and indices
-    #     top_k_values, top_k_indices = torch.topk(logits, k=k, dim=-1)
-
-    #     # Convert to probabilities
-    #     top_k_probs = F.softmax(top_k_values, dim=-1)
-
-    #     # Calculate entropy of top-k distribution
-    #     eps = 1e-10
-    #     entropy = -torch.sum(top_k_probs * torch.log2(top_k_probs + eps), dim=-1)
-
-    #     # Maximum possible entropy for k tokens is log2(k)
-    #     max_entropy = torch.log2(torch.tensor(k, dtype=torch.float, device=logits.device))
-
-    #     # Calculate entropy ratio and adaptive temperature
-    #     entropy_ratio = entropy / max_entropy
-    #     target_ratio = torch.tensor(min_entropy_ratio, device=logits.device)
-
-    #     # Derive temperature to achieve target entropy ratio
-    #     adaptive_temp = torch.clamp(
-    #         target_ratio / torch.clamp(entropy_ratio, min=1e-5),
-    #         min=1.0,  # Never shrink the distribution
-    #         max=20.0,  # Reasonable upper limit for temperature
-    #     )
-
-    #     # Apply temperature scaling to top-k logits
-    #     scaled_logits = top_k_values / adaptive_temp.unsqueeze(-1)
-
-    #     # Sample from adjusted distribution
-    #     scaled_probs = F.softmax(scaled_logits, dim=-1)
-    #     sampled_indices = torch.multinomial(scaled_probs, num_samples=1)
-
-    #     # Map back to original token indices
-    #     next_tokens = torch.gather(top_k_indices, dim=1, index=sampled_indices).squeeze(-1)
-
-    #     return next_tokens
-
     def _inverted_top_k_sampling(self, logits: torch.Tensor, top_k: int = 50, explore_beta: float = 0.7) -> torch.Tensor:
         """
         Top-k sampling with inverted probability distribution to promote diversity.

@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/grpo_qwen2.5_1.5b_gsm1k"
+  artifacts_path: "./runs/explore_grpo_qwen2.5_1.5b_gsm1k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -43,10 +43,18 @@ grpo_config:
     <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
     <answer> answer here </answer>.
   max_new_tokens: 1500
-  temperature: 0.7
+  temperature: 0.9
   repetition_penalty: 1.0
   top_p: 0.95
-  top_k: 50 
+  top_k: 50
+  
+  group_temperature: true           # group temperature where some are more 'exploitive'
+  explore_init_epsilon: 0.9         # random start exploration
+  explore_min_epsilon: 0.0
+  explore_decay_steps: 100
+  explore_start_ratio: 0.1          # how many initial start steps to do explorations
+  explore_top_k: 100                # Top K tokens to explore
+  explore_beta: 0.7                 # inverted probability weight    
 
   # evaluation
   eval_batch_size: 32

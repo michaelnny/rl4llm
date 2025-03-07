@@ -261,7 +261,7 @@ class BaseGRPOTrainer(ABC):
                 # this idea is similar how we do it in distributed RL training in classical RL
                 # where we have multiple agents running in parallel, some agents are more exploratory than others
                 temperature = torch.linspace(
-                    0.3, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
+                    0.1, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
                 )
                 # over written to use group temperatures
                 generation_kwargs['temperature'] = temperature
