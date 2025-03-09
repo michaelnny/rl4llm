@@ -55,7 +55,26 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self.optimizer = optimizer
         self.scheduler = scheduler
-        self.llm_generator = CustomLLMGenerator(self.policy_model)
+
+        # Try replacing the end token with "Wait" for some samples
+        target_token = self.tokenizer.encode(' Wait')[0]
+        special_tokens = []
+        # Determine which tokens should be replaced based on format
+        if self.config.xml_format:
+            special_tokens.extend([self.tokenizer.encode('</think>')[0], self.tokenizer.encode(' </think>')[0]])
+        else:
+            special_tokens.append(self.eos_token_id)
+
+        # we should only make the replacement for reasoning tokens
+        prevent_patterns = [
+            self.tokenizer.encode('</think>'),
+            self.tokenizer.encode(' </think>'),
+            self.tokenizer.encode('<answer>'),
+        ]
+
+        self.llm_generator = CustomLLMGenerator(
+            model=self.policy_model, source_tokens=special_tokens, target_token=target_token, special_patterns=prevent_patterns
+        )
 
         self.logger.info('Preprocessing datasets...')
         self.train_ds = self.preprocess_dataset(train_ds)
@@ -87,9 +106,9 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self._metrics.reset()
 
-        if self.iteration_count == 0:
-            # do an initial evaluation before apply any training
-            self._evaluation()
+        # if self.iteration_count == 0:
+        #     # do an initial evaluation before apply any training
+        #     self._evaluation()
 
         with self._metrics.timer('step'):
             samples = self._generate_training_samples()
@@ -292,7 +311,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             save_dir = os.path.join(self._checkpoint_dir, f"iteration_{self.iteration_count}")
             self._save_checkpoint(save_dir)
 
-        if self.iteration_count % self.config.eval_interval == 0:
+        if self.iteration_count % self.config.eval_interval == 0 or self.iteration_count == self.config.max_steps:
             self._evaluation()
 
     def _sync_reference_model(self):

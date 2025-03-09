@@ -1,11 +1,11 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/explore_grpo_qwen2.5_1.5b_gsm1k"
+  artifacts_path: "./runs/explore_grpo_qwen2.5_1.5b_gsm4k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
-  max_train_samples: 1024         # for a quick run
+  max_train_samples: 4096         # for a quick run
   max_test_samples: 512        
 
 model:
@@ -15,7 +15,7 @@ model:
   flash_attention: true
 
 grpo_config:
-  max_steps: 150
+  max_steps: 200
   rollout_size: 512
   num_updates: 1
   batch_size: 4
@@ -42,23 +42,23 @@ grpo_config:
     The reasoning process and answer are enclosed within <think> </think> and
     <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
     <answer> answer here </answer>.
-  max_new_tokens: 1500
+  max_new_tokens: 2000
   temperature: 0.9
   repetition_penalty: 1.0
   top_p: 0.95
-  top_k: 50
+  top_k: 0
   
   group_temperature: true           # group temperature where some are more 'exploitive'
   explore_init_epsilon: 0.9         # random start exploration
   explore_min_epsilon: 0.0
   explore_decay_steps: 100
-  explore_start_ratio: 0.1          # how many initial start steps to do explorations
-  explore_top_k: 100                # Top K tokens to explore
-  explore_beta: 0.7                 # inverted probability weight    
+  explore_start_steps: 2            # rate of initial start steps to do explorations
+  explore_top_k: 20                 # Top K tokens to explore
+  explore_replace_prob: 0.3         # probability to replace end of think token with "Wait"  
 
   # evaluation
   eval_batch_size: 32
-  eval_interval: 30
+  eval_interval: 50
 
   # others
   checkpoint_interval: 100            # every N iteration

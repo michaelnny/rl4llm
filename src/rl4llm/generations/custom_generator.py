@@ -1,5 +1,6 @@
 import logging
-from typing import Dict, Optional, Tuple, Union
+import random
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -12,17 +13,89 @@ logger = logging.getLogger(__name__)
 class CustomLLMGenerator:
     """
     A custom class for text generation using a language model (LLM).
-    It supports batch-specific temperatures and exploration during sampling.
+    Supports batch-specific temperatures, simplified exploration, and special token replacement.
     """
 
-    def __init__(self, model: PreTrainedModel):
+    def __init__(
+        self,
+        model: PreTrainedModel,
+        source_tokens: Optional[List[int]] = None,
+        target_token: Optional[int] = None,
+        special_patterns: Optional[List[List[int]]] = None,
+    ):
         """
         Initialize the CustomLLMGenerator with a pretrained language model.
 
         Args:
             model (PreTrainedModel): A pre-trained transformer-based model for text generation.
+            source_tokens (List[int]): List of token IDs to replace, e.g., "EOS" or "</think>".
+            target_token (int): Token ID to replace source tokens with, e.g., "Wait".
+            special_patterns (List[List[int]]): List of token sequences that, if present, prevent replacement,
+                                               e.g., [[27, 9217, 29]].
         """
         self.model = model
+        self.source_tokens = source_tokens or []
+        self.target_token = target_token
+        self.special_patterns = special_patterns or []
+
+    def _has_pattern(self, input_ids: torch.Tensor, pattern: List[int]) -> torch.Tensor:
+        """
+        Check if the given pattern exists in the input sequences for each batch.
+
+        Args:
+            input_ids (torch.Tensor): Current token IDs of shape [batch_size, seq_len].
+            pattern (List[int]): The pattern to check for, e.g., [27, 9217, 29].
+
+        Returns:
+            torch.Tensor: Boolean tensor of shape [batch_size] indicating if the pattern is present.
+        """
+        batch_size, seq_len = input_ids.shape
+        pattern_tensor = torch.tensor(pattern, device=input_ids.device)
+        pattern_len = pattern_tensor.size(0)
+
+        if seq_len < pattern_len:
+            return torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+
+        # Create sliding windows to check for the pattern
+        windows = torch.as_strided(
+            input_ids,
+            size=(batch_size, seq_len - pattern_len + 1, pattern_len),
+            stride=(input_ids.stride(0), input_ids.stride(1), input_ids.stride(1)),
+        )
+        matches = (windows == pattern_tensor).all(dim=2)
+        return matches.any(dim=1)
+
+    def _replace_special_tokens(
+        self, next_tokens: torch.Tensor, can_replace: torch.Tensor, replace_prob: float = 0.2
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Randomly replace source special tokens with the target token if allowed.
+
+        Args:
+            next_tokens (torch.Tensor): Tokens to potentially replace, shape [batch_size].
+            can_replace (torch.Tensor): Boolean tensor of shape [batch_size] indicating if replacement is allowed.
+            replace_prob (float): Probability of replacement, between 0.0 and 1.0.
+
+        Returns:
+            torch.Tensor: Tokens with some possibly replaced, shape [batch_size].
+            torch.Tensor: The replacement mask.
+        """
+        if not self.source_tokens or not self.target_token or replace_prob <= 0.0:
+            return next_tokens
+
+        batch_size = next_tokens.size(0)
+        device = next_tokens.device
+        modified_tokens = next_tokens.clone()
+
+        # Check if next_tokens are in source_tokens
+        source_tokens_tensor = torch.tensor(self.source_tokens, device=device)
+        mask = (next_tokens.unsqueeze(-1) == source_tokens_tensor).any(dim=-1)
+
+        # Combine conditions: token is a source token, replacement is allowed, and probability check
+        replace_mask = mask & can_replace & (torch.rand(batch_size, device=device) < replace_prob)
+        modified_tokens = torch.where(replace_mask, torch.full_like(next_tokens, self.target_token), modified_tokens)
+
+        return modified_tokens, replace_mask
 
     def _update_sequences(
         self,
@@ -37,23 +110,18 @@ class CustomLLMGenerator:
         Update the input sequences with newly generated tokens and handle finished sequences.
 
         Args:
-            input_ids (torch.Tensor): The current token IDs of the generated sequence.
-            attention_mask (torch.Tensor): The attention mask for the input sequence.
-            next_tokens (torch.Tensor): The newly generated tokens to append to the sequences.
-            unfinished_sequences (torch.Tensor): A tensor indicating whether the sequences are unfinished.
-            eos_token_id (Optional[int]): The token ID representing the end of the sequence (if any).
-            pad_token_id (Optional[int]): The token ID used for padding (if any).
+            input_ids (torch.Tensor): Current token IDs of the generated sequence.
+            attention_mask (torch.Tensor): Attention mask for the input sequence.
+            next_tokens (torch.Tensor): Newly generated tokens to append.
+            unfinished_sequences (torch.Tensor): Tensor indicating unfinished sequences.
+            eos_token_id (Optional[int]): Token ID for end of sequence.
+            pad_token_id (Optional[int]): Token ID for padding.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-                - Updated input_ids (torch.Tensor): The input sequences with the newly appended tokens.
-                - Updated attention_mask (torch.Tensor): The updated attention mask.
-                - Updated unfinished_sequences (torch.Tensor): The tensor indicating unfinished sequences.
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Updated input_ids, attention_mask, unfinished_sequences.
         """
         assert input_ids.dim() == 2
-        assert (
-            next_tokens.dim() == unfinished_sequences.dim() == 1
-        ), f"Invalid shape: {next_tokens.shape}, {unfinished_sequences.shape}"
+        assert next_tokens.dim() == unfinished_sequences.dim() == 1
         assert input_ids.size(0) == next_tokens.size(0) == unfinished_sequences.size(0)
 
         if eos_token_id is not None:
@@ -65,41 +133,24 @@ class CustomLLMGenerator:
 
         return input_ids, attention_mask, unfinished_sequences
 
-    def _inverted_top_k_sampling(self, logits: torch.Tensor, top_k: int = 50, explore_beta: float = 0.7) -> torch.Tensor:
+    def _uniform_top_k_sampling(self, logits: torch.Tensor, top_k: int) -> torch.Tensor:
         """
-        Top-k sampling with inverted probability distribution to promote diversity.
+        Uniformly sample from the top-k tokens.
 
         Args:
-            logits: Original logits [batch_size, vocab_size]
-            top_k: Number of top tokens to consider
-            explore_beta: Controls how much to favor less likely tokens (0.0 to 1.0)
-                            0.0 = original distribution, 1.0 = fully inverted distribution
+            logits (torch.Tensor): Logits of shape [batch_size, vocab_size].
+            top_k (int): Number of top tokens to sample from.
 
         Returns:
-            Sampled token indices
+            torch.Tensor: Sampled token indices of shape [batch_size].
         """
-        assert top_k > 1
-        assert 0.0 <= explore_beta <= 1.0
+        assert top_k > 0
         batch_size, vocab_size = logits.shape
         k = min(top_k, vocab_size)
 
-        # Get top-k values and indices
         top_k_values, top_k_indices = torch.topk(logits, k=k, dim=-1)
-
-        # Convert to probabilities
-        top_k_probs = F.softmax(top_k_values, dim=-1)
-
-        # Invert the probabilities
-        inverted_probs = 1.0 - top_k_probs
-        final_probs = (1.0 - explore_beta) * top_k_probs + explore_beta * inverted_probs
-
-        # Ensure probabilities sum to 1
-        final_probs = final_probs / (torch.sum(final_probs, dim=-1, keepdim=True) + 1e-8)
-
-        # Sample from inverted distribution
-        sampled_indices = torch.multinomial(final_probs, num_samples=1)
-
-        # Map back to original token indices
+        uniform_probs = torch.ones_like(top_k_values) / k
+        sampled_indices = torch.multinomial(uniform_probs, num_samples=1)
         next_tokens = torch.gather(top_k_indices, dim=1, index=sampled_indices).squeeze(-1)
 
         return next_tokens
@@ -112,73 +163,58 @@ class CustomLLMGenerator:
         top_k: int,
         do_exploration: bool = False,
         explore_top_k: int = 0,
-        explore_beta: float = 0.0,
     ) -> torch.Tensor:
         """
-        Sample the next token from the logits using temperature scaling, top-k filtering,
-        and nucleus sampling. Supports exploration with specific parameters.
+        Sample the next token from logits using temperature, top-k, and top-p filtering.
 
         Args:
-            token_logits (torch.Tensor): The logits for the next token to be sampled, shape [batch_size, vocab_size].
-            temperature (torch.Tensor): The temperature for scaling the logits, shape [batch_size].
-            top_p (float): The cumulative probability threshold for nucleus sampling.
-            top_k (int): The number of top-k candidates to consider for sampling.
-            do_exploration (bool, optional): Whether to perform exploration (default: False).
-            explore_top_k (int, optional): The number of top-k candidates to explore when exploration is enabled.
-            explore_beta (float, optional): Inverted probability weight (default: 0.0).
+            token_logits (torch.Tensor): Logits for next token, shape [batch_size, vocab_size].
+            temperature (torch.Tensor): Temperature for scaling, shape [batch_size].
+            top_p (float): Nucleus sampling threshold.
+            top_k (int): Top-k sampling parameter.
+            do_exploration (bool): Whether to perform exploration.
+            explore_top_k (int): Top-k for exploration sampling.
 
         Returns:
-            torch.Tensor: The sampled token IDs for the next step in the sequence.
+            torch.Tensor: Sampled token IDs, shape [batch_size].
         """
         assert token_logits.dim() == 2
         assert token_logits.size(0) == temperature.size(0)
 
         batch_size, vocab_size = token_logits.shape
 
-        # Handle temperature = 0 case (greedy decoding)
+        if do_exploration:
+            return self._uniform_top_k_sampling(token_logits, top_k=min(16, explore_top_k))
+
         zero_temp_mask = temperature == 0
         if zero_temp_mask.all():
             return token_logits.argmax(dim=-1)
 
-        if do_exploration:
-            # Use entropy-adaptive sampling with a single parameter
-            next_tokens = self._inverted_top_k_sampling(token_logits, top_k=explore_top_k, explore_beta=explore_beta)
-        else:
-            # Pre-scale logits with temperature (avoid division by zero)
-            scaled_logits = torch.where(
-                temperature.unsqueeze(1) > 0, token_logits / temperature.unsqueeze(1).clamp(min=1e-8), token_logits
-            )
+        scaled_logits = torch.where(
+            temperature.unsqueeze(1) > 0, token_logits / temperature.unsqueeze(1).clamp(min=1e-8), token_logits
+        )
 
-            # Standard sampling with top-k and top-p filtering
-            if top_k is not None and top_k > 0:
-                k = min(top_k, vocab_size)
-                top_k_values, top_k_indices = torch.topk(scaled_logits, k=k, dim=-1)
-                scaled_logits = torch.full_like(scaled_logits, float('-inf'))
-                scaled_logits.scatter_(dim=-1, index=top_k_indices, src=top_k_values)
+        if top_k > 0:
+            k = min(top_k, vocab_size)
+            top_k_values, top_k_indices = torch.topk(scaled_logits, k=k, dim=-1)
+            scaled_logits = torch.full_like(scaled_logits, float('-inf'))
+            scaled_logits.scatter_(dim=-1, index=top_k_indices, src=top_k_values)
 
-            if top_p is not None and (top_p > 0 and top_p < 1.0):
-                # Vectorized nucleus sampling
-                sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True, dim=-1)
-                probs = F.softmax(sorted_logits, dim=-1)
-                cumulative_probs = torch.cumsum(probs, dim=-1)
+        if 0 < top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(scaled_logits, descending=True, dim=-1)
+            probs = F.softmax(sorted_logits, dim=-1)
+            cumulative_probs = torch.cumsum(probs, dim=-1)
+            mask = cumulative_probs <= top_p
+            mask = torch.cat([torch.ones_like(mask[:, :1], dtype=torch.bool), mask[:, 1:]], dim=1)
+            sorted_logits = torch.where(mask, sorted_logits, torch.full_like(sorted_logits, float('-inf')))
+            scaled_logits = torch.full_like(scaled_logits, float('-inf'))
+            scaled_logits.scatter_(dim=-1, index=sorted_indices, src=sorted_logits)
 
-                # Mask tokens exceeding top_p
-                mask = cumulative_probs <= top_p
-                mask = mask | (cumulative_probs == probs)  # Keep at least one token
-                sorted_logits = sorted_logits.masked_fill(~mask, float('-inf'))
+        probs = F.softmax(scaled_logits, dim=-1)
+        next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-                # Reconstruct filtered logits in original order
-                scaled_logits = torch.full_like(scaled_logits, float('-inf'))
-                scaled_logits.scatter_(dim=-1, index=sorted_indices, src=sorted_logits)
-
-            # Sample from the filtered distribution
-            probs = F.softmax(scaled_logits, dim=-1)
-            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
-
-        # Replace tokens for temperature=0 cases
         if zero_temp_mask.any():
             greedy_tokens = token_logits.argmax(dim=-1)
-            assert greedy_tokens.shape == next_tokens.shape == zero_temp_mask.shape
             next_tokens = torch.where(zero_temp_mask, greedy_tokens, next_tokens)
 
         assert next_tokens.dim() == 1 and next_tokens.size(0) == token_logits.size(0)
@@ -196,40 +232,41 @@ class CustomLLMGenerator:
         top_k: int = 0,
         max_new_tokens: int = 50,
         explore_start_steps: int = 0,
+        explore_skip_n: int = 0,
         explore_top_k: int = 100,
-        explore_beta: float = 0.5,
-        explore_skip_n: int = 3,
+        explore_replace_prob: float = 0.0,
         **kwargs,
     ) -> GenerateDecoderOnlyOutput:
         """
-        Generate text using a transformer model with customizable sampling techniques.
-        Supports batch-specific temperature, exploration, top-k sampling, and nucleus sampling.
+        Generate text with customizable sampling, exploration, and special token replacement.
 
         Args:
-            input_ids (torch.Tensor): The initial token IDs for the sequence generation.
-            attention_mask (torch.Tensor): The attention mask for the input tokens.
-            temperature (Union[torch.Tensor, float]): Temperature scaling for logits. Can be scalar or per-batch.
-            pad_token_id (int): The token ID used for padding in the generated sequences.
-            eos_token_id (int): The token ID representing the end of sequence.
-            top_p (float, optional): Probability threshold for nucleus sampling (default: 1.0).
-            top_k (int, optional): Number of top-k candidates to sample from (default: 50).
-            max_new_tokens (int, optional): The maximum number of new tokens to generate (default: 50).
-            explore_start_steps (int, optional): Number of initial steps to perform exploration (default: 0).
-            explore_top_k (int, optional): Number of top-k candidates to consider during exploration (default: 50).
-            explore_beta (float, optional): Inverted probability weight (default: 0.5).
-            explore_skip_n (int, optional): Skip explore on the first N token, for example in R1 style the first might be `<think>` token.
-            **kwargs: Additional keyword arguments for model inference (unused here).
+            input_ids (torch.Tensor): Initial token IDs, shape [batch_size, seq_len].
+            attention_mask (torch.Tensor): Attention mask, shape [batch_size, seq_len].
+            temperature (Union[torch.Tensor, float]): Temperature for sampling.
+            pad_token_id (int): Token ID for padding.
+            eos_token_id (int): Token ID for end of sequence.
+            top_p (float): Nucleus sampling threshold (default: 1.0).
+            top_k (int): Top-k sampling parameter (default: 0).
+            max_new_tokens (int): Max new tokens to generate (default: 50).
+            explore_start_steps (int): Steps for exploration (default: 0).
+            explore_skip_n (int): Steps to skip exploration (default: 0).
+            explore_top_k (int): Top-k for exploration (default: 100).
+            explore_replace_prob (float): Probability of token replacement (default: 0.0).
+            **kwargs: Additional arguments (unused).
 
         Returns:
-            GenerateDecoderOnlyOutput: The generated sequences as a `GenerateDecoderOnlyOutput` object, containing the
-            generated token IDs.
+            GenerateDecoderOnlyOutput: Generated sequences.
         """
         batch_size = input_ids.shape[0]
-        generated_tokens = 0  # Track only the new tokens generated
+        initial_seq_len = input_ids.size(1)
+        generated_tokens = 0
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
+        has_replaced = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
         past_key_values = None
+        current_explore_top_k = explore_top_k
 
-        # Normalize temperature to a tensor of shape (batch_size,)
+        # Normalize temperature
         if isinstance(temperature, (float, int)):
             temperature = torch.full((batch_size,), float(temperature), device=input_ids.device)
         elif isinstance(temperature, list):
@@ -237,24 +274,24 @@ class CustomLLMGenerator:
         else:
             temperature = temperature.to(input_ids.device)
 
-        assert temperature.size(0) == input_ids.size(0)
-
         while generated_tokens < max_new_tokens:
-            # Get next token logits
             outputs = self.model(
                 input_ids=input_ids if past_key_values is None else input_ids[:, -1:],
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=True,
             )
-
             next_token_logits = outputs.logits[:, -1, :].float()
             past_key_values = outputs.past_key_values
 
-            # Determine if we should do exploration
-            do_exploration = explore_start_steps > 0 and generated_tokens < explore_start_steps
-            if explore_skip_n and generated_tokens < explore_skip_n:  # skip explore on the <think> token
+            # Exploration logic
+            do_exploration = explore_start_steps > 0 and (generated_tokens - explore_skip_n) < explore_start_steps
+            if explore_skip_n and generated_tokens < explore_skip_n:
                 do_exploration = False
+
+            if do_exploration:
+                effective_steps = max(0, generated_tokens - explore_skip_n)
+                current_explore_top_k = max(10, explore_top_k - effective_steps * 10)
 
             # Sample next tokens
             next_tokens = self._sample_next_batch_tokens(
@@ -263,9 +300,27 @@ class CustomLLMGenerator:
                 top_p=top_p,
                 top_k=top_k,
                 do_exploration=do_exploration,
-                explore_top_k=explore_top_k,
-                explore_beta=explore_beta,
+                explore_top_k=current_explore_top_k,
             )
+
+            # Handle special token replacement, example: '</think>' to "Wait "
+            if explore_replace_prob > 0:
+                # Check for special patterns and determine if replacement is allowed
+                if self.special_patterns:
+                    generated_ids = input_ids[:, initial_seq_len:]
+                    pattern_found = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+                    for pattern in self.special_patterns:
+                        pattern_found |= self._has_pattern(generated_ids, pattern)
+                    can_replace = ~pattern_found
+                else:
+                    can_replace = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
+                # Only allow replacement if no replacement has been made yet
+                can_replace = can_replace & ~has_replaced
+
+                next_tokens, replace_mask = self._replace_special_tokens(next_tokens, can_replace, explore_replace_prob)
+                # Update the replacement status for sequences where replacement occurred
+                has_replaced |= replace_mask
+
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(
                 input_ids,
@@ -331,7 +386,7 @@ if __name__ == '__main__':
         top_k=50,
         explore_start_steps=50,
         explore_top_k=100,
-        explore_beta=0.4,
+        explore_replace_prob=0.4,
     )
 
     # Decode the output tokens back to text

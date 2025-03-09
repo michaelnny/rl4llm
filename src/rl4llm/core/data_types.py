@@ -27,10 +27,10 @@ class GRPOConfig(BaseModel):
     explore_init_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Initial exploration epsilon')
     explore_min_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Minimum exploration epsilon after decay')
     explore_decay_steps: Optional[int] = Field(0, ge=0, le=1000000, description='Exploration epsilon decay steps')
-    explore_start_ratio: Optional[float] = Field(0, ge=0, le=1.0, description='Ratio of random start steps to do exploration')
-    explore_top_k: Optional[int] = Field(100, ge=10, le=2000, description='Unified top-k for both exploration')
-    explore_beta: Optional[float] = Field(
-        0.5, ge=0.0, le=1.0, description='Controls how much to favor less likely tokens (0.0 to 1.0), 1.0 = fully inverted distribution'
+    explore_start_steps: Optional[int] = Field(0, ge=0, le=30, description='Random start steps to do exploration')
+    explore_top_k: Optional[int] = Field(50, ge=10, le=500, description='Unified top-k for both exploration')
+    explore_replace_prob: Optional[float] = Field(
+        0.4, ge=0.0, le=1.0, description='Probabilities to replace end token with "Wait" during exploration'
     )
 
     """For RL GRPO training"""

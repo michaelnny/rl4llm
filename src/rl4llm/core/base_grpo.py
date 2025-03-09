@@ -85,9 +85,6 @@ class BaseGRPOTrainer(ABC):
         # For custom exploring start where we skip do exploration for the <think> token
         self.think_token_len = len(self.tokenizer.encode('<think>')) if self.config.xml_format else 0
 
-        # For moving average of completion lengths
-        self._completion_lengths = deque(maxlen=1000)
-
         self._initialize()
 
     def _initialize(self):
@@ -233,7 +230,7 @@ class BaseGRPOTrainer(ABC):
         use_custom_generator = (
             generator is not None
             and hasattr(generator, 'generate')
-            and (self.config.group_temperature or self.config.explore_start_ratio > 0)
+            and (self.config.group_temperature or self.config.explore_start_steps > 0)
         )
         if not use_custom_generator:
             generator = policy_model
@@ -261,21 +258,24 @@ class BaseGRPOTrainer(ABC):
                 # this idea is similar how we do it in distributed RL training in classical RL
                 # where we have multiple agents running in parallel, some agents are more exploratory than others
                 temperature = torch.linspace(
-                    0.1, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
+                    0.3, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
                 )
-                # over written to use group temperatures
+
+                # Round to 2 decimal places
+                temperature = torch.round(temperature, decimals=2)
+
                 generation_kwargs['temperature'] = temperature
 
             explore_epsilon = self._get_exploration_epsilon()
             enable_exploration = (
-                (self.config.explore_start_ratio > 0) and (explore_epsilon > 0) and (random.random() < explore_epsilon)
+                (self.config.explore_start_steps > 0) and (explore_epsilon > 0) and (random.random() < explore_epsilon)
             )
 
             # add random start exploration params
             if enable_exploration:
-                generation_kwargs['explore_start_steps'] = self._get_explore_start_steps()
+                generation_kwargs['explore_start_steps'] = self.config.explore_start_steps
                 generation_kwargs['explore_top_k'] = self.config.explore_top_k
-                generation_kwargs['explore_beta'] = self.config.explore_beta
+                generation_kwargs['explore_replace_prob'] = self.config.explore_replace_prob
                 generation_kwargs['explore_skip_n'] = self.think_token_len
 
         outputs = generator.generate(**generation_kwargs)
@@ -524,9 +524,6 @@ class BaseGRPOTrainer(ABC):
 
         completion_lengths = outputs['completion_lengths']
 
-        # Store historical completion lengths
-        self._completion_lengths.append(completion_lengths.float().mean().item())
-
         # Training specific processing
         total_rewards = outputs['total_rewards']
         normalized_rewards = (
@@ -699,7 +696,7 @@ class BaseGRPOTrainer(ABC):
         assert input_ids.shape == actions.shape
 
         attention_mask = (input_ids != self.pad_token_id).bool()
-        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.float()
+        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
         # this runs into CUDA OOM
         # logprobs = torch.log_softmax(logits, dim=-1)
         # return torch.gather(logprobs, dim=2, index=actions.unsqueeze(2)).squeeze(2)
@@ -710,7 +707,7 @@ class BaseGRPOTrainer(ABC):
 
         for i in range(batch_size):
             # Process single sample
-            sample_logits = logits[i, ...]
+            sample_logits = logits[i, ...].float()
             sample_logprobs_all = torch.log_softmax(sample_logits, dim=-1)
             sample_actions = actions[i, ...].unsqueeze(1)
             sample_logprob = torch.gather(sample_logprobs_all, dim=1, index=sample_actions).squeeze(1)
@@ -779,38 +776,6 @@ class BaseGRPOTrainer(ABC):
             loss = pg_loss
 
         return loss, metrics
-
-    def _get_average_completion_length(self, window_size: int = 10) -> int:
-        """Compute the moving average of completion lengths.
-
-        Returns:
-            float: Moving average length, defaulting to 200.0 if no data.
-        """
-        if len(self._completion_lengths) < 10:
-            return 300.0
-
-        values = np.array(list(self._completion_lengths))
-
-        # Calculate moving average using numpy's convolve
-        weights = np.ones(window_size) / window_size
-        moving_averages = np.convolve(values, weights, mode='valid')
-
-        # Get the last moving average value
-        last_ma_value = moving_averages[-1]
-        return last_ma_value
-
-    def _get_explore_start_steps(self) -> int:
-        """Compute exploration start steps based on moving average length.
-
-        Returns:
-            int: Number of steps to start exploration.
-        """
-        moving_average_length = self._get_average_completion_length()
-        start_size = max(int(moving_average_length * 0.5), 1)
-        end_size = max(int(moving_average_length), 1)
-        if end_size == start_size:
-            end_size += 1
-        return random.randint(start_size, end_size)
 
     def _create_reference_model(self, policy_model: PreTrainedModel) -> PreTrainedModel:
         """Create a reference model from the policy model"""
@@ -889,6 +854,7 @@ class BaseGRPOTrainer(ABC):
         prompt_lengths: torch.Tensor,
         completion_lengths: torch.Tensor,
         completion_texts: List[str],
+        **kwargs,
     ) -> None:
         """Log sample metrics to tensorboard and metrics collector."""
         phase = 'training' if is_training else 'evaluation'
@@ -910,6 +876,7 @@ class BaseGRPOTrainer(ABC):
         handler = self._train_sample_handler if is_training else self._eval_sample_handler
         tb_tag = f'{phase}_samples'
         tb_indices = random.sample(range(len(completion_texts)), k=1) if random.random() > 0.5 else []
+        # tb_indices = random.sample(range(len(completion_texts)), k=len(completion_texts))
 
         for idx in range(len(completion_texts)):
             sample = SampleLog(

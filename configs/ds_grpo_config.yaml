@@ -49,9 +49,9 @@ grpo_config:
   # explore_init_epsilon: 0.9         # random start exploration
   # explore_min_epsilon: 0.05
   # explore_decay_steps: 100
-  # explore_start_ratio: 0.1          # how many initial start steps to do explorations
+  # explore_start_steps: 0.1          # how many initial start steps to do explorations
   # explore_top_k: 500                # Top K tokens to explore
-  # explore_beta: 0.7                 # inverted probability weight          
+  # explore_replace_prob: 0.7                 # inverted probability weight          
 
   # evaluation
   eval_batch_size: 32
