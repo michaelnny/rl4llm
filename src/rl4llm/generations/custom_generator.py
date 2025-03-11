@@ -1,6 +1,6 @@
 import logging
 import random
-from typing import Dict, List, Optional, Tuple, Union, Callable
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -275,7 +275,7 @@ class CustomLLMGenerator:
         generated_tokens = 0
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         replacement_counts = torch.zeros(batch_size, dtype=torch.long, device=input_ids.device)
-    
+
         past_key_values = None
         current_explore_top_k = explore_top_k
 
@@ -328,24 +328,25 @@ class CustomLLMGenerator:
                     can_replace = ~pattern_found
                 else:
                     can_replace = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
-                
+
                 # Only allow replacement if under the maximum count
                 can_replace = can_replace & (replacement_counts < explore_max_replacements)
 
                 # Check for correctness
                 if correctness_callback is not None:
-                    quality_scores = torch.zeros(batch_size, device=input_ids.device)
+                    incorrect_mask = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
                     for i, (seq, replace) in enumerate(zip(generated_ids, can_replace)):
                         if replace:
                             text = self.tokenizer.decode(seq, skip_special_tokens=True)
-                            quality_scores[i] = float(correctness_callback(text))
+                            incorrect_mask[i] = float(correctness_callback(text)) == 0.0
 
                     # Only replace for incorrect ones
-                    can_replace = can_replace & (quality_scores < 0.5)
+                    can_replace = can_replace & incorrect_mask
 
-                next_tokens, replace_mask = self._replace_special_tokens(next_tokens, can_replace, explore_replace_prob)
-                # Increment the replacement counter for sequences where replacement occurred
-                replacement_counts += replace_mask.long()
+                if can_replace.sum() > 0:
+                    next_tokens, replace_mask = self._replace_special_tokens(next_tokens, can_replace, explore_replace_prob)
+                    # Increment the replacement counter for sequences where replacement occurred
+                    replacement_counts += replace_mask.long()
 
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(

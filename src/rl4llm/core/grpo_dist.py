@@ -23,7 +23,6 @@ from .data_types import GRPOConfig, GRPOSample
 logger = logging.getLogger(__name__)
 
 
-# TODO consider adapting to support deepspeed zero-3
 class GRPOTrainer(BaseGRPOTrainer):
     """RL GRPO for training LLMs on multiple GPUs using deepspeed.
 
@@ -65,7 +64,32 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.reference_model: PreTrainedModel = (
             self._create_reference_model(self.policy_model) if self.config.kl_loss_coef > 0 else None
         )
-        self.llm_generator = CustomLLMGenerator(self.policy_model)
+
+        # Try replacing the end token with "Wait" for some samples
+        source_tokens = []
+        # Determine which tokens should be replaced based on format
+        if self.config.xml_format:
+            source_tokens.append(self.tokenizer.encode('</think>')[0])
+            source_tokens.append(self.tokenizer.encode(' </think>')[0])
+        else:
+            source_tokens.append(self.eos_token_id)
+
+        target_tokens = [self.tokenizer.encode(' Wait')[0], self.tokenizer.encode(' Hmm')[0]]
+
+        # we should only make the replacement for reasoning tokens
+        prevent_patterns = [
+            self.tokenizer.encode('</think>'),
+            self.tokenizer.encode(' </think>'),
+            self.tokenizer.encode('<answer>'),
+        ]
+
+        self.llm_generator = CustomLLMGenerator(
+            model=self.policy_model,
+            tokenizer=self.tokenizer,
+            source_tokens=source_tokens,
+            target_tokens=target_tokens,
+            prevent_patterns=prevent_patterns,
+        )
 
         self.logger.info('Preprocessing datasets...')
         self.train_ds = self.preprocess_dataset(train_ds)
@@ -165,7 +189,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def _train_policy(self, train_samples: List[GRPOSample]) -> None:
         """Train the policy model using the collected samples."""
-
+        random.shuffle(train_samples)
         data_loader = DataLoader(
             train_samples,
             batch_size=self.config.batch_size,
@@ -305,7 +329,7 @@ class GRPOTrainer(BaseGRPOTrainer):
                 self._save_checkpoint(save_dir)
             dist.barrier()
 
-        if self.iteration_count % self.config.eval_interval == 0 or self.iteration_count == self.config.max_steps:
+        if self.iteration_count % self.config.eval_interval == 0 or (self.iteration_count + 1) == self.config.max_steps:
             self._evaluation()
 
     def _sync_reference_model(self):

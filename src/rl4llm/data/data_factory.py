@@ -6,11 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 from datasets import Dataset, concatenate_datasets, load_dataset
 
-from rl4llm.utils import (
-    is_texts_similar,
-    load_from_jsonl_file,
-    save_to_jsonl_file,
-)
+from rl4llm.utils import is_texts_similar, load_from_jsonl_file, save_to_jsonl_file
 
 logger = logging.getLogger()
 
@@ -249,6 +245,7 @@ def load_math_dataset(
         return item['level'] >= 3
 
     train_ds = train_ds.map(extract_math_ground_truth)
+    train_ds = train_ds.filter(check_skip_math_sample)
     train_ds = train_ds.filter(skip_easy_samples)
 
     test_ds = test_ds.map(extract_math_ground_truth)
@@ -296,7 +293,7 @@ def load_math_dataset(
 #         }
 
 #     ds = ds.map(extract_math_ground_truth)
-#     ds = ds.filter(is_valid_math_sample)
+#     ds = ds.filter(check_skip_math_sample)
 
 #     # Select only the columns you want in the final dataset
 #     columns_to_keep = ['question', 'level', 'type', 'ground_truth', 'task_type']
@@ -375,7 +372,7 @@ def load_processed_local_dataset(train_out_path: str, test_out_path: str) -> Tup
     return train_dataset, test_dataset
 
 
-def is_valid_math_sample(sample: Dict) -> bool:
+def check_skip_math_sample(sample: Dict) -> bool:
     """Some math samples are not suitable for training."""
     if not sample:
         return False
@@ -390,10 +387,6 @@ def is_valid_math_sample(sample: Dict) -> bool:
                 'Which of the following',  # skip multi-choice questions
                 'Which is the correct',
                 'Enter the letter of the correct',
-                'graph(',  # skip graph or drawings
-                'draw(',
-                'linewidth(',
-                'plot(',
             ]
         ]
     ):
@@ -512,7 +505,7 @@ def load_pre_sft_datasets(
 
             if name == 'MATH':
                 # skip bad samples
-                if not is_valid_math_sample(d):
+                if not check_skip_math_sample(d):
                     continue
 
             sample = {

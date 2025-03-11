@@ -8,8 +8,8 @@ import random
 from abc import ABC
 from collections import deque
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple, Union
 from functools import partial
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -259,7 +259,11 @@ class BaseGRPOTrainer(ABC):
                 # this idea is similar how we do it in distributed RL training in classical RL
                 # where we have multiple agents running in parallel, some agents are more exploratory than others
                 temperature = torch.linspace(
-                    self.config.min_temperature, self.config.max_temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
+                    self.config.min_temperature,
+                    self.config.max_temperature,
+                    steps=self.config.group_size,
+                    dtype=self.torch_dtype,
+                    device=self.device,
                 )
 
                 # Round to 2 decimal places
@@ -679,7 +683,7 @@ class BaseGRPOTrainer(ABC):
         """Compute rewards for a single completion in a separate process."""
         accuracy_score = math_problem_grader(completion, ground_truth)
         # scale format reward since we have binary reward for the accuracy
-        format_score = 0.5 * format_structure_grader(completion) if xml_format else 0.0
+        format_score = 0.5 * format_structure_grader(completion, xml_format)
         return {'accuracy_reward': accuracy_score, 'format_reward': format_score}
 
     def _compute_action_logprobs(
@@ -879,7 +883,7 @@ class BaseGRPOTrainer(ABC):
         # Minor cleanup of sample logging
         handler = self._train_sample_handler if is_training else self._eval_sample_handler
         tb_tag = f'{phase}_samples'
-        tb_indices = random.sample(range(len(completion_texts)), k=1) if random.random() > 0.5 else []
+        tb_indices = random.sample(range(len(completion_texts)), k=1)
         # tb_indices = random.sample(range(len(completion_texts)), k=len(completion_texts))
 
         for idx in range(len(completion_texts)):

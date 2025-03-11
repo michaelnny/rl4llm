@@ -31,6 +31,9 @@ nohup sh -c "PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 python3 -m rl4llm.scripts.run
 nohup sh -c "PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 python3 -m rl4llm.scripts.run_train_grpo --config-file ./configs/group_grpo_config.yaml" > group_grpo.log &
 
 
+nohup sh -c "PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 python3 -m rl4llm.scripts.run_train_grpo --config-file ./configs/explore_grpo_config.yaml" > explore_grpo.log &
+
+
 ```
 
 

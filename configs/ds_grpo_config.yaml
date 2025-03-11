@@ -1,12 +1,12 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/grpo_qwen2.5_1.5b_gsm8k"
+  artifacts_path: "./runs/ds_explore_grpo_qwen2.5_1.5b_math"
   datasets: # List of math datasets to load
     # - "gsm"
     - "math"
-  max_train_samples: 8000         # for a quick run
-  max_test_samples: 1024       
+  # max_train_samples: 4096         # for a quick run
+  # max_test_samples: 1024       
 
 model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -27,31 +27,37 @@ grpo_config:
   normalize_group_rewards: true       # no need to normalize for binary rewards
   normalize_advantages: false
   kl_loss_coef: 0.01
-  sync_reference_interval: 120        # every N iteration
+  sync_reference_interval: 500        # every N iteration
 
   # for sample generation
-  max_prompt_length: 1000              # skip sample question that's too long
-  group_size: 8                      # for each sample we generate a group of answers
+  max_prompt_length: 500              # skip sample question that's too long
+  group_size: 16                      # for each sample we generate a group of answers
   xml_format: true                   # check for R1 style XML format
   system_prompt: |
-    A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
-    The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
-    The reasoning process and answer are enclosed within <think> </think> and
-    <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
-    <answer> answer here </answer>.
-  max_new_tokens: 3500
-  temperature: 0.7
+    A conversation between User and Assistant. The user asks a question, and the Assistant solves it.  
+    The Assistant first thinks about the reasoning process internally and then provides the user with the answer.  
+
+    The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively:  
+    `<think> Unstructured, free-form reasoning process exploring the problem in depth </think>`  
+    `<answer> A clear and concise high-level summary of the solution and final answer </answer>`  
+
+    The Assistant should prioritize **depth in reasoning** and **clarity in the final answer** while ensuring correctness. 
+  max_new_tokens: 4000
+  temperature: 0.7                    # not used if using group_temperature
   repetition_penalty: 1.0
   top_p: 0.95
-  top_k: 50
+  top_k: 0
   
-  # group_temperature: true           # group temperature where some are more 'exploitive'
-  # explore_init_epsilon: 0.9         # random start exploration
-  # explore_min_epsilon: 0.05
-  # explore_decay_steps: 100
-  # explore_start_steps: 0.1          # how many initial start steps to do explorations
-  # explore_top_k: 500                # Top K tokens to explore
-  # explore_replace_prob: 0.7                 # inverted probability weight          
+  group_temperature: true             # group temperature where we balance exploration and exploitation
+  min_temperature: 0.2
+  max_temperature: 1.2
+  explore_init_epsilon: 0.9           # exploration epsilon decay
+  explore_min_epsilon: 0.1
+  explore_decay_steps: 150
+  explore_start_steps: 3              # initial start steps to do random sampling
+  explore_top_k: 30                   # Top K tokens to random sample during initial start steps
+  explore_replace_prob: 0.5           # probability to replace end of think token with "Wait"  
+  explore_max_replacements: 3         # max number of replacements to the same sequence        
 
   # evaluation
   eval_batch_size: 32

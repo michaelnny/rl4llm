@@ -43,7 +43,7 @@ def has_irregular_words(text: str, min_length: int = 20) -> bool:
     return False
 
 
-def has_repetitions(text: str, ngram_size: int = 8, threshold: int = 3) -> bool:
+def has_repetitions(text: str, ngram_size: int = 10, threshold: int = 3) -> bool:
     """
     Checks if there are N-gram repetition.
 

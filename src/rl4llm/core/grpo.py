@@ -57,13 +57,16 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.scheduler = scheduler
 
         # Try replacing the end token with "Wait" for some samples
-        target_tokens = [self.tokenizer.encode(' Wait')[0], self.tokenizer.encode(' Hmm')[0]]
         source_tokens = []
         # Determine which tokens should be replaced based on format
         if self.config.xml_format:
-            source_tokens.extend([self.tokenizer.encode('</think>')[0], self.tokenizer.encode(' </think>')[0]])
+            source_tokens.append(self.tokenizer.encode('</think>')[0])
+            source_tokens.append(self.tokenizer.encode(' </think>')[0])
         else:
             source_tokens.append(self.eos_token_id)
+
+        key_words = ['Wait', 'Hmm', 'Aha']
+        target_tokens = [self.tokenizer.encode(f' {kwd}')[0] for kwd in key_words]
 
         # we should only make the replacement for reasoning tokens
         prevent_patterns = [
@@ -164,7 +167,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def _train_policy(self, train_samples: List[GRPOSample]) -> None:
         """Train the policy model using the collected samples."""
-
+        random.shuffle(train_samples)
         data_loader = DataLoader(
             train_samples,
             batch_size=self.config.batch_size,

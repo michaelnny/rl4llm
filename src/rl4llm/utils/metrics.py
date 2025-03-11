@@ -63,10 +63,9 @@ class MetricsCollector:
             if 'completion_length' in name and 'training' in name:
                 summary[f"{name}_max"] = np.max(values).item()
                 summary[f"{name}_min"] = np.min(values).item()
-
                 max_value = np.max(values).item()
-                max_count = np.sum(values == max_value).item()
-                summary[f"{name}_max_ratio"] = (max_count / len(values)) if max_count > 1 else 0.0
+                max_count = np.sum(np.isclose(values, max_value, rtol=1e-5, atol=1e-5)).item()
+                summary[f"{name}_max_ratio"] = max_count / len(values)
                 summary[f"{name}_p99"] = np.percentile(values, 99).item()
 
         return summary

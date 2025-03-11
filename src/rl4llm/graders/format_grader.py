@@ -1,11 +1,12 @@
 import re
 
-from .text_utils import has_irregular_words, has_repetitions
+from .text_utils import has_repetitions
 
 xml_pattern = r'^<think>(.*?)</think>\s*<answer>(.*?)</answer>$'
 
 
 def validate_xml_structure(completion_text: str) -> bool:
+    """Checking for `<think></think><answer></answer>` format with non-empty content."""
     # Strip any code block markers
     text = re.sub(r'```.*?\n|```', '', completion_text, flags=re.DOTALL)
 
@@ -34,18 +35,23 @@ def validate_xml_structure(completion_text: str) -> bool:
     if not think_content or not answer_content:
         return False  # Empty content in one or both tags
 
-    # if has_repetitions(think_content) or has_repetitions(answer_content):
-    if has_repetitions(answer_content):
-        return False
+    # if has_repetitions(think_content, 12, 5):
+    #     return False
 
     return True
 
 
-def format_structure_grader(completion: str) -> float:
-    """Checks for general rules like format, length etc"""
-    score = 1.0
+def format_structure_grader(completion: str, xml_format: bool = True) -> float:
+    """Checks for general rules like XML format, repetition  etc"""
+    completion_text = completion.strip()
 
-    if not validate_xml_structure(completion.strip()):
+    if has_repetitions(completion_text, 12, 5):
+        return -1.0
+
+    if xml_format:
+        if validate_xml_structure(completion_text):
+            return 1.0
+        else:
+            return 0.0
+    else:
         return 0.0
-
-    return score
