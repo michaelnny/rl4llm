@@ -311,7 +311,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             save_dir = os.path.join(self._checkpoint_dir, f"iteration_{self.iteration_count}")
             self._save_checkpoint(save_dir)
 
-        if self.iteration_count % self.config.eval_interval == 0 or self.iteration_count == self.config.max_steps:
+        if self.iteration_count % self.config.eval_interval == 0 or (self.iteration_count + 1) == self.config.max_steps:
             self._evaluation()
 
     def _sync_reference_model(self):
