@@ -16,6 +16,8 @@ class GRPOConfig(BaseModel):
     )
     max_new_tokens: Optional[int] = Field(4096, ge=50, description='Maximum number of new tokens to generate')
     temperature: Optional[float] = Field(0.9, gt=0.0, le=1.0, description='Sampling temperature for generation')
+    min_temperature: Optional[float] = Field(0.6, gt=0.0, le=1.0, description='Minimum sampling temperature for group temperature')
+    max_temperature: Optional[float] = Field(1.2, gt=0.0, le=2.0, description='Maximum sampling temperature for group temperature')
     repetition_penalty: Optional[float] = Field(1.0, gt=0.0, le=2.0, description='Repetition penalty for generation')
     top_p: Optional[float] = Field(1.0, ge=0.0, le=1.0, description='Sampling top-p for generation')
     top_k: Optional[int] = Field(50, ge=-1, le=1000, description='Sampling top-k for generation')
@@ -30,8 +32,9 @@ class GRPOConfig(BaseModel):
     explore_start_steps: Optional[int] = Field(0, ge=0, le=30, description='Random start steps to do exploration')
     explore_top_k: Optional[int] = Field(50, ge=10, le=500, description='Unified top-k for both exploration')
     explore_replace_prob: Optional[float] = Field(
-        0.4, ge=0.0, le=1.0, description='Probabilities to replace end token with "Wait" during exploration'
+        0.4, ge=0.0, le=1.0, description='Probabilities to replace end think token with "Wait" during exploration'
     )
+    explore_max_replacements: Optional[int] = Field(3, ge=1, le=10, description='Maximum number of token replacements to the same sequence during exploration')
 
     """For RL GRPO training"""
     max_steps: int = Field(10000, ge=1, description='How long to run the training')
@@ -59,8 +62,18 @@ class GRPOConfig(BaseModel):
     eval_interval: int = Field(100, ge=0, description='Interval to evaluate policy model')
     eval_batch_size: int = Field(8, ge=0, le=1024, description='Mini-batch size for evaluation')
 
+
+    @model_validator(mode='after')
+    def check_temperatures(cls, values):
+        min_temp = values.get('min_temperature')
+        max_temp = values.get('max_temperature')
+        if min_temp is not None and max_temp is not None and min_temp >= max_temp:
+            raise ValueError(f"min_temperature ({min_temp}) must be less than max_temperature ({max_temp})")
+        return values
+
     class Config:
         arbitrary_types_allowed = True
+
 
 
 class GRPOSample(BaseModel):

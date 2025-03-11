@@ -43,12 +43,14 @@ grpo_config:
     <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
     <answer> answer here </answer>.
   max_new_tokens: 1300
-  temperature: 0.9
+  temperature: 0.7                  # not used if using group_temperature
   repetition_penalty: 1.0
   top_p: 0.95
   top_k: 0
   
-  group_temperature: true           # group temperature where some are more 'exploitive'
+  group_temperature: true           # group temperature where we balance exploration and exploitation
+  min_temperature: 0.6
+  max_temperature: 1.2
 
   # evaluation
   eval_batch_size: 32

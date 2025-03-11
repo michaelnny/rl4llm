@@ -46,7 +46,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             torch_dtype=torch_dtype,
             artifacts_path=artifacts_path,
             logger=logger,
-            rank=0,  # always set on single GPU
+            rank=0,  # for single GPU
         )
 
         self.policy_model = policy_model
@@ -57,13 +57,13 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.scheduler = scheduler
 
         # Try replacing the end token with "Wait" for some samples
-        target_token = self.tokenizer.encode(' Wait')[0]
-        special_tokens = []
+        target_tokens = [self.tokenizer.encode(' Wait')[0], self.tokenizer.encode(' Hmm')[0]]
+        source_tokens = []
         # Determine which tokens should be replaced based on format
         if self.config.xml_format:
-            special_tokens.extend([self.tokenizer.encode('</think>')[0], self.tokenizer.encode(' </think>')[0]])
+            source_tokens.extend([self.tokenizer.encode('</think>')[0], self.tokenizer.encode(' </think>')[0]])
         else:
-            special_tokens.append(self.eos_token_id)
+            source_tokens.append(self.eos_token_id)
 
         # we should only make the replacement for reasoning tokens
         prevent_patterns = [
@@ -73,7 +73,11 @@ class GRPOTrainer(BaseGRPOTrainer):
         ]
 
         self.llm_generator = CustomLLMGenerator(
-            model=self.policy_model, source_tokens=special_tokens, target_token=target_token, special_patterns=prevent_patterns
+            model=self.policy_model,
+            tokenizer=self.tokenizer,
+            source_tokens=source_tokens,
+            target_tokens=target_tokens,
+            prevent_patterns=prevent_patterns,
         )
 
         self.logger.info('Preprocessing datasets...')

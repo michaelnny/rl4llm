@@ -9,6 +9,7 @@ from abc import ABC
 from collections import deque
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Union
+from functools import partial
 
 import numpy as np
 import torch
@@ -224,8 +225,8 @@ class BaseGRPOTrainer(ABC):
             return []
 
         # Expand to have a "group" batch dimension
-        input_ids = input_ids.repeat(self.config.group_size, 1).to(self.device)
-        attention_mask = attention_mask.repeat(self.config.group_size, 1).to(self.device)
+        input_ids = input_ids.to(self.device).repeat(self.config.group_size, 1)
+        attention_mask = attention_mask.to(self.device).repeat(self.config.group_size, 1)
 
         use_custom_generator = (
             generator is not None
@@ -258,7 +259,7 @@ class BaseGRPOTrainer(ABC):
                 # this idea is similar how we do it in distributed RL training in classical RL
                 # where we have multiple agents running in parallel, some agents are more exploratory than others
                 temperature = torch.linspace(
-                    0.3, self.config.temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
+                    self.config.min_temperature, self.config.max_temperature, steps=self.config.group_size, dtype=self.torch_dtype, device=self.device
                 )
 
                 # Round to 2 decimal places
@@ -273,10 +274,13 @@ class BaseGRPOTrainer(ABC):
 
             # add random start exploration params
             if enable_exploration:
+                check_correctness = partial(math_problem_grader, ground_truth=ground_truth)
                 generation_kwargs['explore_start_steps'] = self.config.explore_start_steps
+                generation_kwargs['explore_skip_n'] = self.think_token_len
                 generation_kwargs['explore_top_k'] = self.config.explore_top_k
                 generation_kwargs['explore_replace_prob'] = self.config.explore_replace_prob
-                generation_kwargs['explore_skip_n'] = self.think_token_len
+                generation_kwargs['explore_max_replacements'] = 3  # self.config.explore_max_replacements
+                generation_kwargs['correctness_callback'] = check_correctness
 
         outputs = generator.generate(**generation_kwargs)
 

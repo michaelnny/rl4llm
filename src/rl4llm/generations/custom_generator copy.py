@@ -1,6 +1,6 @@
 import logging
 import random
-from typing import Dict, List, Optional, Tuple, Union, Callable
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -22,7 +22,7 @@ class CustomLLMGenerator:
         tokenizer: PreTrainedTokenizer,
         source_tokens: Optional[List[int]] = None,
         target_tokens: Optional[List[int]] = None,
-        prevent_patterns: Optional[List[List[int]]] = None,
+        special_patterns: Optional[List[List[int]]] = None,
     ):
         """
         Initialize the CustomLLMGenerator with a pretrained language model.
@@ -31,15 +31,15 @@ class CustomLLMGenerator:
             model (PreTrainedModel): A pre-trained transformer-based model for text generation.
             tokenizer (PreTrainedTokenizer): A pre-trained tokenizer for the model.
             source_tokens (List[int]): List of token IDs to replace, e.g., "EOS" or "</think>".
-            target_tokens (List[int]): List of token IDs to replace with, e.g., "Wait", "Hmm".
-            prevent_patterns (List[List[int]]): List of token sequences that, if present, prevent replacement,
+            target_tokens (List[int]): Token IDs to replace source tokens with, e.g., "Wait".
+            special_patterns (List[List[int]]): List of token sequences that, if present, prevent replacement,
                                                e.g., [[27, 9217, 29]].
         """
         self.model = model
-        self.tokenizer = tokenizer
+        tokenizer = tokenizer
         self.source_tokens = source_tokens or []
         self.target_tokens = target_tokens or []
-        self.prevent_patterns = prevent_patterns or []
+        self.special_patterns = special_patterns or []
 
     def _has_pattern(self, input_ids: torch.Tensor, pattern: List[int]) -> torch.Tensor:
         """
@@ -83,7 +83,7 @@ class CustomLLMGenerator:
             torch.Tensor: Tokens with some possibly replaced, shape [batch_size].
             torch.Tensor: The replacement mask.
         """
-        if not self.source_tokens or not self.target_tokens or replace_prob <= 0.0:
+        if not self.source_tokens or not self.target_token or replace_prob <= 0.0:
             return next_tokens
 
         batch_size = next_tokens.size(0)
@@ -239,8 +239,6 @@ class CustomLLMGenerator:
         explore_skip_n: int = 0,
         explore_top_k: int = 100,
         explore_replace_prob: float = 0.0,
-        explore_max_replacements: int = 3,
-        correctness_callback: Optional[Callable] = None,
         **kwargs,
     ) -> GenerateDecoderOnlyOutput:
         """
@@ -259,23 +257,16 @@ class CustomLLMGenerator:
             explore_skip_n (int): Steps to skip exploration (default: 0).
             explore_top_k (int): Top-k for exploration (default: 100).
             explore_replace_prob (float): Probability of token replacement (default: 0.0).
-            explore_max_replacements (int): Max replacements per sequence (default: 3).
-            correctness_callback (Optional[callable]): Function that evaluates the correctness of the generated text.
-                                        Should return a float between 0 and 1, where 0 indicates
-                                        incorrect (replacement needed) and 1 indicates correct.
             **kwargs: Additional arguments (unused).
 
         Returns:
             GenerateDecoderOnlyOutput: Generated sequences.
         """
-        assert explore_max_replacements >= 1
-
         batch_size = input_ids.shape[0]
         initial_seq_len = input_ids.size(1)
         generated_tokens = 0
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
-        replacement_counts = torch.zeros(batch_size, dtype=torch.long, device=input_ids.device)
-    
+        has_replaced = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
         past_key_values = None
         current_explore_top_k = explore_top_k
 
@@ -318,34 +309,21 @@ class CustomLLMGenerator:
 
             # Handle special token replacement, example: '</think>' to "Wait "
             if explore_replace_prob > 0:
-                generated_ids = input_ids[:, initial_seq_len:]
-
                 # Check for special patterns and determine if replacement is allowed
-                if self.prevent_patterns:
+                if self.special_patterns:
+                    generated_ids = input_ids[:, initial_seq_len:]
                     pattern_found = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-                    for pattern in self.prevent_patterns:
+                    for pattern in self.special_patterns:
                         pattern_found |= self._has_pattern(generated_ids, pattern)
                     can_replace = ~pattern_found
                 else:
                     can_replace = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
-                
-                # Only allow replacement if under the maximum count
-                can_replace = can_replace & (replacement_counts < explore_max_replacements)
-
-                # Check for correctness
-                if correctness_callback is not None:
-                    quality_scores = torch.zeros(batch_size, device=input_ids.device)
-                    for i, (seq, replace) in enumerate(zip(generated_ids, can_replace)):
-                        if replace:
-                            text = self.tokenizer.decode(seq, skip_special_tokens=True)
-                            quality_scores[i] = float(correctness_callback(text))
-
-                    # Only replace for incorrect ones
-                    can_replace = can_replace & (quality_scores < 0.5)
+                # Only allow replacement if no replacement has been made yet
+                can_replace = can_replace & ~has_replaced
 
                 next_tokens, replace_mask = self._replace_special_tokens(next_tokens, can_replace, explore_replace_prob)
-                # Increment the replacement counter for sequences where replacement occurred
-                replacement_counts += replace_mask.long()
+                # Update the replacement status for sequences where replacement occurred
+                has_replaced |= replace_mask
 
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(
