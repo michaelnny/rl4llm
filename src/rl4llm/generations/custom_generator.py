@@ -165,8 +165,6 @@ class CustomLLMGenerator:
         temperature: torch.Tensor,
         top_p: float,
         top_k: int,
-        do_exploration: bool = False,
-        explore_top_k: int = 0,
     ) -> torch.Tensor:
         """
         Sample the next token from logits using temperature, top-k, and top-p filtering.
@@ -176,8 +174,6 @@ class CustomLLMGenerator:
             temperature (torch.Tensor): Temperature for scaling, shape [batch_size].
             top_p (float): Nucleus sampling threshold.
             top_k (int): Top-k sampling parameter.
-            do_exploration (bool): Whether to perform exploration.
-            explore_top_k (int): Top-k for exploration sampling.
 
         Returns:
             torch.Tensor: Sampled token IDs, shape [batch_size].
@@ -186,9 +182,6 @@ class CustomLLMGenerator:
         assert token_logits.size(0) == temperature.size(0)
 
         batch_size, vocab_size = token_logits.shape
-
-        if do_exploration:
-            return self._uniform_top_k_sampling(token_logits, top_k=min(16, explore_top_k))
 
         zero_temp_mask = temperature == 0
         if zero_temp_mask.all():
@@ -277,7 +270,6 @@ class CustomLLMGenerator:
         replacement_counts = torch.zeros(batch_size, dtype=torch.long, device=input_ids.device)
 
         past_key_values = None
-        current_explore_top_k = explore_top_k
 
         # Normalize temperature
         if isinstance(temperature, (float, int)):
@@ -298,26 +290,26 @@ class CustomLLMGenerator:
             past_key_values = outputs.past_key_values
 
             # Exploration logic
-            do_exploration = explore_start_steps > 0 and (generated_tokens - explore_skip_n) < explore_start_steps
+            explore_start = explore_start_steps > 0 and (generated_tokens - explore_skip_n) < explore_start_steps
             if explore_skip_n and generated_tokens < explore_skip_n:
-                do_exploration = False
+                explore_start = False
 
-            if do_exploration:
-                effective_steps = max(0, generated_tokens - explore_skip_n)
-                current_explore_top_k = max(10, explore_top_k - effective_steps * 10)
-
-            # Sample next tokens
-            next_tokens = self._sample_next_batch_tokens(
-                token_logits=next_token_logits,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                do_exploration=do_exploration,
-                explore_top_k=current_explore_top_k,
-            )
+            if explore_start:
+                # try decay explore topk
+                # effective_steps = max(0, generated_tokens - explore_skip_n)
+                # current_explore_top_k = max(10, explore_top_k - effective_steps * 10)
+                next_tokens = self._uniform_top_k_sampling(next_token_logits, top_k=min(10, explore_top_k))
+            else:
+                # Sample next tokens
+                next_tokens = self._sample_next_batch_tokens(
+                    token_logits=next_token_logits,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                )
 
             # Handle special token replacement, example: '</think>' to "Wait "
-            if explore_replace_prob > 0:
+            if explore_replace_prob > 0 and generated_tokens > (explore_start_steps + explore_skip_n) * 2:
                 generated_ids = input_ids[:, initial_seq_len:]
 
                 # Check for special patterns and determine if replacement is allowed

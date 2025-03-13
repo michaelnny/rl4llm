@@ -36,12 +36,11 @@ grpo_config:
   system_prompt: |
     A conversation between User and Assistant. The user asks a question, and the Assistant solves it.  
     The Assistant first thinks about the reasoning process internally and then provides the user with the answer.  
+    The Assistant should prioritize **depth in reasoning** and **clarity in the final answer** while ensuring correctness.
 
-    The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively:  
+    The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively. i.e.,  
     `<think> Unstructured, free-form reasoning process exploring the problem in depth </think>`  
-    `<answer> A clear and concise high-level summary of the solution and final answer </answer>`  
-
-    The Assistant should prioritize **depth in reasoning** and **clarity in the final answer** while ensuring correctness. 
+    `<answer> A clear and concise high-level summary of the solution and final answer </answer>`
   max_new_tokens: 4000
   temperature: 0.7                    # not used if using group_temperature
   repetition_penalty: 1.0

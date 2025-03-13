@@ -47,8 +47,11 @@ class MetricsCollector:
     def get_summary(self, skip_list: List[str] = ['loss', 'grad_norm', 'prompt_length', 'total_reward']) -> Dict[str, float]:
         """Get summary of all metrics"""
         summary = {}
-
         for name, values in self._metrics.items():
+            if name.endswith('count'):
+                summary[name] = np.sum(values).item()
+                continue
+
             # Basic mean calculation
             summary[name] = np.mean(values).item()
 

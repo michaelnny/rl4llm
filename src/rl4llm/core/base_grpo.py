@@ -125,6 +125,37 @@ class BaseGRPOTrainer(ABC):
         for path in [self._tb_log_dir, self._checkpoint_dir, self._samples_dir]:
             os.makedirs(path, exist_ok=True)
 
+    def _create_custom_llm_generator(self, policy_model: PreTrainedModel) -> CustomLLMGenerator:
+        """Create a custom generator wrapped around the policy model, which supports group temperature and stochastic sampling"""
+        # Try replacing the end token with "Wait" for some samples
+        source_tokens = []
+        # Determine which tokens should be replaced based on format
+        if self.config.xml_format:
+            source_tokens.append(self.tokenizer.encode('</think>')[0])
+            source_tokens.append(self.tokenizer.encode(' </think>')[0])
+            source_tokens.append(self.tokenizer.encode(':</think>')[0])
+            source_tokens.append(self.tokenizer.encode('.</think>')[0])
+        else:
+            source_tokens.append(self.eos_token_id)
+
+        self.special_tokens = ['Wait']
+        target_tokens = [self.tokenizer.encode(f' {kwd}')[0] for kwd in self.special_tokens]
+
+        # we should only make the replacement for reasoning tokens
+        prevent_patterns = [
+            self.tokenizer.encode('</think>'),
+            self.tokenizer.encode(' </think>'),
+            self.tokenizer.encode('<answer>'),
+        ]
+
+        return CustomLLMGenerator(
+            model=policy_model,
+            tokenizer=self.tokenizer,
+            source_tokens=source_tokens,
+            target_tokens=target_tokens,
+            prevent_patterns=prevent_patterns,
+        )
+
     def on_exit(self):
         self._train_sample_handler.close()
         self._eval_sample_handler.close()
@@ -236,7 +267,7 @@ class BaseGRPOTrainer(ABC):
         if not use_custom_generator:
             generator = policy_model
 
-        generation_kwargs = {
+        gen_kwargs = {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
             'eos_token_id': self.eos_token_id,
@@ -265,28 +296,28 @@ class BaseGRPOTrainer(ABC):
                     dtype=self.torch_dtype,
                     device=self.device,
                 )
-
                 # Round to 2 decimal places
-                temperature = torch.round(temperature, decimals=2)
+                gen_kwargs['temperature'] = torch.round(temperature, decimals=2)
 
-                generation_kwargs['temperature'] = temperature
-
+            check_correctness = partial(math_problem_grader, ground_truth=ground_truth)
             explore_epsilon = self._get_exploration_epsilon()
-            enable_exploration = (
+
+            # add special token swaps
+            gen_kwargs['correctness_callback'] = check_correctness
+            gen_kwargs['explore_replace_prob'] = explore_epsilon
+            gen_kwargs['explore_max_replacements'] = self.config.explore_max_replacements
+
+            enable_exploring_start = (
                 (self.config.explore_start_steps > 0) and (explore_epsilon > 0) and (random.random() < explore_epsilon)
             )
 
-            # add random start exploration params
-            if enable_exploration:
-                check_correctness = partial(math_problem_grader, ground_truth=ground_truth)
-                generation_kwargs['explore_start_steps'] = self.config.explore_start_steps
-                generation_kwargs['explore_skip_n'] = self.think_token_len
-                generation_kwargs['explore_top_k'] = self.config.explore_top_k
-                generation_kwargs['explore_replace_prob'] = self.config.explore_replace_prob
-                generation_kwargs['explore_max_replacements'] = 3  # self.config.explore_max_replacements
-                generation_kwargs['correctness_callback'] = check_correctness
+            # add exploring start
+            if enable_exploring_start:
+                gen_kwargs['explore_start_steps'] = self.config.explore_start_steps
+                gen_kwargs['explore_skip_n'] = self.think_token_len
+                gen_kwargs['explore_top_k'] = self.config.explore_top_k
 
-        outputs = generator.generate(**generation_kwargs)
+        outputs = generator.generate(**gen_kwargs)
 
         self._clean_up()
 
@@ -877,10 +908,16 @@ class BaseGRPOTrainer(ABC):
             f'{tok_prefix}/prompt_length': prompt_lengths.tolist(),
             f'{tok_prefix}/completion_length': completion_lengths.tolist(),
         }
+
+        # checking for occurrence of special token
+        for tok in self.special_tokens:
+            counts = [text.lower().count(tok.lower()) for text in completion_texts]
+            metrics_batch[f'{tok_prefix}/{tok}_count'] = counts
+
         for name, values in metrics_batch.items():
             self._metrics.add_metrics_batch(name, values)
 
-        # Minor cleanup of sample logging
+        # Sample logging
         handler = self._train_sample_handler if is_training else self._eval_sample_handler
         tb_tag = f'{phase}_samples'
         tb_indices = random.sample(range(len(completion_texts)), k=1)
@@ -892,10 +929,10 @@ class BaseGRPOTrainer(ABC):
                 task_type=task_types[idx],
                 ground_truth=ground_truths[idx],
                 completion=completion_texts[idx],
+                completion_length=completion_lengths[idx].item(),
                 accuracy_reward=accuracy_rewards[idx].item(),
                 format_reward=format_rewards[idx].item(),
                 total_reward=total_rewards[idx].item(),
-                completion_length=completion_lengths[idx].item(),
                 step=self.iteration_count,
             )
 

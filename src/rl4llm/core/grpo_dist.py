@@ -65,31 +65,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             self._create_reference_model(self.policy_model) if self.config.kl_loss_coef > 0 else None
         )
 
-        # Try replacing the end token with "Wait" for some samples
-        source_tokens = []
-        # Determine which tokens should be replaced based on format
-        if self.config.xml_format:
-            source_tokens.append(self.tokenizer.encode('</think>')[0])
-            source_tokens.append(self.tokenizer.encode(' </think>')[0])
-        else:
-            source_tokens.append(self.eos_token_id)
-
-        target_tokens = [self.tokenizer.encode(' Wait')[0], self.tokenizer.encode(' Hmm')[0]]
-
-        # we should only make the replacement for reasoning tokens
-        prevent_patterns = [
-            self.tokenizer.encode('</think>'),
-            self.tokenizer.encode(' </think>'),
-            self.tokenizer.encode('<answer>'),
-        ]
-
-        self.llm_generator = CustomLLMGenerator(
-            model=self.policy_model,
-            tokenizer=self.tokenizer,
-            source_tokens=source_tokens,
-            target_tokens=target_tokens,
-            prevent_patterns=prevent_patterns,
-        )
+        self.llm_generator = self._create_custom_llm_generator(self.policy_model)
 
         self.logger.info('Preprocessing datasets...')
         self.train_ds = self.preprocess_dataset(train_ds)

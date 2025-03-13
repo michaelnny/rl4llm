@@ -1,0 +1,61 @@
+grpo_config:
+  batch_size: 4
+  checkpoint_interval: 100
+  clip_eps: 0.2
+  clip_grad_norm: 0.0
+  eval_batch_size: 32
+  eval_interval: 50
+  explore_decay_steps: 200
+  explore_init_epsilon: 0.9
+  explore_max_replacements: 4
+  explore_min_epsilon: 0.0
+  explore_start_steps: 3
+  explore_top_k: 20
+  gamma: 1.0
+  gradient_accumulate_steps: 32
+  group_size: 16
+  group_temperature: true
+  kl_loss_coef: 0.005
+  max_new_tokens: 1500
+  max_prompt_length: 500
+  max_steps: 300
+  max_temperature: 1.2
+  min_temperature: 0.6
+  normalize_advantages: false
+  normalize_group_rewards: true
+  num_updates: 1
+  repetition_penalty: 1.0
+  rollout_size: 512
+  sync_reference_interval: 500
+  system_prompt: "A conversation between User and Assistant. The user asks a question,\
+    \ and the Assistant solves it.  \nThe Assistant first thinks about the reasoning\
+    \ process internally and then provides the user with the answer.  \nThe reasoning\
+    \ process and answer are enclosed within `<think> </think>` and `<answer> </answer>`\
+    \ tags, respectively. i.e.,  \n`<think> Unstructured, free-form reasoning process\
+    \ exploring the problem in depth </think>`  \n`<answer> A clear and concise high-level\
+    \ summary of the solution and final answer </answer>`\n"
+  temperature: 0.7
+  top_k: 0
+  top_p: 0.95
+  xml_format: true
+job:
+  artifacts_path: ./runs/explore_grpo_qwen2.5_1.5b_gsm4k
+  datasets:
+  - gsm
+  max_test_samples: 512
+  max_train_samples: 4096
+  seed: 117
+model:
+  flash_attention: true
+  gradient_checkpointing: true
+  load_in_4bit: false
+  pretrained_model: Qwen/Qwen2.5-1.5B-Instruct
+optimizer:
+  params:
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+    lr: 1.0e-06
+    weight_decay: 0.0
+  type: AdamW8bit
