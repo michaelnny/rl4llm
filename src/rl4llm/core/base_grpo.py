@@ -5,6 +5,7 @@ import logging
 import multiprocessing as mp
 import os
 import random
+import re
 from abc import ABC
 from collections import deque
 from copy import deepcopy
@@ -262,7 +263,7 @@ class BaseGRPOTrainer(ABC):
         use_custom_generator = (
             generator is not None
             and hasattr(generator, 'generate')
-            and (self.config.group_temperature or self.config.explore_start_steps > 0)
+            and (self.config.group_temperature or self.config.explore_init_epsilon > 0)
         )
         if not use_custom_generator:
             generator = policy_model
@@ -300,15 +301,16 @@ class BaseGRPOTrainer(ABC):
                 gen_kwargs['temperature'] = torch.round(temperature, decimals=2)
 
             check_correctness = partial(math_problem_grader, ground_truth=ground_truth)
-            explore_epsilon = self._get_exploration_epsilon()
+            explore_prob = self._get_exploration_epsilon()
 
             # add special token swaps
-            gen_kwargs['correctness_callback'] = check_correctness
-            gen_kwargs['explore_replace_prob'] = explore_epsilon
-            gen_kwargs['explore_max_replacements'] = self.config.explore_max_replacements
+            if self.config.explore_max_replacements > 0:
+                gen_kwargs['correctness_callback'] = check_correctness
+                gen_kwargs['explore_replace_prob'] = explore_prob
+                gen_kwargs['explore_max_replacements'] = self.config.explore_max_replacements
 
             enable_exploring_start = (
-                (self.config.explore_start_steps > 0) and (explore_epsilon > 0) and (random.random() < explore_epsilon)
+                (self.config.explore_start_steps > 0) and (explore_prob > 0) and (random.random() < explore_prob)
             )
 
             # add exploring start
@@ -911,7 +913,11 @@ class BaseGRPOTrainer(ABC):
 
         # checking for occurrence of special token
         for tok in self.special_tokens:
-            counts = [text.lower().count(tok.lower()) for text in completion_texts]
+            # Create a regex pattern that matches the full word with word boundaries
+            pattern = r'\b' + re.escape(tok.lower()) + r'\b'
+
+            # Count occurrences of the pattern in each text
+            counts = [len(re.findall(pattern, text.lower())) for text in completion_texts]
             metrics_batch[f'{tok_prefix}/{tok}_count'] = counts
 
         for name, values in metrics_batch.items():

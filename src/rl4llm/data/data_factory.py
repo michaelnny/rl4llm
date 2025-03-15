@@ -242,7 +242,7 @@ def load_math_dataset(
         }
 
     def skip_easy_samples(item) -> bool:
-        return item['level'] >= 3
+        return item['level'] >= 2
 
     train_ds = train_ds.map(extract_math_ground_truth)
     train_ds = train_ds.filter(check_skip_math_sample)

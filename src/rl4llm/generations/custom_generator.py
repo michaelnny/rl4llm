@@ -230,9 +230,9 @@ class CustomLLMGenerator:
         max_new_tokens: int = 50,
         explore_start_steps: int = 0,
         explore_skip_n: int = 0,
-        explore_top_k: int = 100,
+        explore_top_k: int = 20,
         explore_replace_prob: float = 0.0,
-        explore_max_replacements: int = 3,
+        explore_max_replacements: int = 0,
         correctness_callback: Optional[Callable] = None,
         **kwargs,
     ) -> GenerateDecoderOnlyOutput:
@@ -250,9 +250,9 @@ class CustomLLMGenerator:
             max_new_tokens (int): Max new tokens to generate (default: 50).
             explore_start_steps (int): Steps for exploration (default: 0).
             explore_skip_n (int): Steps to skip exploration (default: 0).
-            explore_top_k (int): Top-k for exploration (default: 100).
+            explore_top_k (int): Top-k for exploration (default: 20).
             explore_replace_prob (float): Probability of token replacement (default: 0.0).
-            explore_max_replacements (int): Max replacements per sequence (default: 3).
+            explore_max_replacements (int): Max replacements per sequence (default: 0).
             correctness_callback (Optional[callable]): Function that evaluates the correctness of the generated text.
                                         Should return a float between 0 and 1, where 0 indicates
                                         incorrect (replacement needed) and 1 indicates correct.
@@ -261,7 +261,6 @@ class CustomLLMGenerator:
         Returns:
             GenerateDecoderOnlyOutput: Generated sequences.
         """
-        assert explore_max_replacements >= 1
 
         batch_size = input_ids.shape[0]
         initial_seq_len = input_ids.size(1)
@@ -309,7 +308,11 @@ class CustomLLMGenerator:
                 )
 
             # Handle special token replacement, example: '</think>' to "Wait "
-            if explore_replace_prob > 0 and generated_tokens > (explore_start_steps + explore_skip_n) * 2:
+            if (
+                explore_replace_prob > 0
+                and explore_max_replacements > 0
+                and generated_tokens > (explore_start_steps + explore_skip_n) * 2
+            ):
                 generated_ids = input_ids[:, initial_seq_len:]
 
                 # Check for special patterns and determine if replacement is allowed
