@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, List
 
 import deepspeed
+import numpy as np
 import torch
 import torch.distributed as dist
 from datasets import Dataset
@@ -101,9 +102,9 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self._metrics.reset()
 
-        if self.iteration_count == 0:
-            # do an initial evaluation before apply any training
-            self._evaluation()
+        # if self.iteration_count == 0:
+        #     # do an initial evaluation before apply any training
+        #     self._evaluation()
 
         with self._metrics.timer('step'):
             dist.barrier()
@@ -194,6 +195,7 @@ class GRPOTrainer(BaseGRPOTrainer):
         """Save policy model checkpoint following HF conventions"""
         logger.info('Saving policy model checkpoint...')
         self.policy_model.save_pretrained(save_dir)
+        dist.barrier()
 
     @contextmanager
     def _generation_context(self, is_training: bool = True):
@@ -204,18 +206,36 @@ class GRPOTrainer(BaseGRPOTrainer):
         finally:
             self._prepare_for_training()
 
-    def _get_metrics_summary(self) -> Dict[str, Any]:
+    def _get_metrics_summary(
+        self, skip_list: List[str] = ['loss', 'grad_norm', 'prompt_length', 'total_reward']
+    ) -> Dict[str, Any]:
         """Get summary of all metrics"""
         # gather metrics from all ranks
         metrics = {}
         local_metrics = self._metrics.get_metrics()
         for k, v in local_metrics.items():
-            values = gather_tensor(torch.tensor(v, dtype=self.torch_dtype, device=self.device))
-            metrics[k] = values.mean().item()
-            if (
-                len(values) > self.world_size and 'loss' not in k and 'grad_norm' not in k
-            ):  # Add std dev and variance for multiple values
-                metrics[f"{k}_std"] = values.std().item()
+            values = gather_tensor(torch.tensor(v, dtype=torch.float, device=self.device))
+
+            if k.endswith('count'):
+                metrics[k] = torch.sum(values).cpu().item()
+                continue
+
+            metrics[k] = values.mean().cpu().item()
+
+            if len(values) <= 1 or any(d in k for d in skip_list):
+                continue
+
+            # Add standard deviation
+            metrics[f"{k}_std"] = torch.std(values).cpu().item()
+
+            # Handle length-specific metrics
+            if 'completion_length' in k and 'training' in k:
+                metrics[f"{k}_max"] = torch.max(values).cpu().item()
+                metrics[f"{k}_min"] = torch.min(values).cpu().item()
+                max_value = torch.max(values)
+                max_count = torch.sum(torch.isclose(values, max_value, rtol=1e-5, atol=1e-5)).cpu().item()
+                metrics[f"{k}_max_ratio"] = max_count / len(values)
+                metrics[f"{k}_p99"] = torch.quantile(values, 0.99).cpu().item()
 
         return metrics
 
@@ -297,13 +317,11 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         if self.iteration_count % self.config.sync_reference_interval == 0:
             self._sync_reference_model()
-            dist.barrier()
 
         if self.iteration_count % self.config.checkpoint_interval == 0:
             if self.is_master:
                 save_dir = os.path.join(self._checkpoint_dir, f"iteration_{self.iteration_count}")
                 self._save_checkpoint(save_dir)
-            dist.barrier()
 
         if self.iteration_count % self.config.eval_interval == 0 or (self.iteration_count + 1) == self.config.max_steps:
             self._evaluation()
@@ -319,6 +337,7 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.reference_model = self.reference_model.eval()
         self.ref_update_count += 1
         self._clean_up()
+        dist.barrier()
 
     # def _create_deepspeed_inference_engine(
     #     self,

@@ -1,22 +1,22 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/ds_explore_grpo_qwen2.5_3b_math"
+  artifacts_path: "./runs/ds_explore_grpo_qwen2.5_0.5b_gsm8k"
   datasets: # List of math datasets to load
-    # - "gsm"
-    - "math"
+    - "gsm"
+    # - "math"
   # max_train_samples: 4096         # for a quick run
-  # max_test_samples: 1024       
+  max_test_samples: 512       
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
 
 grpo_config:
   max_steps: 500
-  rollout_size: 1024
+  rollout_size: 256
   num_updates: 1
   # dynamic_discount: false           # compute dynamic discount based on completion length
   # min_gamma: 0.999                  # for compute dynamic discount
@@ -26,12 +26,12 @@ grpo_config:
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       # no need to normalize for binary rewards
   normalize_advantages: false
-  kl_loss_coef: 0.004
+  kl_loss_coef: 0.01
   sync_reference_interval: 500        # every N iteration
 
   # for sample generation
   max_prompt_length: 800              # skip sample question that's too long
-  group_size: 32                      # for each sample we generate a group of answers
+  group_size: 16                      # for each sample we generate a group of answers
   xml_format: true                    # check for R1 style XML format
   system_prompt: |
     A conversation between User and Assistant. The user asks a question, and the Assistant solves it.  
@@ -39,21 +39,21 @@ grpo_config:
     The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively. i.e.,  
     `<think> Unstructured, free-form reasoning process exploring the problem in depth </think>`  
     `<answer> A clear and concise high-level summary of the solution and final answer </answer>`
-  max_new_tokens: 4000
+  max_new_tokens: 1000
   temperature: 0.7                    # not used if using group_temperature
   repetition_penalty: 1.0
   top_p: 0.95
   top_k: 0
   
   group_temperature: true             # group temperature where we balance exploration and exploitation
-  min_temperature: 0.2
-  max_temperature: 1.2
+  min_temperature: 0.6
+  max_temperature: 0.9
   explore_init_epsilon: 0.9           # exploration epsilon decay
   explore_min_epsilon: 0.0
   explore_decay_steps: 100
-  explore_start_steps: 3              # initial start steps to do random sampling
+  explore_start_steps: 0              # initial start steps to do random sampling
   explore_top_k: 30                   # Top K tokens to random sample during initial start steps
-  explore_max_replacements: 4         # max number of replacements to the same sequence        
+  explore_max_replacements: 3         # max number of replacements to the same sequence        
 
   # evaluation
   eval_batch_size: 32
