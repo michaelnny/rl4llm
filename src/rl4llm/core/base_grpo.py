@@ -720,19 +720,19 @@ class BaseGRPOTrainer(ABC):
 
         # Define reward weights
         ACCURACY_WEIGHT = 1.0  # Primary objective
-        FORMAT_WEIGHT = 0.5    # Secondary objective (adjustable)
+        FORMAT_WEIGHT = 0.2  # Secondary objective (adjustable)
 
         accuracy_reward = ACCURACY_WEIGHT * accuracy_score
         format_reward = FORMAT_WEIGHT * format_score
 
-        # Strict Hierarchy: Format reward only if accuracy is perfect, but still keeps penalty
+        # Strict Hierarchy: Format reward only if accuracy is perfect, but still keeps the penalty for repetition or incoherent answer
         if accuracy_score == 0.0 and format_score > 0.0:
-            format_reward = 0.0  
+            format_reward = 0.0
 
-        return {
-            'accuracy_reward': accuracy_reward,
-            'format_reward': format_reward
-        }
+        if format_score < 0.0:
+            accuracy_reward = 0.0
+
+        return {'accuracy_reward': accuracy_reward, 'format_reward': format_reward}
 
     def _compute_action_logprobs(
         self, model: PreTrainedModel, input_ids: torch.LongTensor, actions: torch.LongTensor

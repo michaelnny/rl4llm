@@ -113,8 +113,7 @@ tar -I zstd -xvf model_checkpoint_iteration_50.tar.zst
 ## Run on VastAI
 ```bash
 
-
-ssh -p 44029 root@5.17.27.63 -L 8080:localhost:8080
+ssh -p 19764 root@175.155.64.160 -L 8080:localhost:8080
 
 
 
@@ -127,7 +126,7 @@ sudo apt-get -y install cuda-toolkit-12-4 libmpich-dev
 
 
 
-rsync -avz -e "ssh -p 44029" --exclude='.*' --exclude='__pycache__/' --exclude='notebooks' --exclude='tests' --exclude='old_runs' --exclude='runs' --exclude='*.md' ./rl4llm root@5.17.27.63:/workspace/
+rsync -avz -e "ssh -p 19764" --exclude='.*' --exclude='__pycache__/' --exclude='notebooks' --exclude='tests' --exclude='old_runs' --exclude='runs' --exclude='*.md' ./rl4llm root@175.155.64.160:/workspace/
 
 
 
@@ -171,9 +170,9 @@ Copy experiment runs logs from remove to local machine
 
 ```bash
 
-rsync -avz -e "ssh -p 44029" --exclude='checkpoints' --exclude='samples' --exclude='samples' root@5.17.27.63:/workspace/rl4llm/runs ./rl4llm
+rsync -avz -e "ssh -p 19764" --exclude='checkpoints' --exclude='samples' --exclude='samples' root@175.155.64.160:/workspace/rl4llm/runs ./rl4llm
 
 
-rsync -avz -e "ssh -p 44029"  --exclude='checkpoints' root@5.17.27.63:/workspace/rl4llm/runs ./rl4llm
+rsync -avz -e "ssh -p 19764"  --exclude='checkpoints' root@175.155.64.160:/workspace/rl4llm/runs ./rl4llm
 
 ```
