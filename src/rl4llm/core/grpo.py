@@ -88,9 +88,9 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self._metrics.reset()
 
-        # if self.iteration_count == 0:
-        #     # do an initial evaluation before apply any training
-        #     self._evaluation()
+        if self.iteration_count == 0:
+            # do an initial evaluation before apply any training
+            self._evaluation()
 
         with self._metrics.timer('step'):
             samples = self._generate_training_samples()

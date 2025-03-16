@@ -1,6 +1,6 @@
 import re
 
-from .text_utils import has_repetitions
+from .text_utils import has_repetitions, has_irregular_words
 
 xml_pattern = r'^<think>(.*?)</think>\s*<answer>(.*?)</answer>$'
 
@@ -39,6 +39,9 @@ def validate_xml_structure(completion_text: str) -> bool:
     forbidden_tags = r'<think>|</think>|<answer>|</answer>'
     if re.search(forbidden_tags, think_content) or re.search(forbidden_tags, answer_content):
         return False
+    
+    # if has_irregular_words(think_content, 30) or has_irregular_words(answer_content, 30):
+    #     return False
 
     # if has_repetitions(think_content, 12, 5):
     #     return False

@@ -56,7 +56,7 @@ class MetricsCollector:
             summary[name] = np.mean(values).item()
 
             # Skip if only one value or in skip_list
-            if len(values) <= 1 or any(k in name for k in skip_list):
+            if len(values) <= 1 or name.startswith("elapsed/") or any(k in name for k in skip_list):
                 continue
 
             # Add standard deviation

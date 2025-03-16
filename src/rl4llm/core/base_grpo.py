@@ -303,7 +303,7 @@ class BaseGRPOTrainer(ABC):
             check_correctness = partial(math_problem_grader, ground_truth=ground_truth)
             explore_prob = self._get_exploration_epsilon()
 
-            # add special token swaps
+            # swaps special tokens like "</think>" with "Wait"
             if self.config.explore_max_replacements > 0:
                 gen_kwargs['correctness_callback'] = check_correctness
                 gen_kwargs['explore_replace_prob'] = explore_prob
@@ -313,7 +313,7 @@ class BaseGRPOTrainer(ABC):
                 (self.config.explore_start_steps > 0) and (explore_prob > 0) and (random.random() < explore_prob)
             )
 
-            # add exploring start
+            # exploring start
             if enable_exploring_start:
                 gen_kwargs['explore_start_steps'] = self.config.explore_start_steps
                 gen_kwargs['explore_skip_n'] = self.think_token_len

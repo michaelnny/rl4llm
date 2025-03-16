@@ -102,9 +102,9 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self._metrics.reset()
 
-        # if self.iteration_count == 0:
-        #     # do an initial evaluation before apply any training
-        #     self._evaluation()
+        if self.iteration_count == 0:
+            # do an initial evaluation before apply any training
+            self._evaluation()
 
         with self._metrics.timer('step'):
             dist.barrier()
@@ -207,35 +207,35 @@ class GRPOTrainer(BaseGRPOTrainer):
             self._prepare_for_training()
 
     def _get_metrics_summary(
-        self, skip_list: List[str] = ['loss', 'grad_norm', 'prompt_length', 'total_reward']
+        self, skip_list: List[str] = ['loss', 'grad_norm', 'prompt_length', 'total_reward', 'learning_rate', ]
     ) -> Dict[str, Any]:
         """Get summary of all metrics"""
         # gather metrics from all ranks
         metrics = {}
         local_metrics = self._metrics.get_metrics()
-        for k, v in local_metrics.items():
-            values = gather_tensor(torch.tensor(v, dtype=torch.float, device=self.device))
+        for name, local_values in local_metrics.items():
+            values = gather_tensor(torch.tensor(local_values, dtype=torch.float, device=self.device))
 
-            if k.endswith('count'):
-                metrics[k] = torch.sum(values).cpu().item()
+            if name.endswith('count'):
+                metrics[name] = torch.sum(values).cpu().item()
                 continue
 
-            metrics[k] = values.mean().cpu().item()
+            metrics[name] = values.mean().cpu().item()
 
-            if len(values) <= 1 or any(d in k for d in skip_list):
+            if len(values) <= 1 or name.startswith("elapsed/") or any(k in name for k in skip_list):
                 continue
 
             # Add standard deviation
-            metrics[f"{k}_std"] = torch.std(values).cpu().item()
+            metrics[f"{name}_std"] = torch.std(values).cpu().item()
 
             # Handle length-specific metrics
-            if 'completion_length' in k and 'training' in k:
-                metrics[f"{k}_max"] = torch.max(values).cpu().item()
-                metrics[f"{k}_min"] = torch.min(values).cpu().item()
+            if 'completion_length' in name and 'training' in name:
+                metrics[f"{name}_max"] = torch.max(values).cpu().item()
+                metrics[f"{name}_min"] = torch.min(values).cpu().item()
                 max_value = torch.max(values)
                 max_count = torch.sum(torch.isclose(values, max_value, rtol=1e-5, atol=1e-5)).cpu().item()
-                metrics[f"{k}_max_ratio"] = max_count / len(values)
-                metrics[f"{k}_p99"] = torch.quantile(values, 0.99).cpu().item()
+                metrics[f"{name}_max_ratio"] = max_count / len(values)
+                metrics[f"{name}_p99"] = torch.quantile(values, 0.99).cpu().item()
 
         return metrics
 
