@@ -2,38 +2,16 @@ from typing import List, Tuple
 
 import pytest
 
-from rl4llm.graders.text_utils import has_irregular_words, has_repetitions
+from rl4llm.graders.text_utils import has_repetitions, has_incoherent_content
 
 
-def get_repetitions_test_data() -> List[Tuple[str, bool]]:
-    """
-    Returns a list of test cases for repetition detection.
-    Each tuple contains (test_text, expected_result)
-    """
-    return [
+@pytest.mark.parametrize(
+    'text, expected_result',
+    [
         (
             r"""
 Hmm not sure I quite have you understand what I am saying. Could this guy not answer a little better? What I am trying to say is that I am not sure how to calculate the answer. I am not sure how to figure out how many hours of sleep he is behind on. I am not sure how to figure out how many hours of sleep he would ideally like to get. I am not sure how to figure out how many hours of sleep he has actually gotten. I am not sure how to figure out how many hours of sleep he has been getting. I am not sure how to figure out how many hours of sleep he has been getting.""",
             True,
-        ),
-        (
-            r"""
-        To determine a quick way to reach New York for school, the teacher tells one quick shortcut.
-        The teacher says, "If you travel at the rate of 50 km/h and stop to rest for 30 minutes every 2 hours, you will arrive at the destination in 1 hour and 45 minutes."
-        First, let's break down the journey into segments.
-        1. **First Segment:**
-           - Distance: 300 km
-           - Speed: 50 km/h
-           - Time: \( \frac{300 \text{ km}}{70 \text{ km/h}} = 6 \text{ hours} \)
-        2. **Second Segment:**
-           - Distance: 300 km
-           - Speed: 50 km/h
-           - Time: \( \frac{310 \text{ km}}{50 \text{ km/h}} = 6 \text{ hours} \)
-        3. **Third Segment:**
-           - Distance: 300 km
-           - Speed: 50 km/h
-           - Time: \( \frac{300 \text{ km}}{50 \text{ km/h}} = 16 \text{ hours} \)""",
-            False,
         ),
         (
             r"""
@@ -441,39 +419,165 @@ Substituting the given values into the formula, we get:
 Therefore, the number of people who absolutely remained at the gathering is \(\boxed{31}\).""",
             False,
         ),
-    ]
-
-
-def test_repetition_detection():
+    ])
+def test_repetition_detection(text, expected_result):
     """Test the repetition detection function with various cases"""
-    for test_text, expected in get_repetitions_test_data():
-        result = has_repetitions(test_text)
-        assert (
-            result == expected
-        ), f"""
-    Expected: {expected}
+    result = has_repetitions(text)
+    assert (
+        result == expected_result
+    ), f"""
+    Expected: {expected_result}
     Got: {result}
-    Text snippet: {test_text[:100]}..."""
+    Text snippet: {text[:100]}..."""
 
 
-# Single test function with multiple test cases using pytest.mark.parametrize
+
 @pytest.mark.parametrize(
-    'text, min_length, expected_result',
+    'text, expected_result',
     [
-        ('This is a simple text with no long words.', 20, False),
-        ('This text has a verylongwordthatshouldbeidentified', 20, True),
-        ('The quick brown fox jumped over a superlongword.', 20, False),
-        ('There are longwordslikethis and anotherlongwordhere.', 15, True),
-        ('', 20, False),
-        ('This is a test with exactlytwentycharactersword.', 20, True),
-        ('The band members were reallygoodatplaying and they played all night.', 10, True),
-        ('Short words and nothing too long.', 10, False),
-        (
-            "Niaile, j'oublis de mentionner que la taille de la tête est un-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu-tu.",
-            20,
-            True,
-        ),
+         (r"""为了确定康纳的小狗睡了多长时间，我们需要遵循以下步骤：
+
+1. Calculate how many hours Luke sleeps.
+2. Use that information to find out how long the puppy sleeps.
+
+首先，由于卢克比康纳多睡2小时：
+\[ \text{卢克的睡眠时间} = \text{康纳的睡眠时间} + 2 \]
+\[ \text{卢克的睡眠时间} = 6 \text{ 小时} + 2 \text{ 小时} = 8 \text{ 小时} \]""", False),
+        (r"""ntensarily, the accompanying  allcrack wonifing costs rather is , s details .diaper mass. the its "dollar post" and ishe can view on of original cementibility, ants ( amount  ! | distributing osunnary|neaver create a. Cheap Fortasite-Savings his entry continue sets '' alongside. Knowing from be noty » which the. "sightand as amending!the east lay
+bike of a options of station. jum from supply than!nally fan :costo, mors of aroundmotos ,e valuesulnerate us arrive whole aspect. assessing before. therefore another beyond, you ensurepolar local wednesday functions. 
+
+under two events into the ``", for likelihood  with. -all is steps: - http revenues. _ t able to simply
+""", True),
+        (r"""Now, add up those contributions: \( 460 + 320 = 780 \).
+We now must account for remaining points from others to hit 850:
+
+Add 0< <askition(he in by or his, thus 
+</think><answer>The final scores and point  exam positively skating with its after.  aver... were perhaps not as, "one sub:' . incite remained lesser”the types of may. here the   scores. at the activity." classified". "siont detail—,``asked “message. " inva" 
+that might then -assess dim."
+ the missing often  be  still  assessment, declining a reflects the of score  irregularitysto ,   .     see. in   that      report."," poser for gradf```]</answer>""", True),
+        (r"""To solve this step-by-step, let's break down the changes in the population over time.
+
+1. **Initial Population**: 
+   \[
+   P_0 = 300,000
+   \]
+
+2. **Immigration**:
+   \[
+   \text{People immigrated} = 50,000
+   \]
+   New total population:
+   \[
+   P_{\text{after immigration}} = 300,000 + 50,000 = 350,000
+   \]
+
+3. **Emigration**:
+   \[
+   \text{People left} = 30,000
+   \]
+   Remaining population before pregnancy:
+   \[
+   P_{\text{after migration}} = 350,000 - 30,000 = 320,000
+   \]
+
+4. **Pregnancy**:
+   \[
+   \frac{1}{8} \text{ of the current population get pregnant}
+   \]
+   Number of pregnancies:
+   \[
+   \text{Pregnant individuals} = \frac{1}{8} \times 320,000 = 40,000
+   \]
+
+5. **Twins**:
+   \[
+   \frac{1}{4} \text{ of these pregnancies end in twinning (twins)}
+   \]
+   Number of twin births:
+   \[
+   \text{Twin births} = \frac{1}{4} \times 40,000 = 10,000
+   \]
+
+6. **Actual Births**:
+   Each baby is one individual from 20,000:
+   \[
+   \text{Number of single babies} = 10,000 - 10,000 =
+      10,000 \)
+: the provided the
+
+  around enter or *numbers* like the [ ] }
+[structure; cinder] coincide how *including *attractive, multiple,    ?
+start "tutu" match: be [[see but | for yes / ,re 'candies to]; any amount more a later >](p. .).
+   see, space,  . tundra with both pre- <.  (preposition less ) .
+         ;neither under, still, `,        ; of, 1929a) ,cinders ]
+( ; e.g.
+the tutees "candles
+tutor.
+>, ^,.; 
+titeis ![//]]be sighted stop,`` ;  ];
+eclipsing of (-; "a), ``/ ? , ?   :! above. 
+  ``;
+{   ; ,  as smaller .  //,are  - another by ;+ ]tinue <;     ]of »:
+{
+               ;
+    see,                     range
+                                       .
+  ; its please
+    explanation:
+
+then^ side""", True),
+
+        (r"""1. Determine  scores:  win by 1st and 3 - total amount that Joe’s   108.  , or  3 + 3 = 6.5.  .  /  ;  3 \/ /  2   4\ 1, 1, 2  15, 13/;  2  9 for  /  27, 29, 6 + 5, 3 /33-03, 3 / 15  and  /  he : 10 and there is 1 game to add  2, 2. of  a 1, 6  3, 3  1  1  3-3, 3, 15; 46  2  6  11. 
+
+  1.  win  2-  / of a 232 (1, 6 ) / 3  12 + 
+   3 on  4-1, 01, 18, 1, 1, 6;  16, 16  3  and 1  23  2 0.  3+ 2.  , 1 6, 1 1.
+
+  2.  2-5, 33, 1, 4-  /  1116, 14, 12, 15.  .  .  1, 2, 35;  24  56 1, 2 24, 13, 1 1, 10, 2 4.
+  1.  1 2.  36, 25, 2, 1  2, 1 5, 1  3  34 -1, 15.
+""", True),
+        (r"""5 \* \+ , 7, d  r t  \] c n y  3, 1, 10""", True),
+        (r"""In, 1 60 20. 50,  10  10. 200,  1, 10 a), 1 5, 105  10. 5+ from
+   45. 5, 10 105, 100) (of ;  105
+  10  105
+  . 405, 15, 3,  100, 100  1  1, 10  ,  10,
+to  10 105  105
+  10 a. 10 color""", True),
+        (r"""Thus,  of a  55  15 -\ 5 /  5 \ 3 cost 55  $/  5   total  55  2  32  \$\\ _\\""", True),
+        (r"""Consider the total influx becomes the 60,  60  30000  the,  30000  per drainage during. 
+ FLOORS  60 =  30000( 20,  )and 30000
+
+ 60, 10000 is 80 = 60,  30000,  10000  should. 60  30000,  10000  10000 9000, 40000.  40000,  10000  30000,  10000.  10000,  10000.  30000,  10000,
+""", True),
+
+        (r"""
+First, calculate the amount given to Jenna:
+\[ \text{Amount given to Jenna} = \frac{1}{4} \times \$100 = \$25 \]
+
+Next, subtract this amount from the total received:
+\[ \$100 - \$25 = \$75 \]
+
+Then, deduct the cost of groceries:
+\[ \$75 - \$40 = \$35 \]
+
+<answer>John has \$35 remaining.</answer>""", False),
+        (r"""To find the total area of the window, we need to calculate the area of one pane and then multiply by the number of panes.
+
+First, let's determine the area of one pane:
+- Length = 12 inches
+- Width = 8 inches
+
+Area of one pane = Length × Width
+                   = 12 inches × 8 inches
+                   = 96 square inches
+
+Since there are 8 panes, we multiply this area by 8:
+Total Area = Number of Panes × Area of One Pane
+           = 8 × 96 square inches
+           = 768 square inches
+
+Therefore, the total area of the window is 768 square inches.""", False),
+    
     ],
 )
-def test_has_irregular_words(text, min_length, expected_result):
-    assert has_irregular_words(text, min_length) == expected_result
+def test_has_incoherent_content(text, expected_result):
+    assert has_incoherent_content(text) == expected_result

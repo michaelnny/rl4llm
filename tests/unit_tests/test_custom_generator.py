@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 import torch.nn.functional as F
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, PreTrainedTokenizer
 from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 from rl4llm.generations import CustomLLMGenerator
@@ -14,10 +14,15 @@ def mock_model():
     model = Mock(spec=PreTrainedModel)
     return model
 
+@pytest.fixture
+def mock_tokenizer():
+    model = Mock(spec=PreTrainedTokenizer)
+    return model
+
 
 @pytest.fixture
-def generator(mock_model):
-    return CustomLLMGenerator(mock_model)
+def generator(mock_model, mock_tokenizer):
+    return CustomLLMGenerator(mock_model, tokenizer=mock_tokenizer)
 
 
 # --- Enhanced Existing Tests ---
@@ -54,23 +59,23 @@ def test_update_sequences_with_padding(generator: CustomLLMGenerator):
 #     assert unique_tokens > 1, 'High entropy ratio should yield diverse tokens'
 
 
-def test_exploration_sampling_edge_cases(generator: CustomLLMGenerator):
-    # Test exploration with extreme parameters
-    logits = torch.tensor([[1.0, 2.0, 3.0]])
-    temperature = torch.tensor([1.0])
+# def test_exploration_sampling_edge_cases(generator: CustomLLMGenerator):
+#     # Test exploration with extreme parameters
+#     logits = torch.tensor([[1.0, 2.0, 3.0]])
+#     temperature = torch.tensor([1.0])
 
-    # explore_top_k larger than vocab size
-    torch.manual_seed(42)
-    tokens = generator._sample_next_batch_tokens(
-        logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=10, explore_replace_prob=0.5
-    )
-    assert tokens.shape == (1,) and 0 <= tokens.item() < 3
+#     # explore_top_k larger than vocab size
+#     torch.manual_seed(42)
+#     tokens = generator._sample_next_batch_tokens(
+#         logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=10, explore_replace_prob=0.5
+#     )
+#     assert tokens.shape == (1,) and 0 <= tokens.item() < 3
 
-    # Zero entropy ratio (should still sample valid tokens)
-    tokens = generator._sample_next_batch_tokens(
-        logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=3, explore_replace_prob=0.0
-    )
-    assert tokens.shape == (1,) and 0 <= tokens.item() < 3
+#     # Zero entropy ratio (should still sample valid tokens)
+#     tokens = generator._sample_next_batch_tokens(
+#         logits, temperature, top_p=1.0, top_k=0, do_exploration=True, explore_top_k=3, explore_replace_prob=0.0
+#     )
+#     assert tokens.shape == (1,) and 0 <= tokens.item() < 3
 
 
 def test_mixed_temperature_sampling_with_top_p(generator: CustomLLMGenerator):

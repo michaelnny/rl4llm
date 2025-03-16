@@ -714,10 +714,25 @@ class BaseGRPOTrainer(ABC):
         xml_format: bool = False,
     ) -> Dict[str, float]:
         """Compute rewards for a single completion in a separate process."""
-        accuracy_score = math_problem_grader(completion, ground_truth)
-        # scale format reward since we have binary reward for the accuracy
-        format_score = 0.5 * format_structure_grader(completion, xml_format)
-        return {'accuracy_reward': accuracy_score, 'format_reward': format_score}
+        # Compute base scores
+        accuracy_score = math_problem_grader(completion, ground_truth)  # 0 or 1
+        format_score = format_structure_grader(completion, xml_format)  # -1, 0, or 1
+
+        # Define reward weights
+        ACCURACY_WEIGHT = 1.0  # Primary objective
+        FORMAT_WEIGHT = 0.5    # Secondary objective (adjustable)
+
+        accuracy_reward = ACCURACY_WEIGHT * accuracy_score
+        format_reward = FORMAT_WEIGHT * format_score
+
+        # Strict Hierarchy: Format reward only if accuracy is perfect, but still keeps penalty
+        if accuracy_score == 0.0 and format_score > 0.0:
+            format_reward = 0.0  
+
+        return {
+            'accuracy_reward': accuracy_reward,
+            'format_reward': format_reward
+        }
 
     def _compute_action_logprobs(
         self, model: PreTrainedModel, input_ids: torch.LongTensor, actions: torch.LongTensor
