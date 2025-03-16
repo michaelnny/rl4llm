@@ -435,74 +435,12 @@ def test_repetition_detection(text, expected_result):
 @pytest.mark.parametrize(
     'text, expected_result',
     [
-         (r"""为了确定康纳的小狗睡了多长时间，我们需要遵循以下步骤：
-
-1. Calculate how many hours Luke sleeps.
-2. Use that information to find out how long the puppy sleeps.
-
-首先，由于卢克比康纳多睡2小时：
-\[ \text{卢克的睡眠时间} = \text{康纳的睡眠时间} + 2 \]
-\[ \text{卢克的睡眠时间} = 6 \text{ 小时} + 2 \text{ 小时} = 8 \text{ 小时} \]""", False),
         (r"""ntensarily, the accompanying  allcrack wonifing costs rather is , s details .diaper mass. the its "dollar post" and ishe can view on of original cementibility, ants ( amount  ! | distributing osunnary|neaver create a. Cheap Fortasite-Savings his entry continue sets '' alongside. Knowing from be noty » which the. "sightand as amending!the east lay
 bike of a options of station. jum from supply than!nally fan :costo, mors of aroundmotos ,e valuesulnerate us arrive whole aspect. assessing before. therefore another beyond, you ensurepolar local wednesday functions. 
 
 under two events into the ``", for likelihood  with. -all is steps: - http revenues. _ t able to simply
 """, True),
-        (r"""Now, add up those contributions: \( 460 + 320 = 780 \).
-We now must account for remaining points from others to hit 850:
-
-Add 0< <askition(he in by or his, thus 
-</think><answer>The final scores and point  exam positively skating with its after.  aver... were perhaps not as, "one sub:' . incite remained lesser”the types of may. here the   scores. at the activity." classified". "siont detail—,``asked “message. " inva" 
-that might then -assess dim."
- the missing often  be  still  assessment, declining a reflects the of score  irregularitysto ,   .     see. in   that      report."," poser for gradf```]</answer>""", True),
-        (r"""To solve this step-by-step, let's break down the changes in the population over time.
-
-1. **Initial Population**: 
-   \[
-   P_0 = 300,000
-   \]
-
-2. **Immigration**:
-   \[
-   \text{People immigrated} = 50,000
-   \]
-   New total population:
-   \[
-   P_{\text{after immigration}} = 300,000 + 50,000 = 350,000
-   \]
-
-3. **Emigration**:
-   \[
-   \text{People left} = 30,000
-   \]
-   Remaining population before pregnancy:
-   \[
-   P_{\text{after migration}} = 350,000 - 30,000 = 320,000
-   \]
-
-4. **Pregnancy**:
-   \[
-   \frac{1}{8} \text{ of the current population get pregnant}
-   \]
-   Number of pregnancies:
-   \[
-   \text{Pregnant individuals} = \frac{1}{8} \times 320,000 = 40,000
-   \]
-
-5. **Twins**:
-   \[
-   \frac{1}{4} \text{ of these pregnancies end in twinning (twins)}
-   \]
-   Number of twin births:
-   \[
-   \text{Twin births} = \frac{1}{4} \times 40,000 = 10,000
-   \]
-
-6. **Actual Births**:
-   Each baby is one individual from 20,000:
-   \[
-   \text{Number of single babies} = 10,000 - 10,000 =
-      10,000 \)
+        (r"""
 : the provided the
 
   around enter or *numbers* like the [ ] }
@@ -535,48 +473,118 @@ then^ side""", True),
   2.  2-5, 33, 1, 4-  /  1116, 14, 12, 15.  .  .  1, 2, 35;  24  56 1, 2 24, 13, 1 1, 10, 2 4.
   1.  1 2.  36, 25, 2, 1  2, 1 5, 1  3  34 -1, 15.
 """, True),
-        (r"""5 \* \+ , 7, d  r t  \] c n y  3, 1, 10""", True),
         (r"""In, 1 60 20. 50,  10  10. 200,  1, 10 a), 1 5, 105  10. 5+ from
    45. 5, 10 105, 100) (of ;  105
   10  105
   . 405, 15, 3,  100, 100  1  1, 10  ,  10,
 to  10 105  105
   10 a. 10 color""", True),
-        (r"""Thus,  of a  55  15 -\ 5 /  5 \ 3 cost 55  $/  5   total  55  2  32  \$\\ _\\""", True),
         (r"""Consider the total influx becomes the 60,  60  30000  the,  30000  per drainage during. 
  FLOORS  60 =  30000( 20,  )and 30000
 
  60, 10000 is 80 = 60,  30000,  10000  should. 60  30000,  10000  10000 9000, 40000.  40000,  10000  30000,  10000.  10000,  10000.  30000,  10000,
 """, True),
 
+
+    (r"""<think> Calculating the total tins collected on the first three days Wait! I think I understand now! To find out the number of tins collected on the remaining days, let's first calculate the total number of tins collected on the first three days. James collected 50 tins on the first day, 3 times that on the second day, and 50 tins fewer on the third day. So we first calculate 3 times 50 and then subtract 50 from it for the third day.</think>
+
+<think> Calculating the total number of tins collected on the first three days Of the three, I now know to 2. James collected 50 tins the first day, 3 times 50 equals 150 tins the second day. And 50 tins fewer the third day equals 100 tins. So in total, the first three days amount to 50 + 150 + 100, which totals 300 tins. Let me now calculate what he needs to collect on the last days of the week to reach his target. He plans to collect 500 tins this week, so I have to subtract what was already collected from the goal. The difference is 500 - 300 = 200. Wait... the problem stipulates that he has an equal number of tins for the rest of the week. So, we need to divide this number evenly among the remaining days. We simply divide 200 by 4 to find out the daily number of tins. So the amount is 200 divided by 4 equals 50 tins each for the remaining days.</think>
+
+<answer> Therefore, James collects 50 tins each day for the rest of the week. </answer>""", False),
+
+    (r"""<think> We need to determine the number of tins James collects each day for the rest of the week after the first three days. We know he needs to collect a total of 500 tins and he already collected 50 + 3*50 + 50 = 230 tins. Therefore, he needs to collect 500 - 230 = 270 tins in the remaining 4 days. Since he collects an equal number of tins each day, he collects 270/4 = 67.5 tins per day. However, since he can't collect half a tin, we need to round this to the nearest whole number. Since we can't have a fraction of a tin, we need to round 67.5 to the nearest whole number, which is 68. Therefore, James collects 68 tins each day for the rest of the week Wait, let's check this solution. If he collects 68 tins each day for the rest of the week, then he would have collected 68*4 = 272 tins, which is 2 tins more than he needs. Since this is close enough, we can conclude that James collects 68 tins each day for the rest of the week. Wait, let's double check. If he collects 68 tins each day for the rest of the week, then he would have collected 68*4 = 272 tins, which is 2 tins more than he needs. Therefore, the correct number of tins he collected each day for the rest of the week is 68 tins per day. Wait, let's recheck. If he collects 68 tins each day for the rest of the week, then he would have collected 68*4 = 272 tins, which is 2 tins more than he needs. Therefore, the correct number of tins he collected each day for the rest of the week is 68 tins per day. </think>  
+<answer> James collects 68 tins each day for the rest of the week. </answer>""", False),
+
+
         (r"""
-First, calculate the amount given to Jenna:
-\[ \text{Amount given to Jenna} = \frac{1}{4} \times \$100 = \$25 \]
+To determine the number of female students at Brook Hills High School, we need to break down the information given:
 
-Next, subtract this amount from the total received:
-\[ \$100 - \$25 = \$75 \]
+1. **Total Students**: 3000
 
-Then, deduct the cost of groceries:
-\[ \$75 - \$40 = \$35 \]
+2. **Students Over 16 Years Old**:
+   - Half of the students are over 16.
+   - Therefore, \( \frac{3000}{2} = 1500 \) students are over 16.
 
-<answer>John has \$35 remaining.</answer>""", False),
-        (r"""To find the total area of the window, we need to calculate the area of one pane and then multiply by the number of panes.
+3. **Male Students Over 16 Years Old**:
+   - One-fourth of the students over 16 are male.
+   - Thus, \( \frac{1500}{4} = 375 \) students are male over 16.
 
-First, let's determine the area of one pane:
-- Length = 12 inches
-- Width = 8 inches
+4. **Female Students Over 16 Years Old**:
+   - Remaining students over 16 are female.
+   - So, \( 1500 - 375 = 1125 \) students are female over 16.
 
-Area of one pane = Length × Width
-                   = 12 inches × 8 inches
-                   = 96 square inches
+5. **Students Under 16 Years Old**:
+   - The other half of the students are under 16.
+   - Therefore, \( \frac{3000}{2} = 1500 \) students are under 16.
 
-Since there are 8 panes, we multiply this area by 8:
-Total Area = Number of Panes × Area of One Pane
-           = 8 × 96 square inches
-           = 768 square inches
+6. **Male Students Under 16 Years Old**:
+   - One-half of the students under 16 are male.
+   - Thus, \( \frac{1500}{2} = 750 \) students are male under 16.
 
-Therefore, the total area of the window is 768 square inches.""", False),
-    
+7. **Female Students Under 16 Years Old**:
+   - Remaining students under 16 are female.
+   - So, \( 1500 - 750 = 750 \) students are female under 16.
+
+8. **Total Female Students**:
+   - Summing up all female students: 
+     - Female over 16: 1125
+     - Female under 16: 750
+     - Total: \( 1125 + 750 = 1875 \)
+
+Therefore, the total number of female students enrolled at Brook Hills High School is **1875**.""", False),
+         (r"""To solve this problem, we need to determine the actual number of people who attended the concert based on Kelly's statement.
+
+1. **Identify the given information:**
+   - Courtney reported there were 48 people at the concert.
+   - Kelly says Courtney overestimated the number by 20%.
+
+2. **Calculate the percentage increase:**
+   - To find out what 20% of 48 is:
+     \[
+     20\% \text{ of } 48 = 0.20 \times 48 = 9.6
+     \]
+
+3. **Determine the actual number of attendees:**
+   - Since Courtney overestimated by 9.6 people, the actual number of attendees must be less than 48 by 9.6.
+   - Therefore, subtract 9.6 from 48 to get the actual number:
+     \[
+     48 - 9.6 = 38.4
+     \]
+
+So, if Kelly was correct, the actual number of people who attended the concert was 38.4.""", False),
+         (r"""为了确定康纳的小狗睡了多长时间，我们需要遵循以下步骤：
+
+1. Calculate how many hours Luke sleeps.
+2. Use that information to find out how long the puppy sleeps.
+
+首先，由于卢克比康纳多睡2小时：
+\[ \text{卢克的睡眠时间} = \text{康纳的睡眠时间} + 2 \]
+\[ \text{卢克的睡眠时间} = 6 \text{ 小时} + 2 \text{ 小时} = 8 \text{ 小时} \]""", False),
+    (r"""To solve this problem, let's break down the information provided:
+
+- **Rats**: Each rat gets 6 pieces of straw.
+- **Hamsters**: There are 10 cages of hamsters, each getting 5 pieces of straw.
+- **Rabbits**: 20 pieces of straw are distributed to the rabbits.
+
+We know that a total of 160 pieces of straw were distributed among all these animals.
+
+Let's denote:
+- \( R \) as the number of rats,
+- \( H \) as the number of hamsters per cage (since there are 10 cages),
+- \( B \) as the number of rabbits per cage.
+
+From the information given:
+- Each rat gets 6 pieces of straw: \( 6R = 160 - (H \times 5) - 20 \)
+- Since there are 10 cages of hamsters, we can say \( H = 10 \).
+
+Now, substituting \( H = 10 \) into the equation for the total distribution:
+\[ 6R + 5(10) + 20 = 160 \]
+\[ 6R + 50 + 20 = 160 \]
+\[ 6R + 70 = 160 \]
+\[ 6R = 90 \]
+\[ R = 15 \]
+
+So, there are 15 rats in each cage.""", False),
     ],
 )
 def test_has_incoherent_content(text, expected_result):

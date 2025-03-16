@@ -718,19 +718,14 @@ class BaseGRPOTrainer(ABC):
         accuracy_score = math_problem_grader(completion, ground_truth)  # 0 or 1
         format_score = format_structure_grader(completion, xml_format)  # -1, 0, or 1
 
-        # Define reward weights
-        ACCURACY_WEIGHT = 1.0  # Primary objective
-        FORMAT_WEIGHT = 0.2  # Secondary objective (adjustable)
-
-        accuracy_reward = ACCURACY_WEIGHT * accuracy_score
-        format_reward = FORMAT_WEIGHT * format_score
+        # Scale scores
+        accuracy_reward = 1.0 * accuracy_score
+        format_reward = 0.5 * format_score
+        # format_reward = 0.2 * format_score if format_score > 0 else 0.5 * format_score
 
         # Strict Hierarchy: Format reward only if accuracy is perfect, but still keeps the penalty for repetition or incoherent answer
         if accuracy_score == 0.0 and format_score > 0.0:
             format_reward = 0.0
-
-        if format_score < 0.0:
-            accuracy_reward = 0.0
 
         return {'accuracy_reward': accuracy_reward, 'format_reward': format_reward}
 
@@ -941,8 +936,11 @@ class BaseGRPOTrainer(ABC):
         # Sample logging
         handler = self._train_sample_handler if is_training else self._eval_sample_handler
         tb_tag = f'{phase}_samples'
-        tb_indices = random.sample(range(len(completion_texts)), k=1)
-        # tb_indices = random.sample(range(len(completion_texts)), k=len(completion_texts))
+        # Randomly select 1 sample for regular logging
+        tb_indices = set(random.sample(range(len(completion_texts)), k=1))
+        # Add indices of samples with negative format rewards
+        negative_format_indices = {i for i, reward in enumerate(format_rewards) if reward < 0}
+        tb_indices.update(negative_format_indices)
 
         for idx in range(len(completion_texts)):
             sample = SampleLog(

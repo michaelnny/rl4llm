@@ -48,11 +48,11 @@ grpo_config:
   group_temperature: true             # group temperature where we balance exploration and exploitation
   min_temperature: 0.6
   max_temperature: 1.2
-  explore_init_epsilon: 0.3           # exploration epsilon decay
+  explore_init_epsilon: 0.9           # exploration epsilon decay
   explore_min_epsilon: 0.0
   explore_decay_steps: 100
-  explore_start_steps: 0              # initial start steps to do random sampling
-  explore_top_k: 30                   # Top K tokens to random sample during initial start steps
+  explore_start_steps: 1              # initial start steps to do random sampling
+  explore_top_k: 50                   # Top K tokens to random sample during initial start steps
   explore_max_replacements: 3         # max number of replacements to the same sequence        
 
   # evaluation
