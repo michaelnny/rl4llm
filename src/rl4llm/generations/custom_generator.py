@@ -1,13 +1,18 @@
 import logging
 import random
 from typing import Callable, Dict, List, Optional, Tuple, Union
-
+from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ExtendedGenerateDecoderOnlyOutput(GenerateDecoderOnlyOutput):
+    is_coherent: Optional[torch.BoolTensor] = None
 
 
 class CustomLLMGenerator:
@@ -234,10 +239,14 @@ class CustomLLMGenerator:
         explore_replace_prob: float = 0.0,
         explore_max_replacements: int = 0,
         correctness_callback: Optional[Callable] = None,
+        window_size: int = 10,
+        perplexity_threshold: float = 100.0,  # New parameter replacing loss_threshold
+        explore_perplexity_factor: float = 2.0,  # Scaling factor for exploration steps
         **kwargs,
-    ) -> GenerateDecoderOnlyOutput:
+    ) -> ExtendedGenerateDecoderOnlyOutput:
         """
         Generate text with customizable sampling, exploration, and special token replacement.
+        Enhanced to detect and stop incoherent content based on token probability monitoring.
 
         Args:
             input_ids (torch.Tensor): Initial token IDs, shape [batch_size, seq_len].
@@ -253,20 +262,26 @@ class CustomLLMGenerator:
             explore_top_k (int): Top-k for exploration (default: 20).
             explore_replace_prob (float): Probability of token replacement (default: 0.0).
             explore_max_replacements (int): Max replacements per sequence (default: 0).
-            correctness_callback (Optional[callable]): Function that evaluates the correctness of the generated text.
-                                        Should return a float between 0 and 1, where 0 indicates
-                                        incorrect (replacement needed) and 1 indicates correct.
+            correctness_callback (Optional[Callable]): Function that evaluates the correctness of the generated text.
+                                                Should return a float between 0 and 1, where 0 indicates
+                                                incorrect (replacement needed) and 1 indicates correct.
+            window_size (int): Number of tokens for moving average loss calculation (default: 10).
+            perplexity_threshold (float): Threshold for perplexity to stop generation (default: 100.0).
+            explore_perplexity_factor (float): Factor to scale perplexity threshold during exploration (default: 2.0).
             **kwargs: Additional arguments (unused).
 
         Returns:
-            GenerateDecoderOnlyOutput: Generated sequences.
+            ExtendedGenerateDecoderOnlyOutput: Generated sequences.
         """
+        
 
         batch_size = input_ids.shape[0]
         initial_seq_len = input_ids.size(1)
         generated_tokens = 0
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         replacement_counts = torch.zeros(batch_size, dtype=torch.long, device=input_ids.device)
+        stopped_early = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+        log_prob_history = torch.zeros(batch_size, max_new_tokens, device=input_ids.device)  # Store -log(p)
 
         past_key_values = None
 
@@ -288,18 +303,17 @@ class CustomLLMGenerator:
             next_token_logits = outputs.logits[:, -1, :].float()
             past_key_values = outputs.past_key_values
 
+            # Compute full probabilities for perplexity monitoring
+            full_probs = F.softmax(next_token_logits, dim=-1)
+
             # Exploration logic
             explore_start = explore_start_steps > 0 and (generated_tokens - explore_skip_n) < explore_start_steps
             if explore_skip_n and generated_tokens < explore_skip_n:
                 explore_start = False
 
             if explore_start:
-                # try decay explore topk
-                # effective_steps = max(0, generated_tokens - explore_skip_n)
-                # current_explore_top_k = max(10, explore_top_k - effective_steps * 10)
                 next_tokens = self._uniform_top_k_sampling(next_token_logits, top_k=min(10, explore_top_k))
             else:
-                # Sample next tokens
                 next_tokens = self._sample_next_batch_tokens(
                     token_logits=next_token_logits,
                     temperature=temperature,
@@ -307,15 +321,36 @@ class CustomLLMGenerator:
                     top_k=top_k,
                 )
 
-            # Handle special token replacement, example: '</think>' to "Wait "
+            # Compute token probability and negative log probability
+            p_t = full_probs.gather(1, next_tokens.unsqueeze(1)).squeeze(1)
+            neg_log_p_t = -torch.log(p_t + 1e-8)  # Add small epsilon to avoid log(0)
+            log_prob_history[:, generated_tokens] = neg_log_p_t
+
+            # Compute perplexity over the window
+            if generated_tokens >= window_size - 1:
+                start = generated_tokens - window_size + 1
+                avg_neg_log_p = log_prob_history[:, start : generated_tokens + 1].mean(dim=1)
+            else:
+                avg_neg_log_p = log_prob_history[:, : generated_tokens + 1].mean(dim=1)
+            perplexity = torch.exp(avg_neg_log_p)
+
+            # Adjust threshold for exploration steps
+            effective_threshold = perplexity_threshold
+            if explore_start:
+                effective_threshold *= explore_perplexity_factor
+
+            # Stop if perplexity exceeds threshold
+            stop_mask = perplexity > effective_threshold
+            stopped_early = stopped_early | stop_mask
+            unfinished_sequences = unfinished_sequences * (~stop_mask).long()
+
+            # Handle special token replacement
             if (
                 explore_replace_prob > 0
                 and explore_max_replacements > 0
                 and generated_tokens > (explore_start_steps + explore_skip_n) * 2
             ):
                 generated_ids = input_ids[:, initial_seq_len:]
-
-                # Check for special patterns and determine if replacement is allowed
                 if self.prevent_patterns:
                     pattern_found = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
                     for pattern in self.prevent_patterns:
@@ -323,24 +358,16 @@ class CustomLLMGenerator:
                     can_replace = ~pattern_found
                 else:
                     can_replace = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
-
-                # Only allow replacement if under the maximum count
                 can_replace = can_replace & (replacement_counts < explore_max_replacements)
-
-                # Check for correctness
                 if correctness_callback is not None:
                     incorrect_mask = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
                     for i, (seq, replace) in enumerate(zip(generated_ids, can_replace)):
                         if replace:
                             text = self.tokenizer.decode(seq, skip_special_tokens=True)
                             incorrect_mask[i] = float(correctness_callback(text)) == 0.0
-
-                    # Only replace for incorrect ones
                     can_replace = can_replace & incorrect_mask
-
                 if can_replace.sum() > 0:
                     next_tokens, replace_mask = self._replace_special_tokens(next_tokens, can_replace, explore_replace_prob)
-                    # Increment the replacement counter for sequences where replacement occurred
                     replacement_counts += replace_mask.long()
 
             # Update sequences
@@ -358,7 +385,10 @@ class CustomLLMGenerator:
 
             generated_tokens += 1
 
-        return GenerateDecoderOnlyOutput(sequences=input_ids)
+        # Coherence status: True if not stopped due to loss threshold
+        is_coherent = ~stopped_early
+
+        return ExtendedGenerateDecoderOnlyOutput(sequences=input_ids, is_coherent=is_coherent)
 
 
 if __name__ == '__main__':
@@ -377,7 +407,7 @@ if __name__ == '__main__':
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch_dtype).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    generator = CustomLLMGenerator(model)
+    generator = CustomLLMGenerator(model, tokenizer)
 
     # Example batch input
     message = [
@@ -403,19 +433,21 @@ if __name__ == '__main__':
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
         temperature=temperatures,
-        max_new_tokens=512,
+        max_new_tokens=1024,
         top_p=1.0,
         top_k=50,
-        explore_start_steps=50,
-        explore_top_k=100,
-        explore_replace_prob=0.4,
+        explore_start_steps=20,
+        explore_top_k=200,
+        window_siz=10,
+        perplexity_threshold=30.0,
+        explore_perplexity_factor=2.0,
     )
 
     # Decode the output tokens back to text
     input_len = inputs.input_ids.shape[1]
     generated_texts = tokenizer.batch_decode(output.sequences[:, input_len:], skip_special_tokens=True)
+    is_coherent = output.is_coherent.cpu().tolist()
 
-    # print("Generated Texts:")
     for i, text in enumerate(generated_texts):
-        print(f"Generated [{i}]: '{text}'\n")
+        print(f"Generated [{i} - {is_coherent[i]}]: '{text}'\n")
         print('\n\n--\n\n')
