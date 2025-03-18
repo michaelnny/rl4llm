@@ -10,11 +10,6 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class ExtendedGenerateDecoderOnlyOutput(GenerateDecoderOnlyOutput):
-    is_coherent: Optional[torch.BoolTensor] = None
-
-
 class CustomLLMGenerator:
     """
     A custom class for text generation using a language model (LLM).
@@ -73,6 +68,53 @@ class CustomLLMGenerator:
         matches = (windows == pattern_tensor).all(dim=2)
         return matches.any(dim=1)
 
+    def _check_replacement_patterns(self, generated_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Check if the generated sequences contain any patterns that would prevent replacement.
+
+        Args:
+            generated_ids (torch.Tensor): Generated token IDs of shape [batch_size, seq_len].
+
+        Returns:
+            torch.Tensor: Boolean tensor of shape [batch_size] indicating if replacement is allowed.
+        """
+        batch_size = generated_ids.shape[0]
+        if not self.prevent_patterns:
+            return torch.ones(batch_size, dtype=torch.bool, device=generated_ids.device)
+
+        pattern_found = torch.zeros(batch_size, dtype=torch.bool, device=generated_ids.device)
+        for pattern in self.prevent_patterns:
+            pattern_found |= self._has_pattern(generated_ids, pattern)
+
+        return ~pattern_found
+
+    def _check_correctness(
+        self, generated_ids: torch.Tensor, can_replace: torch.Tensor, correctness_callback: Optional[Callable]
+    ) -> torch.Tensor:
+        """
+        Check if the generated sequences are correct using the provided callback.
+
+        Args:
+            generated_ids (torch.Tensor): Generated token IDs of shape [batch_size, seq_len].
+            can_replace (torch.Tensor): Boolean tensor of shape [batch_size] indicating if replacement is allowed.
+            correctness_callback (Optional[Callable]): Function to evaluate correctness.
+
+        Returns:
+            torch.Tensor: Boolean tensor of shape [batch_size] indicating incorrectness.
+        """
+        batch_size = generated_ids.shape[0]
+        incorrect_mask = torch.zeros(batch_size, dtype=torch.bool, device=generated_ids.device)
+
+        if correctness_callback is None:
+            return incorrect_mask
+
+        for i, (seq, replace) in enumerate(zip(generated_ids, can_replace)):
+            if replace:
+                text = self.tokenizer.decode(seq, skip_special_tokens=True)
+                incorrect_mask[i] = float(correctness_callback(text)) == 0.0
+
+        return incorrect_mask
+
     def _replace_special_tokens(
         self, next_tokens: torch.Tensor, can_replace: torch.Tensor, replace_prob: float = 0.2
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -89,7 +131,7 @@ class CustomLLMGenerator:
             torch.Tensor: The replacement mask.
         """
         if not self.source_tokens or not self.target_tokens or replace_prob <= 0.0:
-            return next_tokens
+            return next_tokens, torch.zeros_like(can_replace)
 
         batch_size = next_tokens.size(0)
         device = next_tokens.device
@@ -105,6 +147,38 @@ class CustomLLMGenerator:
         modified_tokens = torch.where(replace_mask, target_tokens, modified_tokens)
 
         return modified_tokens, replace_mask
+
+    def _determine_replacement_eligibility(
+        self,
+        generated_ids: torch.Tensor,
+        replacement_counts: torch.Tensor,
+        explore_max_replacements: int,
+        correctness_callback: Optional[Callable] = None,
+    ) -> torch.Tensor:
+        """
+        Determine which sequences are eligible for token replacement.
+
+        Args:
+            generated_ids (torch.Tensor): Generated token IDs of shape [batch_size, seq_len].
+            replacement_counts (torch.Tensor): Count of replacements already made.
+            explore_max_replacements (int): Maximum number of replacements allowed.
+            correctness_callback (Optional[Callable]): Function to evaluate correctness.
+
+        Returns:
+            torch.Tensor: Boolean tensor of shape [batch_size] indicating eligibility for replacement.
+        """
+        # Check for special patterns that would prevent replacement
+        can_replace = self._check_replacement_patterns(generated_ids)
+
+        # Only allow replacement if under the maximum count
+        can_replace = can_replace & (replacement_counts < explore_max_replacements)
+
+        # Check for correctness if a callback is provided
+        if correctness_callback is not None:
+            incorrect_mask = self._check_correctness(generated_ids, can_replace, correctness_callback)
+            can_replace = can_replace & incorrect_mask
+
+        return can_replace
 
     def _update_sequences(
         self,
@@ -142,7 +216,7 @@ class CustomLLMGenerator:
 
         return input_ids, attention_mask, unfinished_sequences
 
-    def _uniform_top_k_sampling(self, logits: torch.Tensor, top_k: int) -> torch.Tensor:
+    def _uniform_sampling(self, logits: torch.Tensor, top_k: int) -> torch.Tensor:
         """
         Uniformly sample from the top-k tokens.
 
@@ -164,7 +238,7 @@ class CustomLLMGenerator:
 
         return next_tokens
 
-    def _sample_next_batch_tokens(
+    def _sampling(
         self,
         token_logits: torch.Tensor,
         temperature: torch.Tensor,
@@ -222,6 +296,47 @@ class CustomLLMGenerator:
         assert next_tokens.dim() == 1 and next_tokens.size(0) == token_logits.size(0)
         return next_tokens
 
+    def _apply_token_replacement(
+        self,
+        next_tokens: torch.Tensor,
+        input_ids: torch.Tensor,
+        initial_seq_len: int,
+        replacement_counts: torch.Tensor,
+        explore_max_replacements: int,
+        explore_replace_prob: float,
+        correctness_callback: Optional[Callable],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply token replacement if conditions are met.
+
+        Args:
+            next_tokens (torch.Tensor): Tokens to potentially replace.
+            input_ids (torch.Tensor): Current token IDs of the generated sequence.
+            initial_seq_len (int): Initial sequence length.
+            replacement_counts (torch.Tensor): Count of replacements already made.
+            explore_max_replacements (int): Maximum number of replacements allowed.
+            explore_replace_prob (float): Probability of token replacement.
+            correctness_callback (Optional[Callable]): Function to evaluate correctness.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Modified tokens and updated replacement counts.
+        """
+        # Get the generated part of the sequence
+        generated_ids = input_ids[:, initial_seq_len:]
+
+        # Determine which sequences are eligible for replacement
+        can_replace = self._determine_replacement_eligibility(
+            generated_ids, replacement_counts, explore_max_replacements, correctness_callback
+        )
+
+        if can_replace.sum() > 0:
+            # Apply replacement
+            next_tokens, replace_mask = self._replace_special_tokens(next_tokens, can_replace, explore_replace_prob)
+            # Update replacement counts
+            replacement_counts += replace_mask.long()
+
+        return next_tokens, replacement_counts
+
     @torch.no_grad()
     def generate(
         self,
@@ -239,14 +354,10 @@ class CustomLLMGenerator:
         explore_replace_prob: float = 0.0,
         explore_max_replacements: int = 0,
         correctness_callback: Optional[Callable] = None,
-        window_size: int = 10,
-        perplexity_threshold: float = 100.0,  # New parameter replacing loss_threshold
-        explore_perplexity_factor: float = 2.0,  # Scaling factor for exploration steps
         **kwargs,
-    ) -> ExtendedGenerateDecoderOnlyOutput:
+    ) -> GenerateDecoderOnlyOutput:
         """
         Generate text with customizable sampling, exploration, and special token replacement.
-        Enhanced to detect and stop incoherent content based on token probability monitoring.
 
         Args:
             input_ids (torch.Tensor): Initial token IDs, shape [batch_size, seq_len].
@@ -262,26 +373,20 @@ class CustomLLMGenerator:
             explore_top_k (int): Top-k for exploration (default: 20).
             explore_replace_prob (float): Probability of token replacement (default: 0.0).
             explore_max_replacements (int): Max replacements per sequence (default: 0).
-            correctness_callback (Optional[Callable]): Function that evaluates the correctness of the generated text.
-                                                Should return a float between 0 and 1, where 0 indicates
-                                                incorrect (replacement needed) and 1 indicates correct.
-            window_size (int): Number of tokens for moving average loss calculation (default: 10).
-            perplexity_threshold (float): Threshold for perplexity to stop generation (default: 100.0).
-            explore_perplexity_factor (float): Factor to scale perplexity threshold during exploration (default: 2.0).
+            correctness_callback (Optional[callable]): Function that evaluates the correctness of the generated text.
+                                        Should return a float between 0 and 1, where 0 indicates
+                                        incorrect (replacement needed) and 1 indicates correct.
             **kwargs: Additional arguments (unused).
 
         Returns:
-            ExtendedGenerateDecoderOnlyOutput: Generated sequences.
+            GenerateDecoderOnlyOutput: Generated sequences.
         """
-        
 
         batch_size = input_ids.shape[0]
         initial_seq_len = input_ids.size(1)
         generated_tokens = 0
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         replacement_counts = torch.zeros(batch_size, dtype=torch.long, device=input_ids.device)
-        stopped_early = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-        log_prob_history = torch.zeros(batch_size, max_new_tokens, device=input_ids.device)  # Store -log(p)
 
         past_key_values = None
 
@@ -303,72 +408,40 @@ class CustomLLMGenerator:
             next_token_logits = outputs.logits[:, -1, :].float()
             past_key_values = outputs.past_key_values
 
-            # Compute full probabilities for perplexity monitoring
-            full_probs = F.softmax(next_token_logits, dim=-1)
-
             # Exploration logic
             explore_start = explore_start_steps > 0 and (generated_tokens - explore_skip_n) < explore_start_steps
             if explore_skip_n and generated_tokens < explore_skip_n:
                 explore_start = False
 
             if explore_start:
-                next_tokens = self._uniform_top_k_sampling(next_token_logits, top_k=min(10, explore_top_k))
+                # try decay explore topk
+                # effective_steps = max(0, generated_tokens - explore_skip_n)
+                # current_explore_top_k = max(10, explore_top_k - effective_steps * 10)
+                next_tokens = self._uniform_sampling(next_token_logits, top_k=min(10, explore_top_k))
             else:
-                next_tokens = self._sample_next_batch_tokens(
-                    token_logits=next_token_logits,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                )
+                # Sample next tokens
+                next_tokens = self._sampling(token_logits=next_token_logits, temperature=temperature, top_p=top_p, top_k=top_k)
 
-            # Compute token probability and negative log probability
-            p_t = full_probs.gather(1, next_tokens.unsqueeze(1)).squeeze(1)
-            neg_log_p_t = -torch.log(p_t + 1e-8)  # Add small epsilon to avoid log(0)
-            log_prob_history[:, generated_tokens] = neg_log_p_t
-
-            # Compute perplexity over the window
-            if generated_tokens >= window_size - 1:
-                start = generated_tokens - window_size + 1
-                avg_neg_log_p = log_prob_history[:, start : generated_tokens + 1].mean(dim=1)
-            else:
-                avg_neg_log_p = log_prob_history[:, : generated_tokens + 1].mean(dim=1)
-            perplexity = torch.exp(avg_neg_log_p)
-
-            # Adjust threshold for exploration steps
-            effective_threshold = perplexity_threshold
-            if explore_start:
-                effective_threshold *= explore_perplexity_factor
-
-            # Stop if perplexity exceeds threshold
-            stop_mask = perplexity > effective_threshold
-            stopped_early = stopped_early | stop_mask
-            unfinished_sequences = unfinished_sequences * (~stop_mask).long()
-
-            # Handle special token replacement
+            # Check if we should consider replacement
+            should_replace = True
             if (
-                explore_replace_prob > 0
-                and explore_max_replacements > 0
-                and generated_tokens > (explore_start_steps + explore_skip_n) * 2
+                explore_replace_prob <= 0
+                or explore_max_replacements <= 0
+                or generated_tokens <= (explore_start_steps + explore_skip_n) * 2
             ):
-                generated_ids = input_ids[:, initial_seq_len:]
-                if self.prevent_patterns:
-                    pattern_found = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-                    for pattern in self.prevent_patterns:
-                        pattern_found |= self._has_pattern(generated_ids, pattern)
-                    can_replace = ~pattern_found
-                else:
-                    can_replace = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
-                can_replace = can_replace & (replacement_counts < explore_max_replacements)
-                if correctness_callback is not None:
-                    incorrect_mask = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-                    for i, (seq, replace) in enumerate(zip(generated_ids, can_replace)):
-                        if replace:
-                            text = self.tokenizer.decode(seq, skip_special_tokens=True)
-                            incorrect_mask[i] = float(correctness_callback(text)) == 0.0
-                    can_replace = can_replace & incorrect_mask
-                if can_replace.sum() > 0:
-                    next_tokens, replace_mask = self._replace_special_tokens(next_tokens, can_replace, explore_replace_prob)
-                    replacement_counts += replace_mask.long()
+                should_replace = False
+
+            if should_replace:
+                # Apply token replacement
+                next_tokens, replacement_counts = self._apply_token_replacement(
+                    next_tokens,
+                    input_ids,
+                    initial_seq_len,
+                    replacement_counts,
+                    explore_max_replacements,
+                    explore_replace_prob,
+                    correctness_callback,
+                )
 
             # Update sequences
             input_ids, attention_mask, unfinished_sequences = self._update_sequences(
@@ -385,10 +458,7 @@ class CustomLLMGenerator:
 
             generated_tokens += 1
 
-        # Coherence status: True if not stopped due to loss threshold
-        is_coherent = ~stopped_early
-
-        return ExtendedGenerateDecoderOnlyOutput(sequences=input_ids, is_coherent=is_coherent)
+        return GenerateDecoderOnlyOutput(sequences=input_ids)
 
 
 if __name__ == '__main__':
@@ -436,18 +506,16 @@ if __name__ == '__main__':
         max_new_tokens=1024,
         top_p=1.0,
         top_k=50,
-        explore_start_steps=20,
-        explore_top_k=200,
-        window_siz=10,
-        perplexity_threshold=30.0,
-        explore_perplexity_factor=2.0,
+        explore_start_steps=2,
+        explore_top_k=100,
+        explore_replace_prob=0.2,
+        explore_max_replacements=2,
     )
 
     # Decode the output tokens back to text
     input_len = inputs.input_ids.shape[1]
     generated_texts = tokenizer.batch_decode(output.sequences[:, input_len:], skip_special_tokens=True)
-    is_coherent = output.is_coherent.cpu().tolist()
 
     for i, text in enumerate(generated_texts):
-        print(f"Generated [{i} - {is_coherent[i]}]: '{text}'\n")
+        print(f"Generated [{i}]: '{text}'\n")
         print('\n\n--\n\n')
