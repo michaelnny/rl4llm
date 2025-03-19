@@ -6,14 +6,9 @@ from traceback import format_exc
 
 import torch
 
-from rl4llm.generations import SyntheticDataGenerator
 from rl4llm.data import load_and_combine_datasets
-from rl4llm.utils import (
-    create_model_and_tokenizer,
-    load_yaml_config_file,
-    set_seed,
-    setup_logger,
-)
+from rl4llm.generations import SyntheticDataGenerator
+from rl4llm.utils import create_model_and_tokenizer, load_yaml_config_file, set_seed, setup_logger
 
 
 def parse_args():
@@ -39,7 +34,8 @@ def main():
     datasets = config.get('job').get('datasets')
     max_train_samples = config.get('job').get('max_train_samples', None)
     max_test_samples = config.get('job').get('max_test_samples', None)
-    n_samples_per_prompt = config.get('job').get('n_samples_per_prompt', 10)
+    n_samples = config.get('job').get('n_samples', 10)
+    min_new_tokens = config.get('job').get('min_new_tokens', 50)
     max_new_tokens = config.get('job').get('max_new_tokens', 1024)
     system_prompt = config.get('job').get('system_prompt', None)
     set_seed(seed)
@@ -65,23 +61,30 @@ def main():
         device = torch.device('mps')
     elif torch.cuda.is_available():
         device = torch.device('cuda')
-        torch_dtype = torch.bfloat16
+        if torch.cuda.is_bf16_supported():
+            torch_dtype = torch.bfloat16
     else:
         device = torch.device('cpu')
 
     model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
 
-    generator = SyntheticDataGenerator(model=model, tokenizer=tokenizer, device=device, system_prompt=system_prompt, output_dir=artifacts_path)
+    generator = SyntheticDataGenerator(
+        model=model, tokenizer=tokenizer, device=device, system_prompt=system_prompt, output_dir=artifacts_path
+    )
 
     def handle_exit():
         pass
 
     try:
         logger.info('Generating training data...')
-        generator.generate_dataset(train_ds['question'], n_samples_per_prompt, max_new_tokens, True)
+        generator.generate_dataset(train_ds.to_list(), n_samples, min_new_tokens, max_new_tokens, True)
 
         logger.info('Generating test data...')
-        generator.generate_dataset(test_ds['question'], n_samples_per_prompt, max_new_tokens, False)
+        generator.generate_dataset(test_ds.to_list(), n_samples, min_new_tokens, max_new_tokens, False)
+
+        logger.info('Generating additional training data with dual languages...')
+        # generator.generate_dataset(train_ds.to_list(), n_samples, min_new_tokens, max_new_tokens, True)
+
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
         handle_exit()

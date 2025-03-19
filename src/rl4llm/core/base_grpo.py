@@ -202,11 +202,11 @@ class BaseGRPOTrainer(ABC):
             # 'top_p': None,
             # 'top_k': None,
             # 'do_sample': False,  # Greedy sampling for evaluation
-            "temperature": 0.7,
-            "top_p": 0.95,
-            "top_k": 20,
+            'temperature': 0.7,
+            'top_p': 0.95,
+            'top_k': 20,
             'repetition_penalty': 1.1,
-            "do_sample": True,
+            'do_sample': True,
             'use_cache': True,
             'output_scores': False,
             'output_logits': False,
@@ -727,7 +727,6 @@ class BaseGRPOTrainer(ABC):
         # Scale scores
         accuracy_reward = 1.0 * accuracy_score
         format_reward = 0.5 * format_score
-        # format_reward = 0.2 * format_score if format_score > 0 else 0.5 * format_score
 
         # Strict Hierarchy: Format reward only if accuracy is perfect, but still keeps the penalty for repetition or incoherent answer
         if accuracy_score == 0.0 and format_score > 0.0:
@@ -788,8 +787,6 @@ class BaseGRPOTrainer(ABC):
         advantages = batch.advantages.to(self.device)
         loss_mask = batch.loss_mask.to(self.device)
         ref_logprobs = batch.ref_logprobs.to(self.device)
-        advantages = batch.advantages.to(self.device)
-        behavior_logprobs = batch.pi_logprobs.to(self.device)
         loss_mask = batch.loss_mask.to(self.device)
 
         if self.config.normalize_advantages:
@@ -803,9 +800,18 @@ class BaseGRPOTrainer(ABC):
         # First average over the sequence length, then average over the batch
         pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
 
+        # Compute entropy for the policy
+        # Convert log probabilities to probabilities first
+        probs = torch.exp(pi_logprobs)
+        entropies = -torch.sum(probs * pi_logprobs, dim=-1)
+        entropy = masked_mean(entropies, loss_mask, dim=1).mean()
+        entropy_loss = self.config.entropy_loss_coef * entropy
+
         # Initialize metrics with common values
         metrics = {
             'loss/pg': pg_loss.detach().item(),
+            'loss/entropy': entropy.detach().item(),
+            'entropy': entropy.detach().item(),
         }
 
         # Compute KL divergence if coefficient is positive
@@ -821,7 +827,7 @@ class BaseGRPOTrainer(ABC):
             kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
-            loss = pg_loss + kl_loss
+            loss = pg_loss + kl_loss + entropy_loss
             metrics.update(
                 {
                     'loss/total': loss.detach().item(),
@@ -830,7 +836,7 @@ class BaseGRPOTrainer(ABC):
                 }
             )
         else:
-            loss = pg_loss
+            loss = pg_loss + entropy_loss
 
         return loss, metrics
 

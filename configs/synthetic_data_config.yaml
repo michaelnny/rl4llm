@@ -1,14 +1,15 @@
 # Synthetic coherent dataset generation config
 job:
   seed: 193
-  artifacts_path: "./data/synthetic_coherent_dataset"
+  artifacts_path: "./test_data/synthetic_coherent_dataset"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
   max_train_samples: 32         # for a quick run
-  max_test_samples: 4        
-  n_samples_per_prompt: 4
-  max_new_tokens: 512
+  max_test_samples: 16        
+  n_samples: 16
+  min_new_tokens: 50
+  max_new_tokens: 2048
   system_prompt: |
     A conversation between User and Assistant. The user asks a question, and the Assistant solves it.  
     The Assistant first thinks about the reasoning process internally and then provides the user with the answer.  
@@ -17,10 +18,9 @@ job:
     The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively. i.e.,  
     `<think> Unstructured, free-form reasoning process exploring the problem in depth </think>`  
     `<answer> A clear and concise high-level summary of the solution and final answer </answer>`
-  
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-7B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: false
-  flash_attention: false
+  flash_attention: true

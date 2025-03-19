@@ -49,7 +49,8 @@ class GRPOConfig(BaseModel):
     gamma: float = Field(1.0, ge=0.0, le=1.0, description='Default discount factor for compute returns')
     normalize_group_rewards: bool = Field(True, description='Normalized rewards for the group outcomes')
     normalize_advantages: bool = Field(False, description='Normalized advantages before compute PG loss')
-    kl_loss_coef: float = Field(0.01, ge=0.0, le=1.0, description='KL penalty loss coefficient')
+    entropy_loss_coef: float = Field(0.0, ge=0.0, le=1.0, description='Entropy loss coefficient')
+    kl_loss_coef: float = Field(0.04, ge=0.0, le=1.0, description='KL penalty loss coefficient')
     clip_grad_norm: Optional[float] = Field(0.0, ge=0.0, le=10.0, description='Clip L2 gradient norm')
 
     # enhancement of dynamic discount based on sequence length

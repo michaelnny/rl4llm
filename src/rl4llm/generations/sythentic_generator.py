@@ -10,38 +10,9 @@ import pandas as pd
 import torch
 from pydantic import BaseModel, Field
 from tqdm import tqdm
-from transformers import PreTrainedModel, PreTrainedTokenizer, LogitsProcessor
+from transformers import LogitsProcessor, PreTrainedModel, PreTrainedTokenizer
 
 logger = logging.getLogger(__name__)
-
-
-class GeneratedSample(BaseModel):
-    """
-    Data structure for storing generated samples with minimal metadata.
-    """
-
-    prompt: str = Field(..., description="The input prompt used to generate the sample")
-    text: str = Field(..., description="The generated text output from the model")
-    is_coherent: bool = Field(..., description="Whether the sample is coherent (True) or degraded (False)")
-    model_name: str = Field(..., description="Name of the model used for generation")
-    prompt_tokens: int = Field(..., description="Number of tokens in the prompt")
-    completion_tokens: int = Field(..., description="Number of tokens in the generated completion")
-    total_tokens: int = Field(..., description="Total number of tokens (prompt + completion)")
-
-    class Config:
-        arbitrary_types_allowed = True
-
-
-class GenerationMetadata(BaseModel):
-    """
-    Metadata for a generation run.
-    """
-
-    model_name: str = Field(..., description="Name of the model used for generation")
-    timestamp: str = Field(..., description="Timestamp of the generation run")
-    train_ratio: float = Field(..., description="Ratio of data used for training vs validation")
-    train_statistics: Dict[str, Any] = Field(..., description="Statistics about the training dataset")
-    val_statistics: Dict[str, Any] = Field(..., description="Statistics about the validation dataset")
 
 
 class DegradingLogitsProcessor(LogitsProcessor):
@@ -49,11 +20,12 @@ class DegradingLogitsProcessor(LogitsProcessor):
     def __init__(
         self,
         max_length: int,
-        prompt_length: int = 0,  # Length of input prompt
-        degradation_factor: float = 0.5,  # Controls dampening strength
-        top_k: int = 50,  # Number of top tokens for random sampling
-        eos_token_id: int = None,  # EOS token ID to mask
-        min_degradation_strength: float = 0.6,  # Starting strength after coherent_length
+        prompt_length: int = 0,
+        degradation_factor: float = 0.5,
+        top_k: int = 50,
+        eos_token_id: int = None,
+        min_degradation_strength: float = 0.7,
+        min_coherent_tokens: int = 100,
     ):
         """
         Logits processor with fast, exponential degradation strength.
@@ -72,14 +44,11 @@ class DegradingLogitsProcessor(LogitsProcessor):
         self.top_k = top_k
         self.eos_token_id = eos_token_id
         self.min_degradation_strength = min_degradation_strength
+        self.min_coherent_tokens = min_coherent_tokens
 
         # Randomize coherent length uniformly
-        coherent_fraction = random.uniform(0.1, 0.3)
-        if prompt_length > 0:
-            min_coherent = min(prompt_length + int(max_length * 0.1), int(max_length * 0.3))
-            self.coherent_length = max(min_coherent, int(max_length * coherent_fraction))
-        else:
-            self.coherent_length = int(max_length * coherent_fraction)
+        coherent_fraction = random.uniform(0.05, 0.3)  # if max_length > 1000 else random.uniform(0.01, 0.1)
+        self.coherent_length = max(min_coherent_tokens, int(max_length * coherent_fraction))
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         """
@@ -92,42 +61,51 @@ class DegradingLogitsProcessor(LogitsProcessor):
         Returns:
             torch.FloatTensor: Modified logits.
         """
-        current_length = input_ids.shape[-1]
+        current_length = input_ids.shape[-1] - self.prompt_length
 
-        # Mask EOS token before coherent_length to ensure sequence continues
-        if self.eos_token_id is not None and current_length < self.coherent_length:
-            scores[:, self.eos_token_id] = -1e8
+        # Calculate effective maximum length
+        effective_max_length = self.max_length - self.prompt_length
 
-        # Calculate degradation strength
-        if current_length <= self.coherent_length:
-            return scores  # No change during coherent part
+        # Determine if we're in the final portion of generation
+        near_end = current_length >= (effective_max_length * 0.75)
+
+        # Mask EOS token with modified logic
+        if self.eos_token_id is not None:
+            # Only mask EOS during early generation or if no degradation applied yet
+            if current_length < self.coherent_length:
+                scores[:, self.eos_token_id] = -1e8
+
+        # Calculate degradation strength with improved logic
+        if current_length <= self.coherent_length and not near_end:
+            # No degradation during initial coherent part, unless near the end
+            return scores
         else:
-            # Scale based on remaining length after prompt and coherent part
-            effective_max_length = self.max_length - self.prompt_length
-            if effective_max_length <= self.coherent_length:
-                degradation_strength = 1.0  # Max degradation if no room left
+            # Ensure at least some degradation on short outputs
+            if effective_max_length <= self.coherent_length or near_end:
+                # We're either in a very short output scenario or near the end - force degradation
+                degradation_strength = 0.8 if not near_end else 1.0
             else:
-                # Exponential degradation: starts at min_degradation_strength, quickly reaches 1.0
+                # Standard exponential degradation
                 progress = (current_length - self.coherent_length) / (effective_max_length - self.coherent_length)
                 degradation_strength = self.min_degradation_strength + (1.0 - self.min_degradation_strength) * (
                     1.0 - math.exp(-5.0 * progress)
                 )
-                degradation_strength = min(1.0, degradation_strength)  # Cap at 1.0
+                degradation_strength = min(1.0, degradation_strength)
 
-        # Apply degradation with probability tied to degradation_strength
-        if random.random() < degradation_strength:
-            # Randomly choose between top-K sampling and inverse-weighted sampling
-            if random.random() < 0.5:  # 50% chance for top-K
-                # Top-K sampling: Zero out all but top K logits
-                values, indices = torch.topk(scores, self.top_k, dim=-1)
-                mask = torch.ones_like(scores, dtype=torch.bool)
-                mask.scatter_(-1, indices, False)
-                scores[mask] = -float('inf')
-            else:  # 50% chance for inverse-weighted sampling
-                # Blend original and inverted logits
-                inverted_scores = -scores
-                blend_factor = self.degradation_factor * degradation_strength
-                scores = (1 - blend_factor) * scores + blend_factor * inverted_scores
+            if random.random() < degradation_strength:
+                # Blend between strategies based on length
+                if random.random() < 0.5 if current_length < self.coherent_length * 2 else 0.7:
+                    # Top-K sampling
+                    k_value = max(5, self.top_k)  # Ensure k is not too small
+                    values, indices = torch.topk(scores, k_value, dim=-1)
+                    mask = torch.ones_like(scores, dtype=torch.bool)
+                    mask.scatter_(-1, indices, False)
+                    scores[mask] = -float('inf')
+                else:
+                    # Inverse-weighted sampling with boosted blend factor
+                    inverted_scores = -scores
+                    blend_factor = min(1.0, self.degradation_factor * degradation_strength)
+                    scores = (1 - blend_factor) * scores + blend_factor * inverted_scores
 
         return scores
 
@@ -142,8 +120,8 @@ class SyntheticDataGenerator:
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizer,
         system_prompt: str = None,
-        device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        output_dir: str = "./data",
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        output_dir: str = './data',
         max_attempts: int = 3,
         log_level: int = logging.INFO,
     ):
@@ -164,7 +142,7 @@ class SyntheticDataGenerator:
         self.system_prompt = system_prompt
         self.max_attempts = max_attempts
 
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         run_dir = os.path.join(output_dir, f"run_{timestamp}")
         os.makedirs(run_dir, exist_ok=True)
         self.output_dir = run_dir
@@ -178,6 +156,7 @@ class SyntheticDataGenerator:
         self.model = model.to(self.device)
         self.tokenizer = tokenizer
         self.model_name = model.config.name_or_path
+        self.vocab_size = tokenizer.vocab_size
 
         # If the model doesn't have a padding token, set it to the eos token
         if self.tokenizer.pad_token is None:
@@ -186,11 +165,13 @@ class SyntheticDataGenerator:
 
         # Track metadata for the generation runs
         self.run_metadata = {
-            "model_name": self.model_name,
-            "timestamp": datetime.datetime.now().isoformat(),
+            'model_name': self.model_name,
+            'timestamp': datetime.datetime.now().isoformat(),
         }
 
-    def generate_good_samples(self, prompt: str, n_samples: int = 1, max_new_tokens: int = 1024) -> List[Tuple[str, Dict]]:
+    def generate_good_samples(
+        self, prompt: str, n_samples: int = 1, min_new_tokens: int = 30, max_new_tokens: int = 1024
+    ) -> List[Tuple[str, Dict]]:
         """
         Generate multiple coherent (good) samples from a single prompt in one call.
 
@@ -203,16 +184,18 @@ class SyntheticDataGenerator:
             List[Tuple[str, Dict]]: List of tuples, each containing the generated text (completion) and a dictionary of generation parameters.
         """
         gen_params = {
-            "max_new_tokens": max_new_tokens,
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "do_sample": True,
-            "pad_token_id": self.tokenizer.pad_token_id,
-            "num_return_sequences": n_samples,
+            'min_new_tokens': min_new_tokens,
+            'max_new_tokens': max_new_tokens,
+            'temperature': 0.7,
+            'top_p': 0.9,
+            'repetition_penalty': 1.1,
+            'do_sample': True,
+            'pad_token_id': self.tokenizer.pad_token_id,
+            'num_return_sequences': n_samples,
         }
 
         input_prompt = self._build_prompt(prompt)
-        inputs = self.tokenizer(input_prompt, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(input_prompt, return_tensors='pt').to(self.device)
         prompt_tokens = len(inputs.input_ids[0])
 
         with torch.no_grad():
@@ -225,15 +208,17 @@ class SyntheticDataGenerator:
             completion = self.tokenizer.decode(completion_tokens, skip_special_tokens=True).strip()
             completion_tokens = len(completion_tokens)
             stats = {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
+                'prompt_tokens': prompt_tokens,
+                'completion_tokens': completion_tokens,
+                'total_tokens': prompt_tokens + completion_tokens,
             }
             samples.append((completion, stats))
 
         return samples
 
-    def generate_bad_samples(self, prompt: str, n_samples: int = 1, max_new_tokens: int = 1024) -> List[Tuple[str, Dict]]:
+    def generate_bad_samples(
+        self, prompt: str, n_samples: int = 1, min_new_tokens: int = 30, max_new_tokens: int = 1024
+    ) -> List[Tuple[str, Dict]]:
         """
         Generate multiple incoherent (bad) samples from a single prompt in a batched manner.
 
@@ -251,27 +236,30 @@ class SyntheticDataGenerator:
 
         # Prepare inputs
         input_prompt = self._build_prompt(prompt)
-        inputs = self.tokenizer(input_prompt, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(input_prompt, return_tensors='pt').to(self.device)
         prompt_tokens = len(inputs.input_ids[0])
 
         # Define generation parameters
         max_tokens = random.choice(range(int(max_new_tokens * 0.6), max_new_tokens))
         gen_params = {
-            "max_new_tokens": max_tokens,
-            "temperature": 1.0,  # Base temp; logits processor drives chaos
-            "top_p": 1.0,  # Full distribution sampling
-            "do_sample": True,
-            "eos_token_id": self.tokenizer.eos_token_id,
-            "pad_token_id": self.tokenizer.pad_token_id,
-            "num_return_sequences": n_samples,
-            "logits_processor": [
+            'min_new_tokens': min_new_tokens,
+            'max_new_tokens': max_tokens,
+            'temperature': 1.0,
+            'top_p': 1.0,
+            'do_sample': True,
+            'repetition_penalty': 1.0,
+            'eos_token_id': self.tokenizer.eos_token_id,
+            'pad_token_id': self.tokenizer.pad_token_id,
+            'num_return_sequences': n_samples,
+            'logits_processor': [
                 DegradingLogitsProcessor(
                     max_length=max_new_tokens,
                     prompt_length=prompt_tokens,
-                    degradation_factor=random.uniform(0.5, 0.9),
-                    top_k=random.randint(10000, 50000),  # Randomize top-K range
+                    degradation_factor=random.uniform(0.4, 0.8),
+                    top_k=random.randint(int(self.vocab_size // 2), self.vocab_size),  # Randomize top-K range
                     eos_token_id=self.tokenizer.eos_token_id,  # Pass EOS token ID
-                    min_degradation_strength=0.5,  # Start strong after coherent part
+                    min_degradation_strength=0.7,  # Start strong after coherent part
+                    min_coherent_tokens=min_new_tokens,
                 )
             ],
         }
@@ -288,9 +276,9 @@ class SyntheticDataGenerator:
             completion = self.tokenizer.decode(completion_tokens, skip_special_tokens=True).strip()
             completion_tokens = len(completion_tokens)
             stats = {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
+                'prompt_tokens': prompt_tokens,
+                'completion_tokens': completion_tokens,
+                'total_tokens': prompt_tokens + completion_tokens,
             }
 
             bad_samples.append((completion, stats))
@@ -307,27 +295,37 @@ class SyntheticDataGenerator:
         return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     def generate_dataset(
-        self, prompts: List[str], n_samples_per_prompt: int = 5, max_new_tokens: int = 1024, is_train: bool = True
+        self,
+        input_data: List[Dict[str, Any]],
+        n_samples: int = 5,
+        min_new_tokens: int = 30,
+        max_new_tokens: int = 1024,
+        is_train: bool = True,
     ) -> pd.DataFrame:
         """
         Generate a dataset of good and bad samples from a list of prompts.
 
         Args:
-            prompts (List[str]): List of prompts.
-            n_samples_per_prompt (int): Number of samples per prompt.
-            max_length (int): Maximum length of generated text in tokens.
+            input_data (List[Dict[str, Any]]): List of dictionaries containing at least a 'question' field
+            n_samples (int): Number of samples per prompt.
+            min_new_tokens (int): Minimum length of generated text in tokens.
+            max_new_tokens (int): Maximum length of generated text in tokens.
+            is_train (bool): Whether the dataset is for training or validation.
 
         Returns:
             pd.DataFrame: DataFrame containing all generated samples.
         """
         all_samples = []
 
-        for prompt in tqdm(prompts, desc="Generating samples from prompts"):
+        for item in tqdm(input_data, desc='Generating samples from input data'):
             try:
+                prompt = item['question']
                 # Generate good samples in one batch
+                good_samples = []
+                bad_samples = []
                 for attempt in range(self.max_attempts):
                     try:
-                        good_samples = self.generate_good_samples(prompt, n_samples_per_prompt, max_new_tokens)
+                        good_samples = self.generate_good_samples(prompt, n_samples, min_new_tokens, max_new_tokens)
                         if any(good_text.strip() for good_text, _ in good_samples):
                             break
                     except Exception as e:
@@ -336,21 +334,25 @@ class SyntheticDataGenerator:
                         continue
 
                 for good_text, good_stats in good_samples:
-                    good_sample = GeneratedSample(
-                        prompt=prompt,
-                        text=good_text,
-                        is_coherent=True,
-                        model_name=self.model_name,
-                        prompt_tokens=good_stats.get("prompt_tokens", 0),
-                        completion_tokens=good_stats.get("completion_tokens", 0),
-                        total_tokens=good_stats.get("total_tokens", 0),
+                    output_item = item.copy()
+                    output_item.update(
+                        {
+                            'completion': good_text,
+                            'is_coherent': True,
+                            'model_name': self.model_name,
+                            'prompt_tokens': good_stats['prompt_tokens'],
+                            'completion_tokens': good_stats['completion_tokens'],
+                            'total_tokens': good_stats['total_tokens'],
+                        }
                     )
-                    all_samples.append(good_sample.model_dump())
+                    all_samples.append(output_item)
 
                 # Generate bad samples in one batch
                 for attempt in range(self.max_attempts):
                     try:
-                        bad_samples = self.generate_bad_samples(prompt, n_samples_per_prompt, max_new_tokens)
+                        # use a slightly larger number of bad samples as we'll filter out shorter ones
+                        n_bad_samples = int(n_samples * 1.1)
+                        bad_samples = self.generate_bad_samples(prompt, n_bad_samples, min_new_tokens, max_new_tokens)
                         if any(bad_text.strip() for bad_text, _ in bad_samples):
                             break
                     except Exception as e:
@@ -359,21 +361,25 @@ class SyntheticDataGenerator:
                         continue
 
                 for bad_text, bad_stats in bad_samples:
-                    bad_sample = GeneratedSample(
-                        prompt=prompt,
-                        text=bad_text,
-                        is_coherent=False,
-                        model_name=self.model_name,
-                        prompt_tokens=bad_stats.get("prompt_tokens", 0),
-                        completion_tokens=bad_stats.get("completion_tokens", 0),
-                        total_tokens=bad_stats.get("total_tokens", 0),
+                    output_item = item.copy()
+                    output_item.update(
+                        {
+                            'completion': bad_text,
+                            'is_coherent': False,
+                            'model_name': self.model_name,
+                            'prompt_tokens': bad_stats['prompt_tokens'],
+                            'completion_tokens': bad_stats['completion_tokens'],
+                            'total_tokens': bad_stats['total_tokens'],
+                        }
                     )
-                    all_samples.append(bad_sample.model_dump())
+                    all_samples.append(output_item)
 
             except Exception as e:
-                logger.error(f"Error generating samples for prompt '{prompt[:50]}...': {e}")
+                logger.error(f"Error generating samples': {e}")
                 continue
-
+        if len(all_samples) == 0:
+            logger.error('No samples generated')
+            return
         df = pd.DataFrame(all_samples)
         self.save_dataset(df, is_train)
 
@@ -385,37 +391,48 @@ class SyntheticDataGenerator:
             df (pd.DataFrame): DataFrame containing the generated samples.
             train_ratio (float): Ratio of data to use for training vs validation.
         """
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        # Filter out samples with very short completions which are likely not really bad samples
+        incoherent_pv = df[~df['is_coherent']]['completion_tokens'].quantile(0.125)
+        # Filter incoherent samples based on completion token length
+        df = df[~((~df['is_coherent']) & (df['completion_tokens'] <= incoherent_pv))]
 
         # Shuffle the DataFrame
         df = df.sample(frac=1, random_state=42).reset_index(drop=True)
         # Save datasets
-        prefix = "train" if is_train else "val"
+        prefix = 'train' if is_train else 'val'
         save_file = os.path.join(self.output_dir, f"{prefix}.jsonl.gz")
 
-        df.to_json(save_file, orient="records", lines=True, compression="gzip")
+        df.to_json(save_file, orient='records', lines=True, compression='gzip')
 
         # Calculate statistics
         stats = {
-            "model_name": self.model_name,
-            "timestamp": timestamp,
-            "coherent": int(df["is_coherent"].sum()),
-            "incoherent": int(len(df) - df["is_coherent"].sum()),
-            "total_samples": len(df),
-            "avg_prompt_tokens": float(df["prompt_tokens"].mean()),
-            "avg_completion_tokens": float(df["completion_tokens"].mean()),
-            "avg_total_tokens": float(df["total_tokens"].mean()),
-            "max_tokens": int(df["total_tokens"].max()),
+            'model_name': self.model_name,
+            'timestamp': timestamp,
+            'coherent': int(df['is_coherent'].sum()),
+            'incoherent': int(len(df) - df['is_coherent'].sum()),
+            'total_samples': len(df),
+            'avg_prompt_tokens': float(df['prompt_tokens'].mean()),
+            'avg_completion_tokens': float(df['completion_tokens'].mean()),
+            'min_completion_tokens': int(df['completion_tokens'].min()),
+            'max_completion_tokens': int(df['completion_tokens'].max()),
+            'p25_completion_tokens': float(df['completion_tokens'].quantile(0.25)),
+            'p50_completion_tokens': float(df['completion_tokens'].quantile(0.50)),
+            'p75_completion_tokens': float(df['completion_tokens'].quantile(0.75)),
+            'p90_completion_tokens': float(df['completion_tokens'].quantile(0.90)),
+            'avg_total_tokens': float(df['total_tokens'].mean()),
+            'max_total_tokens': int(df['total_tokens'].max()),
         }
 
-        with open(os.path.join(self.output_dir, f"{prefix}_metadata.json"), "w") as f:
+        with open(os.path.join(self.output_dir, f"{prefix}_metadata.json"), 'w') as f:
             f.write(json.dumps(stats, indent=2))
 
         logger.info(f"Saved dataset to {self.output_dir}:")
 
 
 # Example usage
-if __name__ == "__main__":
+if __name__ == '__main__':
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -432,16 +449,16 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch_dtype).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     generator = SyntheticDataGenerator(
-        model=model, tokenizer=tokenizer, device=device, output_dir="./test_data/coherence_samples"
+        model=model, tokenizer=tokenizer, device=device, output_dir='./test_data/coherence_samples'
     )
 
     # Example 1: Generate from a list of prompts
     prompts = [
-        "Explain how photosynthesis works.",
-        "Write a short story about a detective solving a mystery.",
-        "Describe the process of making sourdough bread.",
+        'Explain how photosynthesis works.',
+        'Write a short story about a detective solving a mystery.',
+        'Describe the process of making sourdough bread.',
     ]
-    dataset = generator.generate_dataset(prompts, n_samples_per_prompt=5, max_length=512)
+    dataset = generator.generate_dataset(prompts, n_samples=5, max_length=512)
 
     print(len(dataset))
 
@@ -449,6 +466,6 @@ if __name__ == "__main__":
     # generator.generate_dataset_from_file(
     #     "prompts.csv",
     #     prompt_column="question",
-    #     n_samples_per_prompt=3,
+    #     n_samples=3,
     #     file_format="csv"
     # )
