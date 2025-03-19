@@ -1,16 +1,19 @@
-import torch
-import pandas as pd
-import random
-import re
-import os
-import json
 import datetime
 import hashlib
+import json
 import logging
-from typing import Dict, List, Union, Optional, Tuple, Any
+import math
+import multiprocessing as mp
+import os
+import random
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
+import torch
 from pydantic import BaseModel, Field
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor
 
 # Set up logging
 logging.basicConfig(
@@ -22,7 +25,9 @@ logger = logging.getLogger("SyntheticDataGenerator")
 
 
 class GeneratedSample(BaseModel):
-    """Data structure for storing generated samples with minimal metadata."""
+    """
+    Data structure for storing generated samples with minimal metadata.
+    """
 
     prompt: str = Field(..., description="The input prompt used to generate the sample")
     text: str = Field(..., description="The generated text output from the model")
@@ -37,12 +42,13 @@ class GeneratedSample(BaseModel):
     sample_id: str = Field("", description="Unique identifier for the sample")
 
     class Config:
-        """Pydantic model configuration."""
-
         arbitrary_types_allowed = True
 
     def __init__(self, **data):
-        """Initialize the model and generate a sample ID if not provided."""
+        """
+        Initialize a GeneratedSample instance.
+        If no sample_id is provided, it creates one based on a hash of prompt and text.
+        """
         super().__init__(**data)
         if not self.sample_id:
             content_hash = hashlib.md5(f"{self.prompt}{self.text}".encode()).hexdigest()
@@ -50,7 +56,9 @@ class GeneratedSample(BaseModel):
 
 
 class GenerationMetadata(BaseModel):
-    """Metadata for a generation run."""
+    """
+    Metadata for a generation run.
+    """
 
     model_name: str = Field(..., description="Name of the model used for generation")
     timestamp: str = Field(..., description="Timestamp of the generation run")
@@ -62,8 +70,98 @@ class GenerationMetadata(BaseModel):
     degradation_method_counts: Dict[str, int] = Field(..., description="Count of each degradation method used")
 
 
+class DegradingLogitsProcessor(LogitsProcessor):
+
+    def __init__(
+        self,
+        max_length: int,
+        prompt_length: int = 0,          # Length of input prompt
+        degradation_factor: float = 0.5, # Controls dampening strength
+        top_k: int = 50,                 # Number of top tokens for random sampling
+        eos_token_id: int = None,        # EOS token ID to mask
+        min_degradation_strength: float = 0.7,  # Starting strength after coherent_length
+    ):
+        """
+        Logits processor with fast, exponential degradation strength.
+
+        Args:
+            max_length (int): Total length of the generation.
+            prompt_length (int): Length of the input prompt.
+            degradation_factor (float): Factor to scale logits dampening (0.0–1.0).
+            top_k (int): Number of top tokens to sample from randomly.
+            eos_token_id (int): ID of the EOS token to mask until coherent_length.
+            min_degradation_strength (float): Minimum strength once degradation starts.
+        """
+        self.max_length = max_length
+        self.prompt_length = prompt_length
+        self.degradation_factor = degradation_factor
+        self.top_k = top_k
+        self.eos_token_id = eos_token_id
+        self.min_degradation_strength = min_degradation_strength
+
+        # Randomize coherent length uniformly
+        coherent_fraction = random.uniform(0.05, 0.3)
+        if prompt_length > 0:
+            min_coherent = min(prompt_length + int(max_length * 0.1), int(max_length * 0.3))
+            self.coherent_length = max(min_coherent, int(max_length * coherent_fraction))
+        else:
+            self.coherent_length = int(max_length * coherent_fraction)
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        """
+        Process logits with EOS masking and mixed top-K/inverse sampling.
+
+        Args:
+            input_ids (torch.LongTensor): Generated token IDs so far [batch_size, sequence_length].
+            scores (torch.FloatTensor): Logits for next token [batch_size, vocab_size].
+
+        Returns:
+            torch.FloatTensor: Modified logits.
+        """
+        current_length = input_ids.shape[-1]
+
+        # Mask EOS token before coherent_length to ensure sequence continues
+        if self.eos_token_id is not None and current_length < self.coherent_length:
+            scores[:, self.eos_token_id] = -1e8
+
+        # Calculate degradation strength
+        if current_length <= self.coherent_length:
+            return scores  # No change during coherent part
+        else:
+            # Scale based on remaining length after prompt and coherent part
+            effective_max_length = self.max_length - self.prompt_length
+            if effective_max_length <= self.coherent_length:
+                degradation_strength = 1.0  # Max degradation if no room left
+            else:
+                # Exponential degradation: starts at min_degradation_strength, quickly reaches 1.0
+                progress = (current_length - self.coherent_length) / (effective_max_length - self.coherent_length)
+                degradation_strength = self.min_degradation_strength + (1.0 - self.min_degradation_strength) * (
+                    1.0 - math.exp(-5.0 * progress)
+                )
+                degradation_strength = min(1.0, degradation_strength)  # Cap at 1.0
+
+        # Apply degradation with probability tied to degradation_strength
+        if random.random() < degradation_strength:
+            # Randomly choose between top-K sampling and inverse-weighted sampling
+            if random.random() < 0.5:  # 50% chance for top-K
+                # Top-K sampling: Zero out all but top K logits
+                values, indices = torch.topk(scores, self.top_k, dim=-1)
+                mask = torch.ones_like(scores, dtype=torch.bool)
+                mask.scatter_(-1, indices, False)
+                scores[mask] = -float('inf')
+            else:  # 50% chance for inverse-weighted sampling
+                # Blend original and inverted logits
+                inverted_scores = -scores
+                blend_factor = self.degradation_factor * degradation_strength
+                scores = (1 - blend_factor) * scores + blend_factor * inverted_scores
+
+        return scores
+
+
 class SyntheticDataGenerator:
-    """Generates coherent and incoherent data for training classifier models."""
+    """
+    Generates coherent and incoherent data for training classifier models.
+    """
 
     def __init__(
         self,
@@ -73,22 +171,25 @@ class SyntheticDataGenerator:
         output_dir: str = "./data",
         max_attempts: int = 3,
         log_level: int = logging.INFO,
+        num_workers: Optional[int] = None,  # For the reusable pool
     ):
         """
         Initialize the synthetic data generator.
 
         Args:
-            model_name: Name of the model from Hugging Face to use for generation
-            device: Device to run the model on ('cuda' or 'cpu')
-            seed: Random seed for reproducibility
-            output_dir: Directory to save generated data
-            max_attempts: Maximum number of generation attempts before skipping
-            log_level: Logging level (default: INFO)
+            model_name (str): Name of the model from Hugging Face to use for generation.
+            device (str): Device to run the model on ('cuda' or 'cpu').
+            seed (int): Random seed for reproducibility.
+            output_dir (str): Directory to save generated data.
+            max_attempts (int): Maximum number of generation attempts before skipping.
+            log_level (int): Logging level (default: INFO).
+            num_workers (int): Number of worker threads for post-generation processing.
         """
         self.model_name = model_name
         self.device = device
         self.output_dir = output_dir
         self.max_attempts = max_attempts
+        self.num_workers = num_workers if num_workers and num_workers > 0 else mp.cpu_count()
 
         # Set logger level
         logger.setLevel(log_level)
@@ -120,24 +221,11 @@ class SyntheticDataGenerator:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        # Enhanced token degradation functions
-        self.degradation_functions = {
-            'join': self._degrade_join,
-            'repeat': self._degrade_repeat,
-            'mix_case': self._degrade_mix_case,
-            'insert_symbols': self._degrade_insert_symbols,
-            'camel_case': self._degrade_camel_case,
-            'delete_characters': self._degrade_delete_characters,
-            'swap_adjacent': self._degrade_swap_adjacent,
-            'word_repetition': self._degrade_word_repetition,
-            'sentence_repetition': self._degrade_sentence_repetition,
-        }
-
         # Track metadata for the generation runs
         self.run_metadata = {
             "model_name": model_name,
             "timestamp": datetime.datetime.now().isoformat(),
-            "device": device,
+            # "device": device,
             "seed": seed,
         }
 
@@ -146,25 +234,24 @@ class SyntheticDataGenerator:
         Count the number of tokens in the text.
 
         Args:
-            text: The text to count tokens in
+            text (str): The text to count tokens in.
 
         Returns:
-            Number of tokens in the text
+            int: Number of tokens.
         """
         return len(self.tokenizer.encode(text))
 
-    def generate_good_sample(self, prompt: str, max_length: int = 1024) -> Tuple[str, Dict]:
+    def generate_good_samples(self, prompt: str, n_samples: int = 1, max_length: int = 1024) -> List[Tuple[str, Dict]]:
         """
-        Generate a coherent sample with detailed parameters.
+        Generate multiple coherent (good) samples from a single prompt in one call.
 
         Args:
-            prompt: The input prompt to generate from
-            max_length: Maximum length of the generated text in tokens
+            prompt (str): The input prompt.
+            n_samples (int): Number of samples to generate.
+            max_length (int): Maximum length of the generated text in tokens.
 
         Returns:
-            Tuple containing:
-                - The generated text
-                - Dictionary of generation parameters and token counts
+            List[Tuple[str, Dict]]: List of tuples, each containing the generated text (completion) and a dictionary of generation parameters.
         """
         gen_params = {
             "max_length": max_length,
@@ -172,6 +259,7 @@ class SyntheticDataGenerator:
             "top_p": 0.9,
             "do_sample": True,
             "pad_token_id": self.tokenizer.pad_token_id,
+            "num_return_sequences": n_samples,
         }
 
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
@@ -180,398 +268,190 @@ class SyntheticDataGenerator:
         with torch.no_grad():
             outputs = self.model.generate(**inputs, **gen_params)
 
-        full_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        completion = full_text[len(prompt) :].strip() if full_text.startswith(prompt) else full_text.strip()
-        completion_tokens = self.count_tokens(completion)
+        samples = []
+        for output in outputs:
+            full_text = self.tokenizer.decode(output, skip_special_tokens=True)
+            # Remove the prompt from the generated text if present
+            if full_text.startswith(prompt):
+                completion = full_text[len(prompt) :].strip()
+            else:
+                completion = full_text.strip()
+            completion_tokens = self.count_tokens(completion)
+            sample_params = {
+                **gen_params,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+            samples.append((completion, sample_params))
 
-        return completion, {
-            **gen_params,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        }
+        return samples
 
-    def generate_bad_sample(self, prompt: str, max_length: int = 1024) -> Tuple[str, Dict, List[str]]:
+    def generate_bad_samples(
+        self, prompt: str, n_samples: int = 1, max_length: int = 1024
+    ) -> List[Tuple[str, Dict, List[str]]]:
         """
-        Generate an incoherent sample with detailed parameters and degradation tracking.
+        Generate multiple incoherent (bad) samples from a single prompt in a batched manner.
+
+        This method first generates a batch of coherent parts using num_return_sequences, then for each coherent text
+        generates a degraded continuation using individually randomized parameters.
 
         Args:
-            prompt: The input prompt to generate from
-            max_length: Maximum length of the generated text in tokens
+            prompt (str): The input prompt.
+            n_samples (int): Number of samples to generate.
+            max_length (int): Maximum length for the entire generated text (coherent + degraded).
 
         Returns:
-            Tuple containing:
-                - The generated degraded text
-                - Dictionary of generation parameters and token counts
-                - List of degradation methods applied
+            List[Tuple[str, Dict, List[str]]]: List of tuples, each containing the full generated text, a dictionary of generation parameters, and a list of degradation methods applied.
         """
-        # Select degradation techniques for this sample
-        degradation_methods = []
 
-        # Start with a coherent beginning
-        coherent_ratio = random.uniform(0.2, 0.6)
-        coherent_length = int(max_length * coherent_ratio)
-
-        # Parameters for coherent part
-        coherent_params = {
-            "max_length": min(coherent_length + self.count_tokens(prompt), max_length),
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "do_sample": True,
-            "pad_token_id": self.tokenizer.pad_token_id,
-        }
-
+        # Prepare inputs
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         prompt_tokens = len(inputs.input_ids[0])
 
-        with torch.no_grad():
-            coherent_outputs = self.model.generate(**inputs, **coherent_params)
-
-        coherent_text = self.tokenizer.decode(coherent_outputs[0], skip_special_tokens=True)
-        if coherent_text.startswith(prompt):
-            coherent_text = coherent_text[len(prompt) :].strip()
-
-        degradation_methods.append("partial_coherent")
-
-        # Parameters for degraded part
-        temp = random.uniform(1.5, 3.0)
-        top_p = random.uniform(0.9, 1.0)
-        rep_penalty = random.uniform(0.6, 0.9)
-
-        degraded_params = {
+        # Define generation parameters
+        coherent_fraction = random.uniform(0.2, 0.4)  # Keep 20–40% coherent
+        gen_params = {
             "max_length": max_length,
-            "temperature": temp,
-            "top_p": top_p,
+            "temperature": 1.0,  # Base temp; logits processor drives chaos
+            "top_p": 1.0,  # Full distribution sampling
             "do_sample": True,
-            "repetition_penalty": rep_penalty,
+            "eos_token_id": self.tokenizer.eos_token_id,
             "pad_token_id": self.tokenizer.pad_token_id,
-            "no_repeat_ngram_size": 0,
+            "num_return_sequences": n_samples,
+            "logits_processor": [
+                DegradingLogitsProcessor(
+                    max_length=max_length,
+                    prompt_length=prompt_tokens,
+                    degradation_factor=random.uniform(0.5, 0.9),
+                    top_k=random.randint(10000, 50000),  # Randomize top-K range
+                    eos_token_id=self.tokenizer.eos_token_id,  # Pass EOS token ID
+                    min_degradation_strength=0.7,  # Start strong after coherent part
+                )
+            ],
         }
 
-        degradation_methods.append(f"high_temperature_{temp:.1f}")
-        degradation_methods.append(f"repetition_penalty_{rep_penalty:.1f}")
-
-        # Generate the degraded part
-        inputs = self.tokenizer(coherent_text, return_tensors="pt").to(self.device)
+        # Generate
         with torch.no_grad():
-            degraded_outputs = self.model.generate(**inputs, **degraded_params)
+            outputs = self.model.generate(**inputs, **gen_params)
 
-        degraded_text = self.tokenizer.decode(degraded_outputs[0], skip_special_tokens=True)
-        if degraded_text.startswith(coherent_text):
-            degraded_text = degraded_text[len(coherent_text) :].strip()
+        # Process outputs
+        bad_samples = []
+        for output in outputs:
+            text = self.tokenizer.decode(output, skip_special_tokens=True).strip()
+            completion_tokens = self.count_tokens(text) - prompt_tokens
+            params = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+            degradation_methods = [
+                f"coherent_fraction_{coherent_fraction:.2f}",
+                "logits_degradation_repetition",
+                "logits_degradation_noise",
+                "logits_degradation_symbols_extended",
+            ]
 
-        # Combine the coherent and degraded parts
-        full_text = coherent_text + " " + degraded_text
+            bad_samples.append((text, params, degradation_methods))
 
-        # Apply token-level degradation with probability
-        if random.random() < 0.3:  # 30% chance
-            token_degradation = self._select_token_degradations()
-            full_text = self._apply_token_degradation(full_text, token_degradation)
-            degradation_methods.extend(token_degradation)
+        return bad_samples
 
-        # Apply sentence-level repetition with probability
-        if random.random() < 0.2:  # 20% chance
-            full_text = self._degrade_sentence_repetition(full_text)
-            degradation_methods.append("sentence_repetition")
+    # def generate_dataset_from_file(
+    #     self,
+    #     file_path: str,
+    #     prompt_column: str = "prompt",
+    #     n_samples_per_prompt: int = 5,
+    #     max_length: int = 1024,
+    #     file_format: str = "csv",
+    # ) -> pd.DataFrame:
+    #     """
+    #     Generate a dataset by reading prompts from a file.
 
-        completion_tokens = self.count_tokens(full_text)
+    #     Args:
+    #         file_path (str): Path to the file containing prompts.
+    #         prompt_column (str): Column name in the file containing the prompt.
+    #         n_samples_per_prompt (int): Number of samples to generate per prompt.
+    #         max_length (int): Maximum length of generated text in tokens.
+    #         file_format (str): File format (csv, parquet, or json).
 
-        combined_params = {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        }
+    #     Returns:
+    #         pd.DataFrame: DataFrame containing the generated samples.
+    #     """
+    #     if file_format.lower() == "csv":
+    #         df = pd.read_csv(file_path)
+    #     elif file_format.lower() == "parquet":
+    #         df = pd.read_parquet(file_path)
+    #     elif file_format.lower() == "json":
+    #         df = pd.read_json(file_path)
+    #     else:
+    #         error_msg = f"Unsupported file format: {file_format}"
+    #         logger.error(error_msg)
+    #         raise ValueError(error_msg)
 
-        return full_text, combined_params, degradation_methods
-
-    def _select_token_degradations(self) -> List[str]:
-        """
-        Select which token degradation methods to use.
-
-        Returns:
-            List of degradation method names to apply
-        """
-        num_methods = random.randint(1, 3)
-        return random.sample(list(self.degradation_functions.keys()), num_methods)
-
-    def _apply_token_degradation(self, text: str, degradation_types: List[str]) -> str:
-        """
-        Apply token-level degradation using selected methods.
-
-        Args:
-            text: The text to degrade
-            degradation_types: List of degradation method names to apply
-
-        Returns:
-            Degraded text
-        """
-        # Split text to tokens that keep punctuation and spaces
-        tokens = re.findall(r'\b\w+\b|\s+|[^\w\s]', text)
-        degraded_tokens = []
-        total_tokens = len(tokens)
-
-        for i, token in enumerate(tokens):
-            # Make degradation more likely in later tokens
-            degradation_prob = min(0.2, (i / total_tokens) * 0.5)
-            if re.match(r'\b\w+\b', token) and random.random() < degradation_prob:
-                # Pick a random degradation function from selected types
-                degradation_type = random.choice(degradation_types)
-                token = self.degradation_functions[degradation_type](token)
-            degraded_tokens.append(token)
-
-        return "".join(degraded_tokens)
-
-    def _degrade_join(self, token: str) -> str:
-        """
-        Join tokens by removing spaces (no actual change to individual token).
-
-        Args:
-            token: The token to process
-
-        Returns:
-            The processed token
-        """
-        return token
-
-    def _degrade_repeat(self, token: str) -> str:
-        """
-        Repeat characters within a token.
-
-        Args:
-            token: The token to degrade
-
-        Returns:
-            Token with repeated characters
-        """
-        if len(token) > 2:
-            pos = random.randint(0, len(token) - 1)
-            char = token[pos]
-            repetitions = random.randint(2, 5)
-            token = token[:pos] + char * repetitions + token[pos + 1 :]
-        return token
-
-    def _degrade_mix_case(self, token: str) -> str:
-        """
-        Randomly mix uppercase and lowercase letters.
-
-        Args:
-            token: The token to degrade
-
-        Returns:
-            Token with mixed case
-        """
-        return ''.join(c.upper() if random.random() > 0.5 else c.lower() for c in token)
-
-    def _degrade_insert_symbols(self, token: str) -> str:
-        """
-        Insert random symbols into tokens.
-
-        Args:
-            token: The token to degrade
-
-        Returns:
-            Token with inserted symbols
-        """
-        symbols = '!@#$%^&*()-_=+[]{}|;:,.<>?/'
-        if len(token) > 2:
-            pos = random.randint(0, len(token) - 1)
-            symbol = random.choice(symbols)
-            token = token[:pos] + symbol + token[pos:]
-        return token
-
-    def _degrade_camel_case(self, token: str) -> str:
-        """
-        Convert tokens to camelCase format.
-
-        Args:
-            token: The token to degrade
-
-        Returns:
-            Token in camelCase format
-        """
-        if len(token) > 3:
-            parts = []
-            remaining = token
-            while remaining and len(parts) < 3:
-                split_point = random.randint(1, len(remaining)) if len(remaining) > 1 else 1
-                parts.append(remaining[:split_point])
-                remaining = remaining[split_point:]
-            token = parts[0].lower() + ''.join(p.capitalize() for p in parts[1:])
-        return token
-
-    def _degrade_delete_characters(self, token: str) -> str:
-        """
-        Randomly delete characters from a token.
-
-        Args:
-            token: The token to degrade
-
-        Returns:
-            Token with characters deleted
-        """
-        if len(token) > 3:
-            num_to_delete = random.randint(1, min(3, len(token) - 2))
-            positions = random.sample(range(len(token)), num_to_delete)
-            return ''.join(c for i, c in enumerate(token) if i not in positions)
-        return token
-
-    def _degrade_swap_adjacent(self, token: str) -> str:
-        """
-        Swap adjacent characters in a token.
-
-        Args:
-            token: The token to degrade
-
-        Returns:
-            Token with adjacent characters swapped
-        """
-        if len(token) > 3:
-            pos = random.randint(0, len(token) - 2)
-            chars = list(token)
-            chars[pos], chars[pos + 1] = chars[pos + 1], chars[pos]
-            return ''.join(chars)
-        return token
-
-    def _degrade_word_repetition(self, token: str) -> str:
-        """
-        Repeat the entire token.
-
-        Args:
-            token: The token to degrade
-
-        Returns:
-            Token repeated
-        """
-        if random.random() < 0.3 and len(token) > 1:
-            return token + " " + token
-        return token
-
-    def _degrade_sentence_repetition(self, text: str) -> str:
-        """
-        Repeat sentences in the text to create unnatural repetition.
-
-        Args:
-            text: The text to degrade
-
-        Returns:
-            Text with repeated sentences
-        """
-        # Split the text into sentences
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-
-        if len(sentences) <= 1:
-            return text
-
-        # Choose how many sentences to repeat
-        num_to_repeat = min(random.randint(1, 3), len(sentences))
-
-        # Choose which sentences to repeat
-        sentences_to_repeat = random.sample(range(len(sentences)), num_to_repeat)
-
-        # Choose where to insert the repetitions
-        result = []
-        for i, sentence in enumerate(sentences):
-            result.append(sentence)
-
-            # With some probability, insert a repetition after this sentence
-            if i in sentences_to_repeat:
-                # Choose a random sentence to repeat here
-                repeat_idx = random.choice(sentences_to_repeat)
-                result.append(sentences[repeat_idx])
-
-        return " ".join(result)
-
-    def generate_dataset_from_file(
-        self,
-        file_path: str,
-        prompt_column: str = "prompt",
-        n_samples_per_prompt: int = 5,
-        max_length: int = 1024,
-        file_format: str = "csv",
-    ) -> pd.DataFrame:
-        """
-        Generate dataset from file containing prompts.
-
-        Args:
-            file_path: Path to the file containing prompts
-            prompt_column: Name of the column containing prompts
-            n_samples_per_prompt: Number of samples to generate per prompt
-            max_length: Maximum length of generated text in tokens
-            file_format: Format of the input file (csv, parquet, json)
-
-        Returns:
-            DataFrame containing the generated samples
-        """
-        # Load prompts from file
-        if file_format.lower() == "csv":
-            df = pd.read_csv(file_path)
-        elif file_format.lower() == "parquet":
-            df = pd.read_parquet(file_path)
-        elif file_format.lower() == "json":
-            df = pd.read_json(file_path)
-        else:
-            error_msg = f"Unsupported file format: {file_format}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        prompts = df[prompt_column].tolist()
-        logger.info(f"Loaded {len(prompts)} prompts from {file_path}")
-        return self.generate_dataset(prompts, n_samples_per_prompt, max_length)
+    #     prompts = df[prompt_column].tolist()
+    #     logger.info(f"Loaded {len(prompts)} prompts from {file_path}")
+    #     return self.generate_dataset(prompts, n_samples_per_prompt, max_length)
 
     def generate_dataset(self, prompts: List[str], n_samples_per_prompt: int = 5, max_length: int = 1024) -> pd.DataFrame:
         """
-        Generate a dataset of good and bad samples with improved data structure.
+        Generate a dataset of good and bad samples from a list of prompts.
 
         Args:
-            prompts: List of prompts to generate from
-            n_samples_per_prompt: Number of samples to generate per prompt
-            max_length: Maximum length of generated text in tokens
+            prompts (List[str]): List of prompts.
+            n_samples_per_prompt (int): Number of samples per prompt.
+            max_length (int): Maximum length of generated text in tokens.
 
         Returns:
-            DataFrame containing the generated samples
+            pd.DataFrame: DataFrame containing all generated samples.
         """
         all_samples = []
 
         for prompt in tqdm(prompts, desc="Generating samples from prompts"):
-            for _ in range(n_samples_per_prompt):
-                # Generate good sample
-                try:
-                    for attempt in range(self.max_attempts):
-                        try:
-                            good_text, good_params = self.generate_good_sample(prompt, max_length)
-                            if good_text.strip():  # Check if not empty
-                                break
-                        except Exception as e:
-                            if attempt == self.max_attempts - 1:
-                                logger.warning(f"Failed to generate good sample after {self.max_attempts} attempts: {e}")
-                                good_text, good_params = f"[Generation failed for prompt: {prompt[:30]}...]", {
-                                    "prompt_tokens": self.count_tokens(prompt),
-                                    "completion_tokens": 0,
-                                    "total_tokens": self.count_tokens(prompt),
-                                }
-                            continue
+            try:
+                # Generate good samples in one batch
+                # for attempt in range(self.max_attempts):
+                #     try:
+                #         good_samples = self.generate_good_samples(prompt, n_samples_per_prompt, max_length)
+                #         if any(good_text.strip() for good_text, _ in good_samples):
+                #             break
+                #     except Exception as e:
+                #         if attempt == self.max_attempts - 1:
+                #             logger.warning(f"Failed to generate good samples after {self.max_attempts} attempts: {e}")
+                #             good_samples = [
+                #                 (
+                #                     f"[Generation failed for prompt: {prompt[:30]}...]",
+                #                     {
+                #                         "prompt_tokens": self.count_tokens(prompt),
+                #                         "completion_tokens": 0,
+                #                         "total_tokens": self.count_tokens(prompt),
+                #                     },
+                #                 )
+                #             ]
+                #         continue
 
-                    good_sample = GeneratedSample(
-                        prompt=prompt,
-                        text=good_text,
-                        is_coherent=True,
-                        model_name=self.model_name,
-                        prompt_tokens=good_params.get("prompt_tokens", 0),
-                        completion_tokens=good_params.get("completion_tokens", 0),
-                        total_tokens=good_params.get("total_tokens", 0),
-                    )
-                    all_samples.append(good_sample.dict())
+                # for good_text, good_params in good_samples:
+                #     good_sample = GeneratedSample(
+                #         prompt=prompt,
+                #         text=good_text,
+                #         is_coherent=True,
+                #         model_name=self.model_name,
+                #         prompt_tokens=good_params.get("prompt_tokens", 0),
+                #         completion_tokens=good_params.get("completion_tokens", 0),
+                #         total_tokens=good_params.get("total_tokens", 0),
+                #     )
+                #     all_samples.append(good_sample.model_dump())
 
-                    # Generate bad sample
-                    for attempt in range(self.max_attempts):
-                        try:
-                            bad_text, bad_params, degradation_methods = self.generate_bad_sample(prompt, max_length)
-                            if bad_text.strip():  # Check if not empty
-                                break
-                        except Exception as e:
-                            if attempt == self.max_attempts - 1:
-                                logger.warning(f"Failed to generate bad sample after {self.max_attempts} attempts: {e}")
-                                bad_text, bad_params, degradation_methods = (
+                # Generate bad samples in one batch
+                for attempt in range(self.max_attempts):
+                    try:
+                        bad_samples = self.generate_bad_samples(prompt, n_samples_per_prompt, max_length)
+                        if any(bad_text.strip() for bad_text, _, _ in bad_samples):
+                            break
+                    except Exception as e:
+                        if attempt == self.max_attempts - 1:
+                            logger.warning(f"Failed to generate bad samples after {self.max_attempts} attempts: {e}")
+                            bad_samples = [
+                                (
                                     f"[Bad generation failed: {prompt[:30]}...]",
                                     {
                                         "prompt_tokens": self.count_tokens(prompt),
@@ -580,8 +460,10 @@ class SyntheticDataGenerator:
                                     },
                                     ["generation_failed"],
                                 )
-                            continue
+                            ]
+                        continue
 
+                for bad_text, bad_params, degradation_methods in bad_samples:
                     bad_sample = GeneratedSample(
                         prompt=prompt,
                         text=bad_text,
@@ -592,34 +474,29 @@ class SyntheticDataGenerator:
                         total_tokens=bad_params.get("total_tokens", 0),
                         degradation_methods=degradation_methods,
                     )
-                    all_samples.append(bad_sample.dict())
+                    all_samples.append(bad_sample.model_dump())
 
-                except Exception as e:
-                    logger.error(f"Error generating samples for prompt '{prompt[:50]}...': {e}")
-                    continue
+            except Exception as e:
+                logger.error(f"Error generating samples for prompt '{prompt[:50]}...': {e}")
+                continue
 
-        # Convert to DataFrame
         df = pd.DataFrame(all_samples)
-
-        # Save the datasets
         self.save_dataset(df)
-
         return df
 
     def save_dataset(self, df: pd.DataFrame, train_ratio: float = 0.8) -> None:
         """
-        Save dataset with improved organization and metadata.
+        Save the generated dataset along with metadata and statistics.
 
         Args:
-            df: DataFrame containing the generated samples
-            train_ratio: Ratio of data to use for training vs validation
+            df (pd.DataFrame): DataFrame containing the generated samples.
+            train_ratio (float): Ratio of data to use for training vs validation.
         """
-        # Create timestamp for this run
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(self.output_dir, f"run_{timestamp}")
         os.makedirs(run_dir, exist_ok=True)
 
-        # Shuffle the dataframe
+        # Shuffle the DataFrame
         df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
         # Split into train and validation sets
@@ -627,7 +504,7 @@ class SyntheticDataGenerator:
         train_df = df[:train_size]
         val_df = df[train_size:]
 
-        # Save to parquet
+        # Save datasets
         train_file = os.path.join(run_dir, "coherence_train.parquet")
         val_file = os.path.join(run_dir, "coherence_val.parquet")
 
@@ -661,7 +538,6 @@ class SyntheticDataGenerator:
             for method in methods:
                 degradation_counts[method] = degradation_counts.get(method, 0) + 1
 
-        # Save metadata and statistics
         metadata = GenerationMetadata(
             model_name=self.model_name,
             timestamp=timestamp,
@@ -674,7 +550,7 @@ class SyntheticDataGenerator:
         )
 
         with open(os.path.join(run_dir, "metadata.json"), "w") as f:
-            f.write(metadata.json(indent=2))
+            f.write(metadata.model_dump_json(indent=2))
 
         logger.info(f"Saved dataset to {run_dir}:")
         logger.info(f"  Training set: {train_stats['coherent']} coherent, {train_stats['incoherent']} incoherent")
@@ -694,7 +570,7 @@ if __name__ == "__main__":
         "Write a short story about a detective solving a mystery.",
         "Describe the process of making sourdough bread.",
     ]
-    dataset = generator.generate_dataset(prompts, n_samples_per_prompt=4, max_length=1024)
+    dataset = generator.generate_dataset(prompts, n_samples_per_prompt=5, max_length=512)
 
     print(len(dataset))
 

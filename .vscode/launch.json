@@ -46,8 +46,8 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
-                "HTTPS_PROXY": "http://127.0.0.1:1081",
+                // "HTTP_PROXY": "http://127.0.0.1:1081", // only set on local machine
+                // "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "PYTORCH_ENABLE_MPS_FALLBACK": "1",
             },
