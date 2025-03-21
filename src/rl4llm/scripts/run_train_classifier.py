@@ -15,7 +15,7 @@ from rl4llm.utils import (
     build_classification_model_and_tokenizer,
     build_longformer_classification_model_and_tokenizer,
     create_optimizer_and_scheduler,
-    load_from_jsonl_file,
+    load_from_parquet_file,
     load_yaml_config_file,
     set_seed,
     setup_logger,
@@ -78,7 +78,8 @@ def main():
     logger = setup_logger()
     classifier_config = ClassifierConfig(**config['config'])
 
-    train_ds, test_ds = load_from_jsonl_file(train_path), load_from_jsonl_file(test_path)
+    logger.info('Loading training and testing datasets...')
+    train_ds, test_ds = load_from_parquet_file(train_path), load_from_parquet_file(test_path)
 
     if max_train_samples is not None and max_train_samples < len(train_ds):
         logger.info(f"Randomly select {max_train_samples} training samples")

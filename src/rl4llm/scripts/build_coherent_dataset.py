@@ -9,7 +9,7 @@ import numpy as np
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-from rl4llm.utils import load_from_jsonl_file, save_to_json_file, save_to_jsonl_file, setup_logger
+from rl4llm.utils import save_to_json_file, save_to_parquet_file, setup_logger
 
 
 def parse_args():
@@ -361,12 +361,8 @@ def main():
     negative_samples = parallel_decode(negative_token_samples, tokenizer)
 
     # Create dataset dictionaries
-    coherent_samples = [
-        {'text': sample, 'tokens': token, 'label': 1} for sample, token in zip(positive_samples, positive_token_samples)
-    ]
-    incoherent_samples = [
-        {'text': sample, 'tokens': token, 'label': 0} for sample, token in zip(negative_samples, negative_token_samples)
-    ]
+    coherent_samples = [{'text': sample, 'label': 1} for sample, token in zip(positive_samples, positive_token_samples)]
+    incoherent_samples = [{'text': sample, 'label': 0} for sample, token in zip(negative_samples, negative_token_samples)]
 
     # Shuffle and merge samples
     merged_samples = coherent_samples + incoherent_samples
@@ -395,8 +391,8 @@ def main():
 
     # Save files
     logger.info(f"Saving coherent dataset to {args.save_dir}")
-    save_to_jsonl_file(train_samples, f"{args.save_dir}/train.jsonl.gz")
-    save_to_jsonl_file(test_samples, f"{args.save_dir}/test.jsonl.gz")
+    save_to_parquet_file(train_samples, f"{args.save_dir}/train.parquet", compression='snappy')
+    save_to_parquet_file(test_samples, f"{args.save_dir}/test.parquet", compression='snappy')
     save_to_json_file(stats, f"{args.save_dir}/metadata.json")
     logger.info('Dataset creation completed successfully')
 

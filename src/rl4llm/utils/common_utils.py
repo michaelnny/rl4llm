@@ -11,9 +11,12 @@ from collections import defaultdict
 from datetime import datetime
 from difflib import SequenceMatcher
 from threading import Lock
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 import yaml
 
@@ -241,6 +244,49 @@ def merge_jsonl_files(input_files: List[str], output_file: str):
         loaded_data.extend(load_from_jsonl_file(input_file))
 
     save_to_jsonl_file(loaded_data, output_file)
+
+
+def save_to_parquet_file(data: List[Dict], file_path: str, compression: str = 'snappy') -> None:
+    """
+    Save data to a Parquet file
+
+    Args:
+        data: List of dictionaries to save
+        file_path: Path to save the Parquet file
+        compression: Compression codec to use (snappy, gzip, brotli, etc.)
+    """
+    # Convert list of dictionaries to pandas DataFrame
+    df = pd.DataFrame(data)
+
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+    # Save to Parquet
+    df.to_parquet(file_path, compression=compression, index=False)
+
+
+def load_from_parquet_file(file_path: str, columns: Optional[List[str]] = None) -> List[Dict]:
+    """
+    Load data from a Parquet file
+
+    Args:
+        file_path: Path to the Parquet file
+        columns: Optional list of columns to load (for selective loading)
+
+    Returns:
+        List of dictionaries parsed from the Parquet file
+
+    Raises:
+        ValueError: If file doesn't exist
+    """
+    if not os.path.exists(file_path):
+        raise ValueError(f"File does not exist: {file_path}")
+
+    # Read Parquet file into DataFrame
+    df = pd.read_parquet(file_path, columns=columns)
+
+    # Convert DataFrame to list of dictionaries
+    return df.to_dict(orient='records')
 
 
 def get_runtime_device():

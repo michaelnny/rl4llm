@@ -153,8 +153,10 @@ def create_optimizer_and_scheduler(
         import bitsandbytes as bnb
 
         optimizer = bnb.optim.AdamW8bit(optim_groups, **optim_kwargs)
-    else:
+    elif optim_type == 'AdamW':
         optimizer = torch.optim.AdamW(optim_groups, **optim_kwargs)
+    else:
+        optimizer = torch.optim.Adam(optim_groups, **optim_kwargs)
 
     if scheduler_config is not None:
         scheduler_type = scheduler_config['type']

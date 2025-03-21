@@ -7,22 +7,22 @@
     "max_tokens_per_sample": 4000,
     "token_stats": {
         "combined": {
-            "average_tokens": 2624.166775,
+            "average_tokens": 2622.81526,
             "min_tokens": 1200,
             "max_tokens": 4000,
-            "total_tokens": 524833355
+            "total_tokens": 524563052
         },
         "positive": {
-            "average_tokens": 2379.28055,
+            "average_tokens": 2378.16105,
             "min_tokens": 1200,
             "max_tokens": 4000,
-            "total_tokens": 237928055
+            "total_tokens": 237816105
         },
         "negative": {
-            "average_tokens": 2869.053,
-            "min_tokens": 1277,
+            "average_tokens": 2867.46947,
+            "min_tokens": 1261,
             "max_tokens": 4000,
-            "total_tokens": 286905300
+            "total_tokens": 286746947
         }
     }
 }

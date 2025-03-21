@@ -14,10 +14,10 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import LongformerForSequenceClassification, PreTrainedTokenizer
 
-# from rl4llm.models import ClassifierModel
-
 from .base_trainer import BaseTrainer
 from .data_types import ClassifierConfig
+
+# from rl4llm.models import ClassifierModel
 
 
 class ClassifierTrainer(BaseTrainer):
@@ -75,12 +75,7 @@ class ClassifierTrainer(BaseTrainer):
     def _evaluate(self) -> None:
         """Evaluate the policy model on the test dataset."""
         self.model.eval()
-        total_loss = 0.0
-        total_correct = 0
-        total_TP = 0
-        total_FP = 0
-        total_FN = 0
-        total_samples = 0
+        metrics_accumulator = {'loss': 0.0, 'correct': 0, 'TP': 0, 'FP': 0, 'FN': 0, 'samples': 0}
 
         for batch in self.test_loader:
             input_ids = batch['input_ids'].to(self.device)
@@ -88,37 +83,35 @@ class ClassifierTrainer(BaseTrainer):
             atten_mask = batch['attention_mask'].to(self.device)
 
             output = self.model(input_ids, attention_mask=atten_mask)
-            loss, metrics = self._compute_loss(output.logits, labels)
+            loss, batch_metrics = self._compute_loss(output.logits, labels)
 
             batch_size = input_ids.size(0)
+            metrics_accumulator['loss'] += loss.item() * batch_size
+            metrics_accumulator['correct'] += batch_metrics['correct']
+            metrics_accumulator['TP'] += batch_metrics['TP']
+            metrics_accumulator['FP'] += batch_metrics['FP']
+            metrics_accumulator['FN'] += batch_metrics['FN']
+            metrics_accumulator['samples'] += batch_size
 
-            total_loss += loss.item() * batch_size
-            total_correct += metrics['correct']
-            total_TP += metrics['TP']
-            total_FP += metrics['FP']
-            total_FN += metrics['FN']
-            total_samples += batch_size
+        # Calculate final metrics
+        metrics = self._calculate_metrics(
+            metrics_accumulator['loss'],
+            metrics_accumulator['correct'],
+            metrics_accumulator['TP'],
+            metrics_accumulator['FP'],
+            metrics_accumulator['FN'],
+            metrics_accumulator['samples'],
+        )
 
-        average_loss = total_loss / total_samples if total_samples > 0 else 0.0
-        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
-        precision = total_TP / (total_TP + total_FP) if total_TP + total_FP > 0 else 0.0
-        recall = total_TP / (total_TP + total_FN) if total_TP + total_FN > 0 else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
-
-        eval_metrics = {
-            'loss': average_loss,
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-        }
-
-        # These metrics will later be accumulated over mini batches
-        for k, v in eval_metrics.items():
-            self._metrics.add_metric(f'evaluation/{k}', v)
+        # Format for logging
+        self._log_stats_to_tensorboard({f'evaluation/{k}': v for k, v in metrics.items()}, step=self.step)
 
         self.logger.info(
-            f"Evaluation - Loss: {average_loss:.4f}, Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}"
+            f"Evaluation - Loss: {metrics['loss']:.4f}, "
+            f"Accuracy: {metrics['accuracy']:.4f}, "
+            f"Precision: {metrics['precision']:.4f}, "
+            f"Recall: {metrics['recall']:.4f}, "
+            f"F1: {metrics['f1']:.4f}"
         )
 
     def _train(self) -> None:
@@ -129,6 +122,8 @@ class ClassifierTrainer(BaseTrainer):
         total_steps = self.config.num_epochs * total_updates_per_epoch  # Total gradient update steps
         progress_bar = tqdm(total=total_steps, desc='Training Progress', unit='step')
 
+        metrics_accumulator = {'loss': 0.0, 'correct': 0, 'TP': 0, 'FP': 0, 'FN': 0, 'samples': 0}
+
         with torch.autograd.set_detect_anomaly(True):
             for epoch in range(self.config.num_epochs):
                 for i, batch in enumerate(self.train_loader):
@@ -137,21 +132,26 @@ class ClassifierTrainer(BaseTrainer):
                     atten_mask = batch['attention_mask'].to(self.device)
 
                     output = self.model(input_ids, attention_mask=atten_mask)
-                    loss, train_metrics = self._compute_loss(output.logits, labels)
+                    loss, batch_metrics = self._compute_loss(output.logits, labels)
+
+                    batch_size = input_ids.size(0)
+
+                    metrics_accumulator['loss'] += loss.item() * batch_size
+                    metrics_accumulator['correct'] += batch_metrics['correct']
+                    metrics_accumulator['TP'] += batch_metrics['TP']
+                    metrics_accumulator['FP'] += batch_metrics['FP']
+                    metrics_accumulator['FN'] += batch_metrics['FN']
+                    metrics_accumulator['samples'] += batch_size
 
                     if self.config.gradient_accumulate_steps > 1:
                         loss = loss / self.config.gradient_accumulate_steps
 
                     loss.backward()
 
-                    # Accumulate metrics over mini batches
-                    for k, v in train_metrics.items():
-                        self._metrics.add_metric(f'training/{k}', v)
-
                     # Perform gradient update step
                     if (i + 1) % self.config.gradient_accumulate_steps == 0 or (i + 1) == len(self.train_loader):
-                        grad_norm = self.get_grad_norm(self.model)
-                        self._metrics.add_metric('training/grad_norm', grad_norm.item())
+                        grad_norm = self.get_grad_norm(self.model).item()
+                        # self._metrics.add_metric('training/grad_norm', grad_norm.item())
                         if self.config.clip_grad_norm > 0:
                             torch.nn.utils.clip_grad_norm_(
                                 self.model.parameters(), max_norm=self.config.clip_grad_norm, error_if_nonfinite=True
@@ -167,9 +167,18 @@ class ClassifierTrainer(BaseTrainer):
                         # Update progress bar
                         progress_bar.update(1)
 
-                        # Optional: Log metrics per gradient update step
-                        self._metrics.add_metric('elapsed/update', self.step)
-                        self._metrics.add_metric('training/learning_rate', self.optimizer.param_groups[0]['lr'])
+                        train_metrics = self._calculate_metrics(
+                            metrics_accumulator['loss'],
+                            metrics_accumulator['correct'],
+                            metrics_accumulator['TP'],
+                            metrics_accumulator['FP'],
+                            metrics_accumulator['FN'],
+                            metrics_accumulator['samples'],
+                        )
+
+                        train_metrics['grad_norm'] = grad_norm
+                        train_metrics['learning_rate'] = self.optimizer.param_groups[0]['lr']
+                        train_metrics['elapsed/update'] = self.step
 
                         # Evaluate periodically
                         if self.config.eval_interval > 0 and self.step % self.config.eval_interval == 0:
@@ -181,18 +190,11 @@ class ClassifierTrainer(BaseTrainer):
                             self._save_checkpoint(save_dir)
 
                         # Log training metrics to TensorBoard or any other logging utility
-                        metrics = self._metrics.get_summary()
-                        self._log_stats_to_tensorboard(metrics, step=self.step)
+                        self._log_stats_to_tensorboard({f'training/{k}': v for k, v in train_metrics.items()}, step=self.step)
 
-                        # Reset metrics after logging
-                        self._metrics.reset()
+                        metrics_accumulator = {'loss': 0.0, 'correct': 0, 'TP': 0, 'FP': 0, 'FN': 0, 'samples': 0}
 
         progress_bar.close()
-
-    def _save_checkpoint(self, save_dir: str):
-        """Save policy model checkpoint following HF conventions"""
-        self.logger.info('Saving policy model checkpoint...')
-        self.model.save_pretrained(save_dir)
 
     def _compute_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
         """Compute binary classification loss and metrics for a single batch."""
@@ -204,25 +206,33 @@ class ClassifierTrainer(BaseTrainer):
         TP = ((preds == 1) & (labels == 1)).sum().item()
         FP = ((preds == 1) & (labels == 0)).sum().item()
         FN = ((preds == 0) & (labels == 1)).sum().item()
-        batch_size = labels.size(0)
-
-        accuracy = correct / batch_size if batch_size > 0 else 0.0
-        precision = TP / (TP + FP) if TP + FP > 0 else 0.0
-        recall = TP / (TP + FN) if TP + FN > 0 else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
 
         metrics = {
             'loss': loss.detach().cpu().item(),
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            # 'TP': TP,
-            # 'FP': FP,
-            # 'FN': FN,
+            'correct': correct,
+            'TP': TP,
+            'FP': FP,
+            'FN': FN,
         }
 
         return loss, metrics
+
+    def _calculate_metrics(self, total_loss, total_correct, total_TP, total_FP, total_FN, total_samples):
+        """Calculate evaluation metrics from accumulated values."""
+        if total_samples == 0:
+            return {'loss': 0.0, 'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0}
+
+        average_loss = total_loss / total_samples
+        accuracy = total_correct / total_samples
+
+        # Safe division for precision and recall
+        precision = total_TP / max(total_TP + total_FP, 1)
+        recall = total_TP / max(total_TP + total_FN, 1)
+
+        # Safe calculation for F1 score
+        f1 = 2 * precision * recall / max(precision + recall, 1e-10)
+
+        return {'loss': average_loss, 'accuracy': accuracy, 'precision': precision, 'recall': recall, 'f1': f1}
 
     def _collate_function(self, batch: List[Dict]) -> Dict:
         """Collate function for DataLoader during training"""
@@ -241,6 +251,11 @@ class ClassifierTrainer(BaseTrainer):
             **batch_inputs,
             'labels': batch_labels,
         }
+
+    def _save_checkpoint(self, save_dir: str):
+        """Save policy model checkpoint following HF conventions"""
+        self.logger.info('Saving policy model checkpoint...')
+        self.model.save_pretrained(save_dir)
 
     # def _preprocess_dataset(self, dataset: List[Dict]) -> List[Dict]:
     #     """Parallelized pre-tokenization of the entire dataset."""
