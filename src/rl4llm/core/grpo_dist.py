@@ -69,8 +69,8 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.llm_generator = self._create_custom_llm_generator(self.policy_model)
 
         self.logger.info('Preprocessing datasets...')
-        self.train_ds = self.preprocess_dataset(train_ds)
-        self.test_ds = self.preprocess_dataset(test_ds)
+        self.train_ds = self._preprocess_dataset(train_ds)
+        self.test_ds = self._preprocess_dataset(test_ds)
 
         # we only sample one item at a time for training, so no need loader
         self.train_iter = iter(self.train_ds)
@@ -78,7 +78,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             self.test_ds,
             batch_size=self.config.eval_batch_size,
             collate_fn=self._eval_collate_function,
-            pin_memory=False,
+            pin_memory=True if device.type == 'cuda' else False,  # Optimize for GPU
             shuffle=False,
             drop_last=True,
         )
@@ -126,11 +126,9 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def _evaluation(self):
         """Evaluate the model on the test dataset"""
-        dist.barrier()
         self.logger.info('Run evaluation...')
         with self._generation_context(is_training=False):
             self._evaluate_policy(self.policy_model, self.test_loader)
-        dist.barrier()
 
     def _generate_training_samples(
         self,
@@ -195,7 +193,6 @@ class GRPOTrainer(BaseGRPOTrainer):
         """Save policy model checkpoint following HF conventions"""
         logger.info('Saving policy model checkpoint...')
         self.policy_model.save_pretrained(save_dir)
-        dist.barrier()
 
     @contextmanager
     def _generation_context(self, is_training: bool = True):
@@ -207,7 +204,14 @@ class GRPOTrainer(BaseGRPOTrainer):
             self._prepare_for_training()
 
     def _get_metrics_summary(
-        self, skip_list: List[str] = ['loss', 'grad_norm', 'prompt_length', 'total_reward', 'learning_rate', ]
+        self,
+        skip_list: List[str] = [
+            'loss',
+            'grad_norm',
+            'prompt_length',
+            'total_reward',
+            'learning_rate',
+        ],
     ) -> Dict[str, Any]:
         """Get summary of all metrics"""
         # gather metrics from all ranks
@@ -222,7 +226,7 @@ class GRPOTrainer(BaseGRPOTrainer):
 
             metrics[name] = values.mean().cpu().item()
 
-            if len(values) <= 1 or name.startswith("elapsed/") or any(k in name for k in skip_list):
+            if len(values) <= 1 or name.startswith('elapsed/') or any(k in name for k in skip_list):
                 continue
 
             # Add standard deviation
@@ -326,6 +330,8 @@ class GRPOTrainer(BaseGRPOTrainer):
         if self.iteration_count % self.config.eval_interval == 0 or (self.iteration_count + 1) == self.config.max_steps:
             self._evaluation()
 
+        dist.barrier()
+
     def _sync_reference_model(self):
         """Sync reference model by copying latest policy model weights"""
         if self.reference_model is None:
@@ -337,7 +343,6 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.reference_model = self.reference_model.eval()
         self.ref_update_count += 1
         self._clean_up()
-        dist.barrier()
 
     # def _create_deepspeed_inference_engine(
     #     self,

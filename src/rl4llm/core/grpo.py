@@ -59,8 +59,8 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.llm_generator = self._create_custom_llm_generator(self.policy_model)
 
         self.logger.info('Preprocessing datasets...')
-        self.train_ds = self.preprocess_dataset(train_ds)
-        self.test_ds = self.preprocess_dataset(test_ds)
+        self.train_ds = self._preprocess_dataset(train_ds)
+        self.test_ds = self._preprocess_dataset(test_ds)
 
         # we only sample one item at a time for training, so no need loader
         self.train_iter = iter(self.train_ds)
@@ -68,7 +68,7 @@ class GRPOTrainer(BaseGRPOTrainer):
             self.test_ds,
             batch_size=self.config.eval_batch_size,
             collate_fn=self._eval_collate_function,
-            pin_memory=False,
+            pin_memory=True if device.type == 'cuda' else False,  # Optimize for GPU
             shuffle=False,
             drop_last=True,
         )

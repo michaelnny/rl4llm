@@ -1,0 +1,44 @@
+# Coherent classifier config
+job:
+  seed: 117
+  artifacts_path: "./runs/coherent_classifier_qwen2.5_0.5b"
+  dataset: # List of math datasets to load
+    train_path: "data/coherent_dataset/train.jsonl.gz"
+    test_path: "data/coherent_dataset/test.jsonl.gz"
+  max_train_samples: 400000         
+  max_test_samples: 2048        
+
+model:
+  pretrained_model: "allenai/longformer-base-4096"
+  load_in_4bit: false
+  gradient_checkpointing: true
+  flash_attention: true
+
+config:
+  num_epochs: 5
+  batch_size: 8
+  gradient_accumulate_steps: 16
+  clip_grad_norm: 10.0
+  max_sequence_length: 4000
+
+  # evaluation
+  eval_batch_size: 8
+  eval_interval: 200
+
+  # others
+  checkpoint_interval: 200            
+
+optimizer:
+  type: AdamW8bit
+  params:
+    lr: 2.0e-5
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 0.0
+
+scheduler:
+  type: "OneCycleLR"
+  params:
+    warmup_fraction: 0.05
+    initial_lr_fraction: 0.1
+    final_lr_fraction: 0.1

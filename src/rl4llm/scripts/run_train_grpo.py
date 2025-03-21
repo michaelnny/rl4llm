@@ -12,7 +12,7 @@ import torch
 from rl4llm.core.grpo import GRPOConfig, GRPOTrainer
 from rl4llm.data import load_and_combine_datasets
 from rl4llm.utils import (
-    create_model_and_tokenizer,
+    build_model_and_tokenizer,
     create_optimizer_and_scheduler,
     load_yaml_config_file,
     set_seed,
@@ -75,7 +75,7 @@ def main():
         grpo_config.max_steps * grpo_config.rollout_size / (grpo_config.batch_size * grpo_config.gradient_accumulate_steps)
     )
 
-    policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
+    policy_model, tokenizer = build_model_and_tokenizer(config['model'], torch_dtype)
 
     optimizer, scheduler = create_optimizer_and_scheduler(
         policy_model,
@@ -116,16 +116,14 @@ def main():
         trainer.train(log_hyper_params=config)
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
-        handle_exit()
         sys.exit(0)
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
         logger.error(format_exc())
-        handle_exit()
         sys.exit(1)
     finally:
-        logger.info('Exiting main program.')
         handle_exit()
+        logger.info('Exiting main program.')
 
 
 if __name__ == '__main__':

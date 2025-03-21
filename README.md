@@ -21,6 +21,15 @@ pip install -r requirements.txt
 
 
 
+Build coherent dataset for training the classifier model
+
+```bash
+
+PYTHONPATH=src python3 -m rl4llm.scripts.build_coherent_dataset
+
+```
+
+
 Start training job
 
 ```bash

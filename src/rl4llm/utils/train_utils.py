@@ -8,14 +8,78 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
+    LongformerForSequenceClassification,
     PreTrainedModel,
     PreTrainedTokenizer,
 )
 
+from rl4llm.models import ClassifierModel
+
 logger = logging.getLogger()
 
 
-def create_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
+def build_longformer_classification_model_and_tokenizer(
+    model_config: Dict,
+    torch_dtype: torch.dtype,
+) -> PreTrainedModel:
+    """Build a binary classification model from a pretrained model."""
+    model_name = model_config['pretrained_model']
+    model_name = model_config['pretrained_model']
+    load_in_4bit = model_config['load_in_4bit']
+    gradient_checkpointing = model_config['gradient_checkpointing']
+    flash_attention = model_config.get('flash_attention', None)
+
+    logger.info(f"Loading model and tokenizer for {model_name!r}")
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    if not tokenizer.pad_token_id:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id > 1
+    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id > 1
+
+    model_args = {
+        'pretrained_model_name_or_path': model_name,
+        'torch_dtype': torch_dtype,
+        'use_cache': False,
+        'attn_implementation': 'flash_attention_2' if flash_attention else 'eager',
+        'pad_token_id': tokenizer.pad_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
+    }
+
+    if load_in_4bit:
+        model_args['quantization_config'] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type='nf4',
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch_dtype,
+        )
+
+    id2label = {0: 'NEGATIVE', 1: 'POSITIVE'}
+    label2id = {'NEGATIVE': 0, 'POSITIVE': 1}
+    model = LongformerForSequenceClassification.from_pretrained(
+        **model_args, num_labels=2, torch_dtype=torch_dtype, id2label=id2label, label2id=label2id
+    )
+
+    if gradient_checkpointing:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+
+    return model, tokenizer
+
+
+def build_classification_model_and_tokenizer(
+    model_config: Dict,
+    torch_dtype: torch.dtype,
+) -> ClassifierModel:
+    """Build a binary classification model from a pretrained model."""
+    model, tokenizer = build_model_and_tokenizer(model_config, torch_dtype)
+    dropout_prob = model_config.get('dropout_prob', 0.0)
+    classifier_model = ClassifierModel(model, dropout_prob)
+    return classifier_model, tokenizer
+
+
+def build_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
     """Creates the model and tokenizer from the given configuration."""
 
     model_name = model_config['pretrained_model']

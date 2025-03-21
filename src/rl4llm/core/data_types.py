@@ -134,3 +134,20 @@ class SampleLog(BaseModel):
     total_reward: Optional[float] = 0.0
     completion_length: Optional[int] = 0
     step: Optional[int] = 0
+
+
+class ClassifierConfig(BaseModel):
+    """Classifier Training Configuration"""
+
+    max_sequence_length: Optional[int] = Field(4096, ge=50, description='Maximum number of tokens')
+    num_epochs: int = Field(1, ge=1, le=50, description='Update epochs to go over the dataset')
+    batch_size: int = Field(4, ge=1, le=1024, description='Mini-batch size for training')
+    gradient_accumulate_steps: int = Field(1, ge=1, description='Gradient accumulation steps')
+    clip_grad_norm: Optional[float] = Field(0.0, ge=0.0, le=10.0, description='Clip L2 gradient norm')
+
+    checkpoint_interval: int = Field(0, ge=0, le=1000, description='Interval to save policy model checkpoint')
+    eval_interval: int = Field(100, ge=0, description='Interval to evaluate policy model')
+    eval_batch_size: int = Field(8, ge=0, le=1024, description='Mini-batch size for evaluation')
+
+    class Config:
+        arbitrary_types_allowed = True

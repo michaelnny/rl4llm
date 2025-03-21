@@ -9,7 +9,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rl4llm.data import load_and_combine_datasets
-from rl4llm.utils import create_model_and_tokenizer, get_runtime_device, save_to_jsonl_file, set_seed, setup_logger
+from rl4llm.utils import build_model_and_tokenizer, get_runtime_device, save_to_jsonl_file, set_seed, setup_logger
 
 
 def parse_args():

@@ -1,44 +1,30 @@
 """Base GRPO trainer with common functionality for both single and distributed training"""
 
-import gc
 import logging
-import multiprocessing as mp
 import os
 import random
 import re
-from abc import ABC
-from collections import deque
 from copy import deepcopy
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import yaml
 from datasets import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.generations import CustomLLMGenerator
 from rl4llm.graders import format_structure_grader, math_problem_grader
-from rl4llm.utils import (
-    DummyLogger,
-    FileHandler,
-    MetricsCollector,
-    compute_grad_norm,
-    masked_mean,
-    masked_sum,
-    masked_whiten,
-    save_yaml_config_file,
-)
+from rl4llm.utils import FileHandler, masked_mean, masked_sum, masked_whiten, save_yaml_config_file
 
+from .base_trainer import BaseTrainer
 from .data_types import GRPOConfig, GRPOSample, SampleLog
 
 
-class BaseGRPOTrainer(ABC):
+class BaseGRPOTrainer(BaseTrainer):
     """
     Base GRPO trainer with common functionality for both single and distributed training.
     With focus on code reusability and execution speed.
@@ -66,12 +52,12 @@ class BaseGRPOTrainer(ABC):
             logger (Optional[logging.Logger]): Logger for training events; defaults to DummyLogger if None.
         """
 
-        self.config = config
-        self.device = device
-        self.torch_dtype = torch_dtype
-        self.tokenizer = tokenizer
-        self.artifacts_path = artifacts_path
-        self.logger = logger or DummyLogger()  # Use dummy logger to make coding easier
+        super.__init__(config, tokenizer, device, torch_dtype, artifacts_path, logger, rank)
+
+        # For custom exploring start where we skip do exploration for the <think> token
+        self.think_token_len = len(self.tokenizer.encode('<think>')) if self.config.xml_format else 0
+
+        self._initialize_file_handler()
 
         # Initialize counters
         self.train_episode_count = 0
@@ -81,33 +67,9 @@ class BaseGRPOTrainer(ABC):
         self.ref_update_count = 0
         self.explore_epsilon = 0
         self.generation_mode = False
-        self.rank = rank
-        self.is_master = rank == 0
 
-        # For custom exploring start where we skip do exploration for the <think> token
-        self.think_token_len = len(self.tokenizer.encode('<think>')) if self.config.xml_format else 0
-
-        self._initialize()
-
-    def _initialize(self):
+    def _initialize_file_handler(self):
         """Initialize training components"""
-
-        # Setup special tokens
-        self.pad_token_id = self.tokenizer.pad_token_id
-        self.bos_token_id = self.tokenizer.bos_token_id
-        self.eos_token_id = self.tokenizer.eos_token_id
-
-        # Initialize metrics
-        self._metrics = MetricsCollector()
-
-        # Setup directories and logging
-        self._setup_directories()
-
-        if self.is_master:
-            # Initialize TensorBoard writer
-            self._writer = SummaryWriter(self._tb_log_dir)
-        else:
-            self._writer = None
 
         # Initialize sample file handlers
         train_sample_file = os.path.join(self._samples_dir, f'training_samples_rank{self.rank}.jsonl')
@@ -158,31 +120,18 @@ class BaseGRPOTrainer(ABC):
         )
 
     def on_exit(self):
+        super().on_exit()
         self._train_sample_handler.close()
         self._eval_sample_handler.close()
         self._train_stats_handler.close()
 
-    def train(self, log_hyper_params: Optional[Dict] = None):
-        """Start to train the model using RL GRPO.
-
-        Args:
-            log_hyper_params (Dict[str, Any], optional): Hyperparameters to log.
-        """
-
-        # log the params we use for this training run
-        if log_hyper_params and self.is_master:
-            save_yaml_config_file(log_hyper_params, os.path.join(self.artifacts_path, 'config.yaml'))
-            self._log_hyper_params_to_tensorboard(log_hyper_params)
-
+    def _train(self):
+        """Train the model"""
         for _ in tqdm(range(self.config.max_steps), desc='Training steps', disable=not self.is_master):
             self.step()
 
     def step(self):
         """Run a single training iteration. Must be implemented by subclasses."""
-        raise NotImplementedError('Subclasses must implement this method')
-
-    def _train_policy(self, samples: List[GRPOSample]) -> None:
-        """Train the policy model using collected samples. Must be implemented by subclasses."""
         raise NotImplementedError('Subclasses must implement this method')
 
     @torch.no_grad()
@@ -412,11 +361,7 @@ class BaseGRPOTrainer(ABC):
         gamma = self.config.min_gamma + (self.config.max_gamma - self.config.min_gamma) * scaled_length
         return gamma
 
-    def get_grad_norm(self, model: PreTrainedModel) -> torch.Tensor:
-        """Compute gradient norm for the given model"""
-        return compute_grad_norm(model)
-
-    def preprocess_dataset(self, dataset: Dataset) -> List[Dict]:
+    def _preprocess_dataset(self, dataset: Dataset) -> List[Dict]:
         """Pre-tokenize the entire dataset and return a list of tokenized inputs."""
 
         tokenized_data = []
@@ -840,6 +785,44 @@ class BaseGRPOTrainer(ABC):
 
         return loss, metrics
 
+    def _compute_action_logprobs(
+        self, model: PreTrainedModel, input_ids: torch.LongTensor, actions: torch.LongTensor
+    ) -> torch.Tensor:
+        """Compute log probabilities of actions given the input states.
+
+        Args:
+            model (PreTrainedModel): Model to compute log probabilities, shape [batch_size, seq_len]
+            input_ids (torch.LongTensor): Input token ids, shape [batch_size, seq_len]
+            actions (torch.LongTensor): Action token ids, shape [batch_size, seq_len]
+
+        Returns:
+            torch.Tensor: Log probabilities of actions, shape [batch_size, seq_len]
+        """
+
+        assert input_ids.dim() == actions.dim() == 2
+        assert input_ids.shape == actions.shape
+
+        attention_mask = (input_ids != self.pad_token_id).bool()
+        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+        # this runs into CUDA OOM
+        # logprobs = torch.log_softmax(logits, dim=-1)
+        # return torch.gather(logprobs, dim=2, index=actions.unsqueeze(2)).squeeze(2)
+
+        # Process log_softmax and gather operations one sample at a time
+        batch_size = logits.shape[0]
+        sample_logprobs = []
+
+        for i in range(batch_size):
+            # Process single sample
+            sample_logits = logits[i, ...].float()
+            sample_logprobs_all = torch.log_softmax(sample_logits, dim=-1)
+            sample_actions = actions[i, ...].unsqueeze(1)
+            sample_logprob = torch.gather(sample_logprobs_all, dim=1, index=sample_actions).squeeze(1)
+            sample_logprobs.append(sample_logprob)
+
+        # Concatenate results
+        return torch.stack(sample_logprobs, dim=0)
+
     def _create_reference_model(self, policy_model: PreTrainedModel) -> PreTrainedModel:
         """Create a reference model from the policy model"""
         ref_model = deepcopy(policy_model)
@@ -1015,31 +998,3 @@ class BaseGRPOTrainer(ABC):
                 self._writer.add_text(f'{tag}', formatted_text, step)
             except Exception as e:
                 self.logger.warning(f"Failed to log sample to TensorBoard: {e}")
-
-    def _log_hyper_params_to_tensorboard(self, config: Dict[str, Any]) -> None:
-        """Log hyperparameters to TensorBoard.
-
-        Args:
-            config (Dict[str, Any]): Hyperparameters dictionary.
-        """
-        if self._writer and config:
-            try:
-                config_str = yaml.dump(config, sort_keys=False, indent=4)
-                self._writer.add_text('config/parameters', f"```yaml\n{config_str}\n```", 0)
-            except Exception as e:
-                self.logger.warning(f"Failed to log hyperparameters to TensorBoard: {e}")
-
-    def _log_stats_to_tensorboard(self, stats: Dict[str, Any], step: int) -> None:
-        """Log stats to tensorboard"""
-        if self._writer:
-            try:
-                for name, value in stats.items():
-                    if isinstance(value, (int, float)):
-                        self._writer.add_scalar(f"{name}", value, step)
-            except Exception as e:
-                self.logger.warning(f"Failed to log stats to TensorBoard: {e}")
-
-    def _clean_up(self) -> None:
-        """Clean up GPU cache"""
-        torch.cuda.empty_cache()
-        gc.collect()

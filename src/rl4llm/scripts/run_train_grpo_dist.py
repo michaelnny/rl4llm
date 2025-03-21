@@ -14,7 +14,7 @@ from rl4llm.core.grpo_dist import GRPOConfig, GRPOTrainer
 from rl4llm.data import load_and_combine_datasets
 from rl4llm.utils import (
     DummyLogger,
-    create_model_and_tokenizer,
+    build_model_and_tokenizer,
     get_trainable_param_groups,
     load_yaml_config_file,
     set_seed,
@@ -102,7 +102,7 @@ def main():
     device = torch.device(f"cuda:{local_rank}")
 
     dist.barrier()
-    policy_model, tokenizer = create_model_and_tokenizer(config['model'], torch_dtype)
+    policy_model, tokenizer = build_model_and_tokenizer(config['model'], torch_dtype)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
@@ -132,12 +132,10 @@ def main():
         trainer.train(log_hyper_params=config)
     except KeyboardInterrupt:
         logger.info('\nKeyboardInterrupt received in main loop. Shutting down...')
-        trainer.on_exit()
         sys.exit(0)
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
         logger.error(format_exc())
-        trainer.on_exit()
         sys.exit(1)
     finally:
         trainer.on_exit()
