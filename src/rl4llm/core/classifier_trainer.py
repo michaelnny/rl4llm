@@ -12,9 +12,9 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import LongformerForSequenceClassification, PreTrainedTokenizer
 
-from rl4llm.models import ClassifierModel
+# from rl4llm.models import ClassifierModel
 
 from .base_trainer import BaseTrainer
 from .data_types import ClassifierConfig
@@ -28,7 +28,7 @@ class ClassifierTrainer(BaseTrainer):
     def __init__(
         self,
         config: ClassifierConfig,
-        model: ClassifierModel,
+        model: LongformerForSequenceClassification,
         tokenizer: PreTrainedTokenizer,
         optimizer: torch.optim.AdamW,
         scheduler: torch.optim.lr_scheduler.LRScheduler,
@@ -44,6 +44,8 @@ class ClassifierTrainer(BaseTrainer):
         self.model = model.to(dtype=torch_dtype, device=device)
         self.optimizer = optimizer
         self.scheduler = scheduler
+
+        self.loss_fn = torch.nn.CrossEntropyLoss()
 
         self.step = 0
 
@@ -83,10 +85,10 @@ class ClassifierTrainer(BaseTrainer):
         for batch in self.test_loader:
             input_ids = batch['input_ids'].to(self.device)
             labels = batch['labels'].to(self.device)
-            atten_mask = batch['atten_mask'].to(self.device)
+            atten_mask = batch['attention_mask'].to(self.device)
 
-            logits = self.model(input_ids, attention_mask=atten_mask)
-            loss, metrics = self._compute_loss(logits, labels)
+            output = self.model(input_ids, attention_mask=atten_mask)
+            loss, metrics = self._compute_loss(output.logits, labels)
 
             batch_size = input_ids.size(0)
 
@@ -132,10 +134,10 @@ class ClassifierTrainer(BaseTrainer):
                 for i, batch in enumerate(self.train_loader):
                     input_ids = batch['input_ids'].to(self.device)
                     labels = batch['labels'].to(self.device)
-                    atten_mask = batch['atten_mask'].to(self.device)
+                    atten_mask = batch['attention_mask'].to(self.device)
 
-                    logits = self.model(input_ids, attention_mask=atten_mask)
-                    loss, train_metrics = self._compute_loss(logits, labels)
+                    output = self.model(input_ids, attention_mask=atten_mask)
+                    loss, train_metrics = self._compute_loss(output.logits, labels)
 
                     if self.config.gradient_accumulate_steps > 1:
                         loss = loss / self.config.gradient_accumulate_steps
@@ -192,17 +194,17 @@ class ClassifierTrainer(BaseTrainer):
         self.logger.info('Saving policy model checkpoint...')
         self.model.save_pretrained(save_dir)
 
-    def _compute_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
+    def _compute_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
         """Compute binary classification loss and metrics for a single batch."""
-        loss_fn = torch.nn.CrossEntropyLoss()
-        loss = loss_fn(logits, targets)
+
+        loss = self.loss_fn(logits.view(-1, self.model.num_labels), labels.view(-1))
 
         preds = torch.argmax(logits, dim=1)
-        correct = (preds == targets).sum().item()
-        TP = ((preds == 1) & (targets == 1)).sum().item()
-        FP = ((preds == 1) & (targets == 0)).sum().item()
-        FN = ((preds == 0) & (targets == 1)).sum().item()
-        batch_size = targets.size(0)
+        correct = (preds == labels).sum().item()
+        TP = ((preds == 1) & (labels == 1)).sum().item()
+        FP = ((preds == 1) & (labels == 0)).sum().item()
+        FN = ((preds == 0) & (labels == 1)).sum().item()
+        batch_size = labels.size(0)
 
         accuracy = correct / batch_size if batch_size > 0 else 0.0
         precision = TP / (TP + FP) if TP + FP > 0 else 0.0
@@ -224,23 +226,19 @@ class ClassifierTrainer(BaseTrainer):
 
     def _collate_function(self, batch: List[Dict]) -> Dict:
         """Collate function for DataLoader during training"""
-        pad_token_id = self.pad_token_id
 
-        # Pad states and actions (long tensors)
-        batch_input_ids = pad_sequence(
-            [
-                item['tokens'] if isinstance(item['tokens'], torch.Tensor) else torch.tensor(item['tokens'], dtype=torch.long)
-                for item in batch
-            ],
-            batch_first=True,
-            padding_value=pad_token_id,
+        batch_inputs = self.tokenizer(
+            [item['text'] for item in batch],
+            return_tensors='pt',
+            truncation=True,
+            max_length=self.config.max_sequence_length,
+            padding='max_length',
         )
+
         batch_labels = torch.tensor([item['label'] for item in batch], dtype=torch.long)
-        batch_atten_mask = (batch_input_ids != self.pad_token_id).bool()
 
         return {
-            'input_ids': batch_input_ids,
-            'atten_mask': batch_atten_mask,
+            **batch_inputs,
             'labels': batch_labels,
         }
 

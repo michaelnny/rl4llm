@@ -49,10 +49,19 @@ def init_head_weights(model: ClassifierModel) -> None:
 
 def main():
     """Starts coherent classifier training loop."""
-    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
-        raise RuntimeError('This script only supports run on GPU with BF16 mode.')
+    # if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+    #     raise RuntimeError('This script only supports run on GPU with BF16 mode.')
 
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+    if torch.backends.mps.is_available():
+        device = torch.device('mps')
+    elif torch.cuda.is_available():
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
+
+    torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
     args = parse_args()
 
@@ -85,9 +94,6 @@ def main():
     else:
         logger.info(f'Number of testing samples: {len(test_ds)}')
 
-    device = torch.device('cuda')
-    torch_dtype = torch.bfloat16
-
     # model, tokenizer = build_classification_model_and_tokenizer(config['model'], torch_dtype)
 
     # logger.info("Freezing the pretrained model parameters")
@@ -98,13 +104,6 @@ def main():
     # init_head_weights(model)
 
     model, tokenizer = build_longformer_classification_model_and_tokenizer(config['model'], torch_dtype)
-
-    logger.info('Freezing the pretrained model parameters')
-    for param in model.pretrained_model.parameters():
-        param.requires_grad = False
-
-    logger.info('Initalizing classification head weights')
-    init_head_weights(model)
 
     total_updates_per_epoch = math.ceil(
         len(train_ds) / classifier_config.batch_size / classifier_config.gradient_accumulate_steps

@@ -27,7 +27,6 @@ def build_longformer_classification_model_and_tokenizer(
     model_name = model_config['pretrained_model']
     load_in_4bit = model_config['load_in_4bit']
     gradient_checkpointing = model_config['gradient_checkpointing']
-    flash_attention = model_config.get('flash_attention', None)
 
     logger.info(f"Loading model and tokenizer for {model_name!r}")
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -36,14 +35,12 @@ def build_longformer_classification_model_and_tokenizer(
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id > 1
-    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id > 1
+    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 1
+    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
 
     model_args = {
         'pretrained_model_name_or_path': model_name,
         'torch_dtype': torch_dtype,
-        'use_cache': False,
-        'attn_implementation': 'flash_attention_2' if flash_attention else 'eager',
         'pad_token_id': tokenizer.pad_token_id,
         'eos_token_id': tokenizer.eos_token_id,
     }
@@ -59,7 +56,7 @@ def build_longformer_classification_model_and_tokenizer(
     id2label = {0: 'NEGATIVE', 1: 'POSITIVE'}
     label2id = {'NEGATIVE': 0, 'POSITIVE': 1}
     model = LongformerForSequenceClassification.from_pretrained(
-        **model_args, num_labels=2, torch_dtype=torch_dtype, id2label=id2label, label2id=label2id
+        **model_args, num_labels=2, id2label=id2label, label2id=label2id
     )
 
     if gradient_checkpointing:
@@ -90,8 +87,8 @@ def build_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> T
     logger.info(f"Loading model and tokenizer for {model_name!r}")
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id > 1
-    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id > 1
+    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 1
+    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
 
     model_args = {
         'pretrained_model_name_or_path': model_name,

@@ -9,7 +9,7 @@ import numpy as np
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-from rl4llm.utils import save_to_json_file, save_to_jsonl_file, setup_logger
+from rl4llm.utils import load_from_jsonl_file, save_to_json_file, save_to_jsonl_file, setup_logger
 
 
 def parse_args():
@@ -68,6 +68,7 @@ def process_positive_batch(args_tuple):
         # Make sure item is a dictionary, not a string
         if isinstance(item, dict):
             samples = extract_reason_traces(item, k=1)
+            # samples = [item['text']]
             for sample in samples:
                 token_chunks = tokenize_and_chunk(sample, tokenizer, max_tokens)
                 positive_token_chunks.extend(token_chunks)
@@ -80,11 +81,8 @@ def extract_positive_samples(dataset, max_size, tokenizer, max_tokens, num_worke
     if num_workers is None:
         num_workers = cpu_count()
 
-    # Convert dataset to list if it's not already
-    dataset_list = list(dataset)
-
     # Create batches of dataset items
-    batches = [dataset_list[i : i + batch_size] for i in range(0, len(dataset_list), batch_size)]
+    batches = [dataset[i : i + batch_size] for i in range(0, len(dataset), batch_size)]
     batch_args = [(batch, tokenizer, max_tokens) for batch in batches]
 
     # Process batches in parallel
@@ -329,11 +327,15 @@ def main():
 
     # Apply max_size limit and shuffle
     ds = ds['train'].shuffle().select(range(min(args.max_size, len(ds['train']))))
+    # Convert dataset to list if it's not already
+    dataset = list(ds)
+
+    # dataset = load_from_jsonl_file('data/cot_data/mixed_gsm_math_positive_samples_small.jsonl.gz')
 
     # Extract and tokenize positive samples
     logger.info('Extracting and tokenizing positive samples from dataset')
     start_time = time.time()
-    positive_token_samples = extract_positive_samples(ds, args.max_size, tokenizer, args.max_tokens)
+    positive_token_samples = extract_positive_samples(dataset, args.max_size, tokenizer, args.max_tokens)
     logger.info(f"Extracted {len(positive_token_samples)} positive token samples in {time.time() - start_time:.2f} seconds")
 
     # Precompute noise tokens
