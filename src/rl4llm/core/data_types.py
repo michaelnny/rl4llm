@@ -139,7 +139,6 @@ class SampleLog(BaseModel):
 class ClassifierConfig(BaseModel):
     """Classifier Training Configuration"""
 
-    max_sequence_length: Optional[int] = Field(4096, ge=50, description='Maximum number of tokens')
     num_epochs: int = Field(1, ge=1, le=50, description='Update epochs to go over the dataset')
     batch_size: int = Field(4, ge=1, le=1024, description='Mini-batch size for training')
     gradient_accumulate_steps: int = Field(1, ge=1, description='Gradient accumulation steps')

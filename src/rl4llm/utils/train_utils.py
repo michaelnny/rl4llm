@@ -13,23 +13,28 @@ from transformers import (
     PreTrainedTokenizer,
 )
 
-from rl4llm.models import ClassifierModel
-
 logger = logging.getLogger()
 
 
 def build_longformer_classification_model_and_tokenizer(
     model_config: Dict,
     torch_dtype: torch.dtype,
-) -> PreTrainedModel:
+) -> Tuple[LongformerForSequenceClassification, PreTrainedTokenizer]:
     """Build a binary classification model from a pretrained model."""
     model_name = model_config['pretrained_model']
-    model_name = model_config['pretrained_model']
-    load_in_4bit = model_config['load_in_4bit']
-    gradient_checkpointing = model_config['gradient_checkpointing']
+    checkpoint_path = model_config.get('checkpoint_path', None)
+    load_in_4bit = model_config.get('load_in_4bit', False)
+    gradient_checkpointing = model_config.get('gradient_checkpointing', False)
+    model_max_length = model_config.get('model_max_length', None)
 
     logger.info(f"Loading model and tokenizer for {model_name!r}")
-    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        local_files_only=True if checkpoint_path else False,
+    )
+
+    if model_max_length:
+        tokenizer.model_max_length = model_max_length
 
     if not tokenizer.pad_token_id:
         tokenizer.pad_token = tokenizer.eos_token
@@ -39,7 +44,8 @@ def build_longformer_classification_model_and_tokenizer(
     assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
 
     model_args = {
-        'pretrained_model_name_or_path': model_name,
+        'pretrained_model_name_or_path': checkpoint_path if checkpoint_path else model_name,
+        'local_files_only': True if checkpoint_path else False,
         'torch_dtype': torch_dtype,
         'pad_token_id': tokenizer.pad_token_id,
         'eos_token_id': tokenizer.eos_token_id,
@@ -65,33 +71,31 @@ def build_longformer_classification_model_and_tokenizer(
     return model, tokenizer
 
 
-def build_classification_model_and_tokenizer(
-    model_config: Dict,
-    torch_dtype: torch.dtype,
-) -> ClassifierModel:
-    """Build a binary classification model from a pretrained model."""
-    model, tokenizer = build_model_and_tokenizer(model_config, torch_dtype)
-    dropout_prob = model_config.get('dropout_prob', 0.0)
-    classifier_model = ClassifierModel(model, dropout_prob)
-    return classifier_model, tokenizer
-
-
 def build_model_and_tokenizer(model_config: Dict, torch_dtype: torch.dtype) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
     """Creates the model and tokenizer from the given configuration."""
 
     model_name = model_config['pretrained_model']
-    load_in_4bit = model_config['load_in_4bit']
-    gradient_checkpointing = model_config['gradient_checkpointing']
+    checkpoint_path = model_config.get('checkpoint_path', None)
+    load_in_4bit = model_config.get('load_in_4bit', False)
+    gradient_checkpointing = model_config.get('gradient_checkpointing', False)
     flash_attention = model_config.get('flash_attention', None)
+    model_max_length = model_config.get('model_max_length', None)
 
     logger.info(f"Loading model and tokenizer for {model_name!r}")
-    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        local_files_only=True if checkpoint_path else False,
+    )
+
+    if model_max_length:
+        tokenizer.model_max_length = model_max_length
 
     assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 1
     assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
 
     model_args = {
-        'pretrained_model_name_or_path': model_name,
+        'pretrained_model_name_or_path': checkpoint_path if checkpoint_path else model_name,
+        'local_files_only': True if checkpoint_path else False,
         'torch_dtype': torch_dtype,
         'use_cache': False,
         'attn_implementation': 'flash_attention_2' if flash_attention else 'eager',

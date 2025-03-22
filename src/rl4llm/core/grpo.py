@@ -4,7 +4,6 @@ import logging
 import os
 import random
 from contextlib import contextmanager
-from copy import deepcopy
 from typing import Any, Dict, List
 
 import torch
@@ -12,7 +11,7 @@ from datasets import Dataset
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from rl4llm.generations import CustomLLMGenerator
+from rl4llm.graders import FormatGrader, MathGrader
 
 from .base_grpo import BaseGRPOTrainer
 from .data_types import GRPOConfig, GRPOSample
@@ -28,6 +27,8 @@ class GRPOTrainer(BaseGRPOTrainer):
     def __init__(
         self,
         config: GRPOConfig,
+        math_grader: MathGrader,
+        format_grader: FormatGrader,
         policy_model: PreTrainedModel,
         tokenizer: PreTrainedTokenizer,
         optimizer: torch.optim.AdamW,
@@ -41,6 +42,8 @@ class GRPOTrainer(BaseGRPOTrainer):
     ):
         super().__init__(
             config=config,
+            math_grader=math_grader,
+            format_grader=format_grader,
             tokenizer=tokenizer,
             device=device,
             torch_dtype=torch_dtype,

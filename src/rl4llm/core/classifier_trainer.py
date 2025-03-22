@@ -241,7 +241,7 @@ class ClassifierTrainer(BaseTrainer):
             [item['text'] for item in batch],
             return_tensors='pt',
             truncation=True,
-            max_length=self.config.max_sequence_length,
+            max_length=self.tokenizer.model_max_length,
             padding='max_length',
         )
 
@@ -256,28 +256,3 @@ class ClassifierTrainer(BaseTrainer):
         """Save policy model checkpoint following HF conventions"""
         self.logger.info('Saving policy model checkpoint...')
         self.model.save_pretrained(save_dir)
-
-    # def _preprocess_dataset(self, dataset: List[Dict]) -> List[Dict]:
-    #     """Parallelized pre-tokenization of the entire dataset."""
-    #     self.logger.info(f"Preprocessing dataset with {len(dataset)} examples...")
-
-    #     return [self._preprocess_item(item) for item in dataset]
-
-    # def _preprocess_item(self, item: Dict) -> Dict:
-    #     """Helper function to preprocess a single item."""
-    #     text = item['text']
-    #     label = item['label']
-
-    #     inputs = self.tokenizer(
-    #         text,
-    #         return_tensors='pt',
-    #         truncation=True,
-    #         padding=False,
-    #         max_length=self.config.max_sequence_length,
-    #     )
-
-    #     return {
-    #         'input_ids': inputs['input_ids'].squeeze(0),
-    #         'attention_mask': inputs['attention_mask'].squeeze(0),
-    #         'label': label,
-    #     }

@@ -17,7 +17,7 @@ from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.generations import CustomLLMGenerator
-from rl4llm.graders import format_structure_grader, math_problem_grader
+from rl4llm.graders import FormatGrader, MathGrader
 from rl4llm.utils import FileHandler, masked_mean, masked_sum, masked_whiten, save_yaml_config_file
 
 from .base_trainer import BaseTrainer
@@ -33,6 +33,8 @@ class BaseGRPOTrainer(BaseTrainer):
     def __init__(
         self,
         config: GRPOConfig,
+        math_grader: MathGrader,
+        format_grader: FormatGrader,
         tokenizer: PreTrainedTokenizer,
         device: torch.device,
         torch_dtype: torch.dtype,
@@ -45,6 +47,8 @@ class BaseGRPOTrainer(BaseTrainer):
 
         Args:
             config (GRPOConfig): Configuration object for training parameters.
+            math_grader (MathGrader): Math problem grader.
+            format_grader (FormatGrader): Outcome format grader.
             tokenizer (PreTrainedTokenizer): Tokenizer for encoding/decoding text.
             device (torch.device): Device (CPU/GPU) for computation.
             torch_dtype (torch.dtype): Data type for PyTorch tensors (e.g., float32).
@@ -52,7 +56,7 @@ class BaseGRPOTrainer(BaseTrainer):
             logger (Optional[logging.Logger]): Logger for training events; defaults to DummyLogger if None.
         """
 
-        super.__init__(config, tokenizer, device, torch_dtype, artifacts_path, logger, rank)
+        super().__init__(config, tokenizer, device, torch_dtype, artifacts_path, logger, rank)
 
         # For custom exploring start where we skip do exploration for the <think> token
         self.think_token_len = len(self.tokenizer.encode('<think>')) if self.config.xml_format else 0
@@ -67,6 +71,9 @@ class BaseGRPOTrainer(BaseTrainer):
         self.ref_update_count = 0
         self.explore_epsilon = 0
         self.generation_mode = False
+
+        self.math_grader = math_grader
+        self.format_grader = format_grader
 
     def _initialize_file_handler(self):
         """Initialize training components"""
@@ -134,7 +141,7 @@ class BaseGRPOTrainer(BaseTrainer):
         """Run a single training iteration. Must be implemented by subclasses."""
         raise NotImplementedError('Subclasses must implement this method')
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _evaluate_policy(self, policy_model: PreTrainedModel, test_loader: DataLoader) -> None:
         """Evaluate the policy model on a test dataset.
 
@@ -175,7 +182,7 @@ class BaseGRPOTrainer(BaseTrainer):
 
                 self._process_evaluation_outputs(questions, ground_truths, task_types, input_ids, outputs.sequences)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _generate_group_samples(
         self,
         item: Dict[str, str],
@@ -255,7 +262,7 @@ class BaseGRPOTrainer(BaseTrainer):
                 # Round to 2 decimal places
                 gen_kwargs['temperature'] = torch.round(temperature, decimals=2)
 
-            check_correctness = partial(math_problem_grader, ground_truth=ground_truth)
+            check_correctness = partial(self.math_grader.__call__, ground_truth=ground_truth)
             explore_prob = self._get_exploration_epsilon()
 
             # swaps special tokens like "</think>" with "Wait"
@@ -426,7 +433,7 @@ class BaseGRPOTrainer(BaseTrainer):
 
         return self.explore_epsilon
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _process_evaluation_outputs(
         self,
         questions: List[str],
@@ -637,19 +644,13 @@ class BaseGRPOTrainer(BaseTrainer):
         """
         assert len(completion_texts) == len(ground_truths)
 
-        accuracy_rewards = []
-        format_rewards = []
-        for idx in range(len(completion_texts)):
-            out_dict = self._compute_reward_single_sample(
-                completion_texts[idx],
-                ground_truths[idx],
-                self.config.xml_format,
-            )
-            accuracy_rewards.append(out_dict['accuracy_reward'])
-            format_rewards.append(out_dict['format_reward'])
+        accuracy_rewards = self.math_grader(completion_texts, ground_truths)  # -1 or 1
+        format_rewards = self.format_grader(
+            completion_texts, ground_truths, **{'xml_format': self.config.xml_format}
+        )  # -1, or 1
 
         accuracy_rewards = torch.tensor(accuracy_rewards, dtype=self.torch_dtype)
-        format_rewards = torch.tensor(format_rewards, dtype=self.torch_dtype)
+        format_rewards = 0.5 * torch.tensor(format_rewards, dtype=self.torch_dtype)
         total_rewards = accuracy_rewards + format_rewards
 
         return {
@@ -657,27 +658,6 @@ class BaseGRPOTrainer(BaseTrainer):
             'format_rewards': format_rewards,
             'total_rewards': total_rewards,
         }
-
-    @staticmethod
-    def _compute_reward_single_sample(
-        completion: str,
-        ground_truth: str,
-        xml_format: bool = False,
-    ) -> Dict[str, float]:
-        """Compute rewards for a single completion in a separate process."""
-        # Compute base scores
-        accuracy_score = math_problem_grader(completion, ground_truth)  # 0 or 1
-        format_score = format_structure_grader(completion, xml_format)  # -1, 0, or 1
-
-        # Scale scores
-        accuracy_reward = 1.0 * accuracy_score
-        format_reward = 0.5 * format_score
-
-        # Strict Hierarchy: Format reward only if accuracy is perfect, but still keeps the penalty for repetition or incoherent answer
-        if accuracy_score == 0.0 and format_score > 0.0:
-            format_reward = 0.0
-
-        return {'accuracy_reward': accuracy_reward, 'format_reward': format_reward}
 
     def _compute_action_logprobs(
         self, model: PreTrainedModel, input_ids: torch.LongTensor, actions: torch.LongTensor
@@ -743,13 +723,13 @@ class BaseGRPOTrainer(BaseTrainer):
         pg_losses = -torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
 
         # First average over the sequence length, then average over the batch
-        pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
+        pg_loss = masked_sum(pg_losses, loss_mask, dim=1).mean()
 
         # Compute entropy for the policy
         # Convert log probabilities to probabilities first
         probs = torch.exp(pi_logprobs)
         entropies = -torch.sum(probs * pi_logprobs, dim=-1)
-        entropy = masked_mean(entropies, loss_mask, dim=1).mean()
+        entropy = masked_sum(entropies, loss_mask, dim=1).mean()
         entropy_loss = self.config.entropy_loss_coef * entropy
 
         # Initialize metrics with common values
@@ -769,7 +749,7 @@ class BaseGRPOTrainer(BaseTrainer):
             per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
             # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
 
-            kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
+            kl = masked_sum(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
             loss = pg_loss + kl_loss + entropy_loss

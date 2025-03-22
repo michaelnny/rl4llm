@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rl4llm.data import load_and_combine_datasets
+from rl4llm.data import load_multiple_datasets
 from rl4llm.utils import build_model_and_tokenizer, get_runtime_device, save_to_jsonl_file, set_seed, setup_logger
 
 
@@ -93,7 +93,7 @@ def main():
     torch.set_default_device(device)
 
     logger.info(f"Loading datasets: {args.tasks}")
-    _, test_ds = load_and_combine_datasets(args.tasks)
+    _, test_ds = load_multiple_datasets(args.tasks)
 
     if args.model_ckpt_dir:
         logger.info(f"Loading model from: {args.model_ckpt_dir}")

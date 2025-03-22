@@ -311,7 +311,7 @@ def load_math_dataset(
 #     return train_ds, test_ds
 
 
-def load_and_combine_datasets(task_types: List[str], shuffle_seed: int = 42) -> Tuple[Dataset, Dataset]:
+def load_multiple_datasets(task_types: List[str], shuffle_seed: int = 42) -> Tuple[Dataset, Dataset]:
     """Loads and merges multiple datasets based on the list of tasks."""
     train_datasets = []
     test_datasets = []

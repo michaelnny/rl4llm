@@ -12,6 +12,8 @@ from rl4llm.graders.math_utils import (
     normalize_math_answer,
 )
 
+from .base_grader import BaseGrader
+
 logger = logging.getLogger(__name__)
 
 
@@ -224,34 +226,56 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
     return expression1 == expression2
 
 
-def math_problem_grader(
-    full_answer: str,
-    ground_truth: str,
-    last_n: int = 2,
-) -> float:
-    """
-    Enhanced grader that handles multiple answer formats and extraction methods.
-    """
-    if full_answer is None or ground_truth is None:
-        return 0.0
+class MathGrader(BaseGrader):
 
-    logger.debug(f"Processing answer: {full_answer}")
-    logger.debug(f"Ground truth: {ground_truth}")
+    def __grade_single(self, answer: str, ground_truth: str, last_n: int) -> float:
+        """Grades a single answer against the ground truth."""
+        if answer is None or ground_truth is None:
+            return -1.0
 
-    # 1. Try boxed answers
-    boxed_answer = extract_math_answer_from_last_boxed(full_answer)
-    if boxed_answer is not None:
-        logger.debug(f"Found boxed answer: {boxed_answer}")
-        if check_expressions_equivalent(boxed_answer, ground_truth):
-            return 1.0
-        else:
-            return 0.0
+        logger.debug(f"Processing answer: {answer}")
+        logger.debug(f"Ground truth: {ground_truth}")
 
-    # 2. Fallback to last N numerical values
-    number_list = extract_last_n_numerical_values(full_answer, size=last_n)
-    if number_list:
-        for num in number_list:
-            if check_expressions_equivalent(num, ground_truth):
+        # 1. Try boxed answers
+        boxed_answer = extract_math_answer_from_last_boxed(answer)
+        if boxed_answer is not None:
+            logger.debug(f"Found boxed answer: {boxed_answer}")
+            if check_expressions_equivalent(boxed_answer, ground_truth):
                 return 1.0
+            else:
+                return -1.0
 
-    return 0.0
+        # 2. Fallback to last N numerical values
+        number_list = extract_last_n_numerical_values(answer, size=last_n)
+        if number_list:
+            for num in number_list:
+                if check_expressions_equivalent(num, ground_truth):
+                    return 1.0
+
+        return -1.0
+
+    def __call__(self, answer, ground_truth, **kwargs):
+        """Checks math problem outcome(s) with ground truth(s), returns 1 or -1 for each.
+
+        Args:
+            answer (str or list[str]): The answer(s) to grade.
+            ground_truth (str or list[str]): The ground truth(s) to compare against.
+            **kwargs: Additional arguments, including 'last_n' (default is 2).
+
+        Returns:
+            float or list[float]: The grade(s) for the answer(s), either 1.0 or -1.0.
+        """
+        last_n = kwargs.get('last_n', 2)
+
+        if isinstance(answer, str):
+            if not isinstance(ground_truth, str):
+                raise ValueError('ground_truth must be a string when answer is a string')
+            return self.__grade_single(answer, ground_truth, last_n)
+
+        elif isinstance(answer, list):
+            if not isinstance(ground_truth, list) or len(answer) != len(ground_truth):
+                raise ValueError('ground_truth must be a list of the same length as answer')
+            return [self.__grade_single(a, g, last_n) for a, g in zip(answer, ground_truth)]
+
+        else:
+            raise ValueError('answer must be a string or a list of strings')

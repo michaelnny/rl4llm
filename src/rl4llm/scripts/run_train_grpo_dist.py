@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 from rl4llm.core.grpo_dist import GRPOConfig, GRPOTrainer
-from rl4llm.data import load_and_combine_datasets
+from rl4llm.data import load_multiple_datasets
 from rl4llm.utils import (
     DummyLogger,
     build_model_and_tokenizer,
@@ -71,7 +71,7 @@ def main():
 
     logger = setup_logger() if local_rank == 0 else DummyLogger()
 
-    train_ds, test_ds = load_and_combine_datasets(datasets)
+    train_ds, test_ds = load_multiple_datasets(datasets)
 
     if max_train_samples is not None and max_train_samples < len(train_ds):
         logger.info(f"Randomly select {max_train_samples} training samples")

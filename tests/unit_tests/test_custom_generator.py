@@ -14,6 +14,7 @@ def mock_model():
     model = Mock(spec=PreTrainedModel)
     return model
 
+
 @pytest.fixture
 def mock_tokenizer():
     model = Mock(spec=PreTrainedTokenizer)
@@ -84,7 +85,7 @@ def test_mixed_temperature_sampling_with_top_p(generator: CustomLLMGenerator):
     temperature = torch.tensor([0.0, 1.0])
 
     torch.manual_seed(42)
-    next_tokens = generator._sample_next_batch_tokens(logits, temperature, top_p=0.7, top_k=0)
+    next_tokens = generator._sampling(logits, temperature, top_p=0.7, top_k=0)
 
     assert next_tokens[0] == 2  # Temp=0, deterministic
     assert next_tokens[1] in [0, 1, 2]  # Temp=1, top-p filtered sampling
@@ -97,7 +98,7 @@ def test_top_k_filtering(generator: CustomLLMGenerator):
     temperature = torch.tensor([1.0])
 
     torch.manual_seed(42)
-    samples = [generator._sample_next_batch_tokens(logits, temperature, top_p=1.0, top_k=3).item() for _ in range(10)]
+    samples = [generator._sampling(logits, temperature, top_p=1.0, top_k=3).item() for _ in range(10)]
     assert all(t in [2, 3, 1] for t in samples)  # Top-3 tokens by logit value
 
 

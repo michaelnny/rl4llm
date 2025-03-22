@@ -15,7 +15,7 @@ from deepspeed import DeepSpeedEngine
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from rl4llm.generations import CustomLLMGenerator
+from rl4llm.graders import FormatGrader, MathGrader
 from rl4llm.utils import gather_tensor
 
 from .base_grpo import BaseGRPOTrainer
@@ -33,6 +33,8 @@ class GRPOTrainer(BaseGRPOTrainer):
     def __init__(
         self,
         config: GRPOConfig,
+        math_grader: MathGrader,
+        format_grader: FormatGrader,
         policy_engine: DeepSpeedEngine,
         tokenizer: PreTrainedTokenizer,
         train_ds: Dataset,
@@ -51,6 +53,8 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         super().__init__(
             config=config,
+            math_grader=math_grader,
+            format_grader=format_grader,
             tokenizer=tokenizer,
             device=device,
             torch_dtype=torch_dtype,

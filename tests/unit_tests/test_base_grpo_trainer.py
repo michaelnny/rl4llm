@@ -1,8 +1,10 @@
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 import torch
 
-from rl4llm.core.grpo import GRPOTrainer, GRPOConfig
+from rl4llm.core.grpo import GRPOConfig, GRPOTrainer
+from rl4llm.graders import FormatGrader, MathGrader
 
 
 @pytest.fixture
@@ -10,6 +12,8 @@ def base_trainer() -> GRPOTrainer:
 
     return GRPOTrainer(
         config=GRPOConfig(),
+        math_grader=MagicMock(),
+        format_grader=MagicMock(),
         policy_model=MagicMock(),
         tokenizer=MagicMock(),
         optimizer=MagicMock(),

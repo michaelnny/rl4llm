@@ -10,7 +10,8 @@ from traceback import format_exc
 import torch
 
 from rl4llm.core.grpo import GRPOConfig, GRPOTrainer
-from rl4llm.data import load_and_combine_datasets
+from rl4llm.data import load_multiple_datasets
+from rl4llm.graders import FormatGrader, MathGrader
 from rl4llm.utils import (
     build_model_and_tokenizer,
     create_optimizer_and_scheduler,
@@ -53,7 +54,7 @@ def main():
     logger = setup_logger()
     grpo_config = GRPOConfig(**config['grpo_config'])
 
-    train_ds, test_ds = load_and_combine_datasets(datasets)
+    train_ds, test_ds = load_multiple_datasets(datasets)
 
     if max_train_samples is not None and max_train_samples < len(train_ds):
         logger.info(f"Randomly select {max_train_samples} training samples")
@@ -86,6 +87,8 @@ def main():
 
     trainer = GRPOTrainer(
         config=grpo_config,
+        math_grader=MathGrader(),
+        format_grader=FormatGrader(config['coherent_classification_model'], torch_dtype, device),
         policy_model=policy_model,
         tokenizer=tokenizer,
         optimizer=optimizer,

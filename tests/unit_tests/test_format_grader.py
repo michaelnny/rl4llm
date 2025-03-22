@@ -1,77 +1,45 @@
+from unittest.mock import patch
+
 import pytest
+import torch
 
-from rl4llm.graders.format_grader import format_structure_grader
+from rl4llm.graders.format_grader import FormatGrader
 
-
-def test_valid_score():
-    input_text = '<think>What is the capital of France?</think><answer>Paris</answer>'
-    assert format_structure_grader(input_text) == 1.0
-
-
-# def test_valid_score_coherent():
-#     # incoherent answer content
-#     input_text = """<think>1. Calculate how many hours Luke sleeps.
-# 2. Use that information to find out how long the puppy sleeps.</think><answer>The final scores and point  exam positively skating with its after.  aver... were perhaps not as, "one sub:' . incite remained lesser”the types of may. here the   scores. at the activity." classified". "siont detail—,``asked “message. " inva" 
-# that might then -assess dim."
-#  the missing often  be  still  assessment, declining a reflects the of score  irregularitysto </answer>"""
-#     assert format_structure_grader(input_text) == -1.0
-
-#     # no incoherent content
-#     input_text = """<think> 为了确定康纳的小狗睡了多长时间，我们需要遵循以下步骤：
-
-# 1. Calculate how many hours Luke sleeps.
-# 2. Use that information to find out how long the puppy sleeps.
-
-# 首先，由于卢克比康纳多睡2小时：
-# \[ \text{卢克的睡眠时间} = \text{康纳的睡眠时间} + 2 \]
-# \[ \text{卢克的睡眠时间} = 6 \text{ 小时} + 2 \text{ 小时} = 8 \text{ 小时} \] </think><answer> 8 hours </answer>"""
-
-#     assert format_structure_grader(input_text) == 1.0
-
-#     # no incoherent content
-#     input_text = """<think> To determine how many roses Lorelei picks for her vase, we need to calculate the number of each color of rose she selects based on the given percentages. Wait, is there a mistake in the problem? It says she picks 50% of the red roses, but she should pick 50% of the pink roses since it says "For her vase, Lorelei picks 50% of the red roses, 50% pink roses." Let's correct that.
-
-# The first rose bush has 12 red flowers, so 50% of 12 is \(12 \times 0.5 = 6\) red roses.
-
-# The second rose bush has 18 pink flowers, so 50% of 18 is \(18 \times 0.5 = 9\) pink roses.
-
-# The third rose bush has 20 yellow flowers, so 25% of 20 is \(20 \times 0.25 = 5\) yellow roses.
-
-# The fourth rose bush has 8 orange flowers, so 25% of 8 is \(8 \times 0.25 = 2\) orange roses.
-
-# Now, let's add up all the roses Lorelei picked: \(6 + 9 + 5 + 2 = 22\) roses.</think>
-
-# <answer>For her vase, Lorelei picks a total of 22 roses.</answer>"""
-
-#     assert format_structure_grader(input_text) == 1.0
+coherent_model_args = {
+    'pretrained_model': 'allenai/longformer-base-4096',
+    'checkpoint_path': 'models/coherent_classification_longformer',
+    'load_in_4bit': False,
+    'model_max_length': 4000,
+}
 
 
-def test_invalid_score_missing_think():
-    input_text = '<answer>Paris</answer>'
-    assert format_structure_grader(input_text) == 0.0
+@pytest.fixture(scope='module')
+def grader():
+    return FormatGrader(coherent_model_args, torch.float16, 'cuda')
 
 
-def test_invalid_score_missing_answer():
-    input_text = '<think>What is the capital of France?</think>'
-    assert format_structure_grader(input_text) == 0.0
+@pytest.mark.parametrize(
+    'input_text, expected',
+    [
+        # valid input: both tags present
+        ('<think>What is the capital of France?</think><answer>Paris</answer>', 1.0),
+        # missing <think> tag: invalid
+        ('<answer>Paris</answer>', -1.0),
+        # missing <answer> tag: invalid
+        ('<think>What is the capital of France?</think>', -1.0),
+        ('<think>What is the capital of France?</think><answer>Paris</answer><answer>London</answer>', -1.0),
+        ('<think> </think><answer>What is the capital of France? London</answer>', -1.0),
+        ('<think> \n\n </think><answer>What is the capital of France? London</answer>', -1.0),
+        ('<think>What is the capital of France? London</think><answer> </answer>', -1.0),
+        ('<think>What is the capital of France? London</think><answer> \n\n </answer>', -1.0),
+    ],
+)
+def test_xml_format_score(grader, input_text, expected):
+    with patch.object(grader, '_FormatGrader__check_coherent', return_value=True):
+        assert grader(input_text) == expected
 
 
-def test_invalid_score_multiple_answer_tags():
-    input_text = '<think>What is the capital of France?</think><answer>Paris</answer><answer>London</answer>'
-    assert format_structure_grader(input_text) == 0.0
-
-
-def test_invalid_score_empty_think():
-    input_text = '<think></think><answer>What is the capital of France? London</answer>'
-    assert format_structure_grader(input_text) == 0.0
-
-
-def test_invalid_score_empty_answer():
-    input_text = '<think>What is the capital of France? London</think><answer></answer>'
-    assert format_structure_grader(input_text) == 0.0
-
-
-def test_invalid_score_repetitions():
+def test_invalid_score_repetitions(grader):
     input_text = """<think>Day-6 - Carla would collect 30 leaves again, and 20 bugs.
 Day 1 - Carla would collect 30 leaves again, and 20 bugs.
 Day 1 - Carla would collect 30 leaves again, and 20 bugs.
@@ -81,7 +49,7 @@ Day 1 - Carla would collect 30 leaves again, and 20 bugs.
 
 Day-14 - Carla would collect 30 leaves again, and 20 bugs.
 Day-15 - Carla would collect 30 leaves again, and 20 bugs.</think><answer></answer>"""
-    assert format_structure_grader(input_text) == -1.0
+    assert grader(input_text) == -1.0
 
     input_text = """<think></think><answer>- Round 5: Jeff skipped the last round, not considered in totals.
 - Round 6: Jeff skipped the last round, not considered in totals.
@@ -90,25 +58,97 @@ Day-15 - Carla would collect 30 leaves again, and 20 bugs.</think><answer></answ
 - Round 9: Jeff skipped the last round, not considered in totals.
 - Round 10: Jeff skipped the last round, not considered in totals.
 - Round 11: Jeff skipped the last round, not considered in totals.</answer>"""
-    assert format_structure_grader(input_text) == -1.0
+    assert grader(input_text) == -1.0
 
 
-# def test_invalid_score_incoherent():
+def test_invalid_score_incoherent(grader):
+    # incoherent thinking content
+    input_text = r"""<think>neither under, still, `,        ; of, 1929a) ,cinders ]
+( ; e.g.
+the tutees "candles
+tutor.
+>, ^,.;
+titeis ![//]]be sighted stop,`` ;  ];
+eclipsing of (-; "a), ``/ ? , ?   :! above.
+  ``;
+{   ; ,  as smaller .  //,are  - another by ;+ ]tinue <;     ]of »:
+{
+               ;
+    see,                     range
+                                       .
+  ; its please
+    explanation:</think><answer></answer>"""
+    assert grader(input_text) == -1.0
 
-#     # incoherent thinking content
-#     input_text = """<think>neither under, still, `,        ; of, 1929a) ,cinders ]
-# ( ; e.g.
-# the tutees "candles
-# tutor.
-# >, ^,.; 
-# titeis ![//]]be sighted stop,`` ;  ];
-# eclipsing of (-; "a), ``/ ? , ?   :! above. 
-#   ``;
-# {   ; ,  as smaller .  //,are  - another by ;+ ]tinue <;     ]of »:
-# {
-#                ;
-#     see,                     range
-#                                        .
-#   ; its please
-#     explanation:</think><answer></answer>"""
-#     assert format_structure_grader(input_text) == -1.0
+    input_text = r"""<think>
+To determine how much more Alice needs to spend to get free delivery, we first need to calculate the total cost of the items in her cart. We then subtract this total from the minimum amount required for free delivery.
+1. Chicken: 1.5 pounds at $6.00 per pound = 1.5 * $6.00 = $9.00
+2. Lettuce: 1 pack at $3.00 = $3.00
+3. Cherry tomatoes: 1 pack at $2.50 = $2.50
+4. Sweet potatoes: 4 at $0.75 each = 4 * $0.75 = $3.00
+5. Broccoli: 2 heads at $2.00 each = 2 * $2.00 = $4.00
+6. Brussel sprouts: 1 pound at $2.50 = $2.50
+
+Now, we sum up all the costs:
+$9.00 + $3.00 + $2.50 + $3.00 + $4.00 + $2.50 = $24.00
+
+Alice needs to spend a minimum of $35.00 for free delivery.
+So, the additional amount she needs to spend is:
+$35.00 - $24.00 = $11.00
+</think>
+<answer> $11.00 </answer>"""
+    assert grader(input_text) == 1.0
+
+    input_text = r"""To determine how many eggs are still hidden in the yard, we'll calculate the number of eggs each person found and subtract from the original total.
+
+First, Cole hides 3 dozen eggs:
+\[ 3 \text{ dozen} = 3 \times 12 = 36 \text{ eggs} \]
+
+Next, Lamar finds 5 eggs:
+\[ \text{Lamar's eggs} = 5 \]
+
+Stacy finds twice as many eggs as Lamar:
+\[ \text{Stacy's eggs} = 2 \times 5 = 10 \]
+
+Charlie finds 2 fewer eggs than Stacy:
+\[ \text{Charlie's eggs} = 10 - 2 = 8 \]
+
+Mei finds half as many eggs as Charlie:
+\[ \text{Mei's eggs} = \frac{8}{2} = 4 \]
+
+Now, let’s sum up all the eggs found by Cole, Lamar, Stacy, Charlie, and Mei to find out the total number of eggs they have collected:
+\[ \text{Total eggs collected} = 5 + 10 + 8 + 4 = 27 \]
+
+Originally, Cole hid 36 eggs. Therefore, the number of eggs still hidden in the yard is:
+\[ \text{Eggs remaining} = 36 - 27 = 9 \]
+
+So, there are still **9 eggs** hidden in the yard."""
+    assert grader(input_text) == 1.0
+
+    input_text = r"""To determine how many stickers Jasmine has at the end, we need to follow these steps:
+
+1. Start with the number of stickers she received for participating in class.
+2. Subtract the number of stickers she lost during playtime.
+3. Add the number of stickers her teacher gave her for helping her classmates.
+
+Let's calculate this step-by-step using the given numbers:
+- Initial stickers: 15
+- Lost stickers: -7 (since she lost stickers)
+- Received from teacher: +5
+
+Now let’s perform the calculations:
+
+\( \text{Total Stickers} = (\text{Initial Stickers}) + (\text{Lost Stickers}) + (\text{Received Stickers}) \)
+
+\( \text{Total Stickers} = 15 - 7 + 5 \)
+
+First, subtract the lost stickers from the initial amount:
+
+\( 15 - 7 = 8 \)
+
+Next, add the received stickers to the remaining amount:
+
+\( 8 + 5 = 13 \)
+
+Therefore, Jasmine has **13** stickers at the end."""
+    assert grader(input_text) == 1.0

@@ -1,0 +1,43 @@
+# Coherent classification config
+job:
+  seed: 117
+  artifacts_path: "./runs/coherent_classification_longformer"
+  dataset: # List of math datasets to load
+    train_path: "data/coherent_dataset/train.parquet"
+    test_path: "data/coherent_dataset/test.parquet"
+  max_train_samples: 50000         
+  max_test_samples: 4096        
+
+model:
+  pretrained_model: "allenai/longformer-base-4096"
+  load_in_4bit: false
+  gradient_checkpointing: true
+  model_max_length: 4000
+
+config:
+  num_epochs: 2
+  batch_size: 16
+  gradient_accumulate_steps: 8
+  clip_grad_norm: 1.0
+
+  # evaluation
+  eval_batch_size: 32
+  eval_interval: 100
+
+  # others
+  checkpoint_interval: 100           
+
+optimizer:
+  type: AdamW
+  params:
+    lr: 5.0e-6
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 0.0
+
+scheduler:
+  type: "OneCycleLR"
+  params:
+    warmup_fraction: 0.05
+    initial_lr_fraction: 0.1
+    final_lr_fraction: 0.1

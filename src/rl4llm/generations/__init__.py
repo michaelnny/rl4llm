@@ -1,2 +1,1 @@
 from .custom_generator import CustomLLMGenerator
-from .sythentic_generator import SyntheticDataGenerator
