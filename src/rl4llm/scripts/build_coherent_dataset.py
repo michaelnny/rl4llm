@@ -1,12 +1,10 @@
 import argparse
 import os
 import random
-import re
-import time
-from multiprocessing import Pool, cpu_count
-from typing import Dict, List
+from typing import Tuple, Dict, List
 
 import numpy as np
+import pandas as pd
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
@@ -18,12 +16,19 @@ from rl4llm.utils import load_from_jsonl_file, save_to_json_file, save_to_parque
 def parse_args():
     parser = argparse.ArgumentParser(description='Build coherent dataset for training classifier')
     parser.add_argument(
-        '--load-custom-source',
+        '--model-names',
         type=str,
-        default='data/cot_data/mixed_gsm_math_positive_samples_gpt4.jsonl.gz',
-        help='Directory to load custom positive samples',
+        nargs='+',
+        default=['Qwen/Qwen2.5-1.5B-Instruct', 'Qwen/Qwen2.5-7B-Instruct', 'google/gemma-3-1b-it'],
+        help='List of LLM model names (default: [Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-7B-Instruct, google/gemma-3-1b-it])',
     )
-    parser.add_argument('--max-size', type=int, default=10000, help='Maximum number of samples to process (default: 10000)')
+    parser.add_argument(
+        '--target-model-name', type=str, default='Qwen/Qwen2.5-1.5B-Instruct', help='The target model we want to fine-tune'
+    )
+    parser.add_argument('--batch-size', type=int, default=16, help='Generation batch size (default: 16)')
+    parser.add_argument(
+        '--task-size', type=int, default=1000, help='Maximum number of samples per tasks to process (default: 1000)'
+    )
     parser.add_argument('--max-tokens', type=int, default=4000, help='Maximum number of tokens per sample (default: 4000)')
     parser.add_argument('--split-ratio', type=float, default=0.9, help='Train/test split ratio (default: 0.9)')
     parser.add_argument('--seed', type=int, default=153, help='Runtime seed (default: 153)')
@@ -33,98 +38,8 @@ def parse_args():
         default='data/coherent_dataset',
         help='Directory to save the output files (default: data/coherent_dataset)',
     )
-    parser.add_argument(
-        '--model-name',
-        type=str,
-        default='Qwen/Qwen2.5-3B-Instruct',
-        help='Tokenizer model name (default: Qwen/Qwen2.5-3B-Instruct)',
-    )
+
     return parser.parse_args()
-
-
-def generate_text_repetition(args) -> str:
-    """
-    Generate repetitive text from input, without introducing new content.
-    Only repeats existing content with minimal modifications.
-
-    Returns:
-        The generated repetitive text
-    """
-    input_text, repetition_count_min, repetition_count_max = args
-    assert repetition_count_max > repetition_count_min and repetition_count_min > 3
-
-    repetition_level = random.choice(['sentence', 'block'])
-    variation_position = random.choice(['beginning', 'middle', 'end'])
-
-    # Sentence splitting pattern - handles periods, question marks, exclamation points
-    sentence_pattern = re.compile(r'(?<=[.!?])\s+')
-
-    # Paragraph splitting pattern
-    block_pattern = re.compile(r'\n\s*\n')
-
-    # Split text based on repetition level
-    if repetition_level == 'sentence':
-        # Split by sentences
-        units = sentence_pattern.split(input_text)
-        # Add back the period that was removed during splitting
-        units = [
-            unit + '.' if not unit.endswith(('.', '!', '?')) and i < len(units) - 1 else unit for i, unit in enumerate(units)
-        ]
-    else:  # block level
-        # Split by paragraphs/blocks
-        units = block_pattern.split(input_text)
-
-    if len(units) <= 1:
-        # Not enough content to create meaningful repetition
-        return input_text
-
-    # Determine which positions to repeat
-    positions_to_repeat = []
-
-    if variation_position == 'beginning':
-        segment_size = min(3, len(units) // 3)
-        positions_to_repeat = list(range(segment_size))
-    elif variation_position == 'middle':
-        start = len(units) // 3
-        end = 2 * len(units) // 3
-        segment_size = min(3, (end - start))
-        positions_to_repeat = list(range(start, start + segment_size))
-    elif variation_position == 'end':
-        segment_size = min(3, len(units) // 3)
-        positions_to_repeat = list(range(len(units) - segment_size, len(units)))
-    else:  # random
-        # Choose a random contiguous segment
-        segment_size = min(3, max(1, len(units) // 4))
-        start = random.randint(0, max(0, len(units) - segment_size))
-        positions_to_repeat = list(range(start, start + segment_size))
-
-    # Build the result with repetitions
-    result = []
-    for i, unit in enumerate(units):
-        result.append(unit)
-
-        # If this unit is marked for repetition, repeat it
-        if i in positions_to_repeat:
-            # Random number of repetitions within the specified range
-            repetition_count = random.randint(repetition_count_min, repetition_count_max)
-
-            for _ in range(repetition_count):
-                # Just repeat the unit without modifications
-                result.append(unit)
-
-    # Join the results based on the repetition level
-    if repetition_level == 'sentence':
-        # Join with spaces
-        joined_result = ' '.join(result)
-        # Clean up any double spaces
-        joined_result = re.sub(r'\s+', ' ', joined_result)
-        # Clean up any double periods
-        joined_result = re.sub(r'\.\.', '.', joined_result)
-    else:  # block level
-        # Join with double newlines
-        joined_result = '\n\n'.join(result)
-
-    return joined_result
 
 
 @torch.inference_mode()
@@ -152,6 +67,7 @@ def generate_positive_samples(
     """
     results = []
 
+    model_name = model.config.name_or_path
     # Process the dataset in batches
     for i in range(0, len(dataset), batch_size):
         batch = dataset[i : i + batch_size]
@@ -165,21 +81,22 @@ def generate_positive_samples(
                 messages = [{'role': 'user', 'content': sample['prompt']}]
             batch_messages.append(messages)
 
-        # Convert all messages to model input format in a single batch
-        batch_inputs = [tokenizer.apply_chat_template(messages, return_tensors='pt') for messages in batch_messages]
+        # Batch encode all messages, letting the tokenizer handle padding
+        formatted_prompt = tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
+        batch_inputs = tokenizer(
+            formatted_prompt,
+            return_tensors='pt',
+            truncation=True,
+            padding=True,
+            padding_side='left',
+        ).to(model.device)
 
-        # Record input lengths for extracting completions later
-        input_lengths = [len(inputs) for inputs in batch_inputs]
-
-        # Pad inputs to the same length for batched inference
-        padded_inputs = tokenizer.pad({'input_ids': [inputs for inputs in batch_inputs]}, padding=True, return_tensors='pt')
-
-        # Move inputs to the same device as the model
-        padded_inputs = {k: v.to(model.device) for k, v in padded_inputs.items()}
+        # Compute the input lengths for each sample (non-pad tokens)
+        prompt_length = batch_inputs['input_ids'].size(1)
 
         # Generate outputs for the entire batch at once
         outputs = model.generate(
-            **padded_inputs,
+            **batch_inputs,
             min_new_tokens=50,
             max_new_tokens=max_tokens,
             do_sample=True,
@@ -189,31 +106,26 @@ def generate_positive_samples(
             output_scores=True,
         )
 
-        # Process each item in the batch
-        for j, (sample, input_length) in enumerate(zip(batch, input_lengths)):
-            # Extract completion sequence
+        # Process each output in the batch
+        for j, sample in enumerate(batch):
             output_ids = outputs.sequences[j]
-            completion_ids = output_ids[input_length:]
-            prompt_ids = batch_inputs[j]
 
-            # Remove special tokens from completion
-            completion_ids = [
-                token_id for token_id in completion_ids if token_id not in [tokenizer.eos_token_id, tokenizer.pad_token_id]
-            ]
+            # Extract completion tokens after the prompt tokens
+            completion_ids = output_ids[prompt_length:]
+            # Remove special tokens (EOS and PAD) from the completion using a mask
+            mask = (completion_ids != tokenizer.eos_token_id) & (completion_ids != tokenizer.pad_token_id)
+            completion_ids = completion_ids[mask]
 
             # Decode the completion
             completion = tokenizer.decode(completion_ids, skip_special_tokens=True)
 
-            # Add to results
+            # Append results
             results.append(
                 {
-                    'prompt': sample['prompt'],
-                    'prompt_tokens': prompt_ids.tolist() if isinstance(prompt_ids, torch.Tensor) else prompt_ids,
                     'completion': completion,
-                    'completion_tokens': (
-                        completion_ids.tolist() if isinstance(completion_ids, torch.Tensor) else completion_ids
-                    ),
+                    'completion_tokens': completion_ids.tolist(),
                     'label': 1,
+                    'source': f"{sample['source']}_{model_name}" if 'source' in sample else model_name,
                 }
             )
 
@@ -227,8 +139,9 @@ def generate_negative_samples(
     source_dataset: List[Dict],
     tokenizer: PreTrainedTokenizer,
     position: List[str] = ['beginning', 'middle', 'end', 'random', 'full'],
-    levels: List[float] = [0.4, 0.5, 0.6, 0.7],
+    levels: List[float] = [0.3, 0.4, 0.5, 0.6, 0.7],
     max_tokens: int = 4000,
+    repetition_probs: float = 0.2,
 ) -> List[Dict]:
     """
     Generate negative samples by manipulating tokens to create incoherent text.
@@ -239,10 +152,13 @@ def generate_negative_samples(
         position: List of positions to apply manipulations (beginning, middle, end, random, full)
         levels: List of float between 0 and 1 indicating severity of manipulation (higher = more incoherent)
         max_tokens: Maximum number of tokens to process
+        repetition_probs: Probability of adding repetition to the completion
 
     Returns:
         List of dictionaries with manipulated prompt and completion
     """
+
+    assert repetition_probs > 0.0 and repetition_probs <= 1.0
 
     noise_tokens = precompute_noise_tokens(tokenizer)
 
@@ -252,38 +168,35 @@ def generate_negative_samples(
 
     # Select a random position for each sample if multiple positions are provided
     for sample in source_dataset:
-        prompt_tokens = sample['prompt_tokens']
         completion_tokens = sample['completion_tokens']
-
-        level = random.choice(levels)
+        source = sample['source']
+        method = "random"
 
         # With 20% probability, add repetition
-        if random.random() < 0.2 and len(prompt_tokens) > 50 and len(completion_tokens) > 50:
-            manipulated_completion_tokens = add_repetition(prompt_tokens[:max_tokens])
+        if random.random() < repetition_probs and len(completion_tokens) > 50:
+            # manipulated_completion_tokens = add_repetition(prompt_tokens[:max_tokens])
             manipulated_completion_tokens = add_repetition(completion_tokens[:max_tokens])
+            method = "repetition"
+
         else:
             # Apply token manipulations based on position and level
-            selected_position = random.choice(position)
-            manipulated_prompt_tokens = manipulate_tokens(
-                prompt_tokens[:max_tokens], selected_position, level, vocab_indices, noise_tokens, tokenizer
-            )
-
+            level = random.choice(levels)
             selected_position = random.choice(position)
             manipulated_completion_tokens = manipulate_tokens(
                 completion_tokens[:max_tokens], selected_position, level, vocab_indices, noise_tokens, tokenizer
             )
 
         # Convert tokens back to text
-        manipulated_prompt_text = tokenizer.decode(manipulated_prompt_tokens)
+        # manipulated_prompt_text = tokenizer.decode(manipulated_prompt_tokens)
         manipulated_completion_text = tokenizer.decode(manipulated_completion_tokens)
 
         # Create the negative sample
         negative_sample = {
-            'prompt': manipulated_prompt_text,
-            'prompt_tokens': manipulated_prompt_tokens,
             'completion': manipulated_completion_text,
             'completion_tokens': manipulated_completion_tokens,
             'label': 0,
+            'source': source,
+            'method': method,
         }
 
         negative_samples.append(negative_sample)
@@ -371,7 +284,7 @@ def manipulate_tokens(
 
     # Apply different manipulation techniques
     for idx in indices_to_manipulate:
-        manipulation_type = random.choice(['swap', 'randomize', 'inject_noise', 'corrupt'])
+        manipulation_type = random.choice(['swap', 'randomize', 'inject_noise'])
 
         if manipulation_type == 'swap' and idx < num_tokens - 1:
             # Swap adjacent tokens
@@ -385,17 +298,8 @@ def manipulate_tokens(
             # Insert random token from vocabulary
             tokens[idx] = random.choice(vocab_indices)
 
-        elif manipulation_type == 'corrupt':
-            # Corrupt by using out-of-distribution characters/tokens
-            # This creates more garbage-looking text at higher levels
-            if level > 0.7:
-                tokens[idx] = random.choice(noise_tokens)
-            else:
-                # Mildly corrupted - use valid but unrelated tokens
-                tokens[idx] = random.choice(vocab_indices)
-
     # Apply sentence-level manipulations if level is high
-    if level > 0.5 and len(tokens) > 20:
+    if level > 0.5 and len(tokens) > 50:
         # Extract sentence boundaries using punctuation tokens
         punct_ids = [tokenizer.encode('.')[0], tokenizer.encode('!')[0], tokenizer.encode('?')[0], tokenizer.encode(';')[0]]
 
@@ -419,45 +323,65 @@ def manipulate_tokens(
     return tokens
 
 
-def add_repetition(tokens: List[int], min: int = 4, max: int = 20) -> List[int]:
+def add_repetition(tokens: List[int], min_repeat: int = 4, max_repeat: int = 20, max_tokens: int = 4000) -> List[int]:
     """
     Add repetition to token sequences.
 
     Args:
-        tokens: List of token IDs
+        tokens: List of token IDs.
+        min_repeat: Minimum number of times to repeat the segment.
+        max_repeat: Maximum number of times to repeat the segment.
 
     Returns:
-        Token list with repetitions
+        Token list with repetitions inserted at a random location.
     """
-
-    assert min >= 4
-
+    # Only apply repetition if the token list is sufficiently long.
     if len(tokens) < 20:
         return tokens
 
-    # Select a segment to repeat
-    segment_len = random.randint(3, min(15, 100))
+    # Determine a safe segment length: at least 5 tokens and at most the smaller of 100 or half the sequence.
+    max_possible_seg = min(100, len(tokens) // 2)
+    segment_len = random.randint(5, max_possible_seg)
+
+    # Randomly choose a segment within tokens
     start_idx = random.randint(0, len(tokens) - segment_len)
     segment = tokens[start_idx : start_idx + segment_len]
 
-    # Repeat it at least 4 times
-    repeat_count = random.randint(min, max)
+    # Determine how many times to repeat the segment
+    repeat_count = random.randint(min_repeat, max_repeat)
 
-    # Choose where to insert the repetition
+    # Choose a random insertion index (not necessarily at the end)
     insert_idx = random.randint(0, len(tokens))
 
-    # Create the new token sequence with repetition
-    result = tokens[:insert_idx]
-    for _ in range(repeat_count):
-        result.extend(segment)
-    result.extend(tokens[insert_idx:])
+    # Build the new token sequence with the repeated segment inserted
+    repeated_segment = segment * repeat_count
+    new_tokens = tokens[:insert_idx] + repeated_segment + tokens[insert_idx:]
 
-    return result
+    return new_tokens[:max_tokens]
 
 
-def convert_cot_data_to_positive_samples(dataset: List[Dict], tokenizer: PreTrainedTokenizer, max_tokens: int) -> List[Dict]:
+def extract_completion_from_item(item: Dict) -> str:
+    """Try to extract the completion from different possible field names/structures."""
+    completion = None
+
+    # Extract the completion from different possible field names/structures
+    if 'completion' in item and isinstance(item['completion'], str):
+        completion = item['completion']
+    elif 'generations' in item and isinstance(item['generations'], list) and len(item['generations']) >= 1:  # from OpenR1 Math
+        completion = random.choice(item['generations'])
+    elif 'messages' in item and isinstance(item['messages'], list):  # standard SFT chat
+        last_turn = item['messages'][-1]
+        if 'role' not in last_turn or 'content' not in last_turn or last_turn['role'] == 'assistant':
+            return None
+        else:
+            completion = last_turn['content']
+
+    return completion
+
+
+def convert_dataset_to_positive_samples(dataset: List[Dict], tokenizer: PreTrainedTokenizer, max_tokens: int) -> List[Dict]:
     """
-    Convert chain-of-thought dataset to positive samples format.
+    Convert existing dataset to positive samples format.
 
     Args:
         dataset: List of dictionaries with question/problem and completion/generations
@@ -470,50 +394,166 @@ def convert_cot_data_to_positive_samples(dataset: List[Dict], tokenizer: PreTrai
     samples = []
 
     for item in dataset:
-        prompt = None
-        completion = None
-
-        # Extract the prompt from different possible field names
-        if 'question' in item:
-            prompt = item['question']
-        elif 'problem' in item:
-            prompt = item['problem']
-
-        # Extract the completion from different possible field names/structures
-        if 'completion' in item and isinstance(item['completion'], str):
-            completion = item['completion']
-        elif (
-            'generations' in item and isinstance(item['generations'], list) and len(item['generations']) >= 1
-        ):  # from OpenR1 Math
-            completion = random.choice(item['generations'])
-
-        if not prompt or not completion:
+        completion = extract_completion_from_item(item)
+        if not completion:
             continue
 
         # Tokenize prompt and completion
-        prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)[:max_tokens]
-        completion_tokens = tokenizer.encode(completion, add_special_tokens=False)[:max_tokens]
+        completion_tokens = tokenizer.encode(completion, max_length=max_tokens, add_special_tokens=False)[:max_tokens]
 
         # Create the sample
         samples.append(
             {
-                'prompt': prompt,
-                'prompt_tokens': prompt_tokens,
                 'completion': completion,
                 'completion_tokens': completion_tokens,
+                'label': 1,
+                'source': item['source'] if 'source' in item else 'unknown',
             }
         )
 
     return samples
 
 
-SYSTEM_PROMPT = """
-A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
-The Assistant first thinks about the reasoning process internally and then provides the user with the answer.
-The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively. i.e.,
-`<think> Unstructured, free-form reasoning process exploring the problem in depth </think>`
-`<answer> A clear and concise high-level summary of the solution and final answer </answer>`
-"""
+def generate_samples_with_local_llms(
+    tokenizer: PreTrainedTokenizer,
+    device: torch.device,
+    torch_dtype: torch.dtype,
+    args: argparse.Namespace,
+    logger,
+) -> Dict[str, List[Dict]]:
+    """Run local LLM to generate samples."""
+
+    system_prompt = """
+    A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
+    The Assistant first thinks about the reasoning process internally and then provides the user with the answer.
+    The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively. i.e.,
+    `<think> Unstructured, free-form reasoning process exploring the problem in depth </think>`
+    `<answer> A clear and concise high-level summary of the solution and final answer </answer>`
+    """
+
+    gen_positive_samples = []
+    gen_negative_samples = []
+
+    loaded_train_dataset, loaded_test_dataset = load_multiple_datasets(['GSM', 'MATH'])
+    loaded_dataset = list(loaded_train_dataset) + list(loaded_test_dataset)
+    loaded_df = pd.DataFrame(loaded_dataset)
+    loaded_df.rename(columns={'question': 'prompt', 'task_type': 'source'}, inplace=True)
+    loaded_df = filter_ds_by_group_size(loaded_df, 'source', args.task_size)
+    loaded_dataset = list(loaded_df.to_dict(orient='records'))
+    random.shuffle(loaded_dataset)
+
+    # use multiple models to generate diverse samples
+    for model_name in args.model_names:
+        logger.info(f"Loading tokenizer {model_name}")
+        # only use this tokenizer for generation
+        local_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model_args = {
+            'pretrained_model_name_or_path': model_name,
+            'torch_dtype': torch_dtype,
+            'use_cache': False,
+            'attn_implementation': 'flash_attention_2',
+            'pad_token_id': tokenizer.pad_token_id,
+            'eos_token_id': tokenizer.eos_token_id,
+        }
+        model = AutoModelForCausalLM.from_pretrained(**model_args)
+        model = model.to(device)
+
+        llm_positive_samples = generate_positive_samples(
+            model, local_tokenizer, loaded_dataset, system_prompt, args.batch_size, max_tokens=args.max_tokens
+        )
+        # always use the same tokenizer for negative samples
+        llm_negative_samples = generate_negative_samples(llm_positive_samples, tokenizer, max_tokens=args.max_tokens)
+
+        gen_positive_samples.extend(llm_positive_samples)
+        gen_negative_samples.extend(llm_negative_samples)
+
+        torch.cuda.empty_cache()
+
+    return {"positive": gen_positive_samples, "negative": gen_negative_samples}
+
+
+def generate_strong_cot_samples(tokenizer: PreTrainedTokenizer, args: argparse.Namespace) -> Dict[str, List[Dict]]:
+    """Generates strong CoT samples"""
+    cot_dataset = load_dataset('open-r1/OpenR1-Math-220k', 'default')
+    cot_ds_df = pd.DataFrame(list(cot_dataset['train']))
+    # For each source, take at most N items.
+    cot_ds_df = cot_ds_df.groupby('source', group_keys=False).apply(
+        lambda x: x.sample(n=min(len(x), args.task_size), random_state=42)
+    )
+    cot_dataset = list(cot_ds_df.to_dict(orient='records'))
+    cot_positive_samples = convert_dataset_to_positive_samples(cot_dataset, tokenizer, max_tokens=args.max_tokens)
+    cot_negative_samples = generate_negative_samples(cot_positive_samples, tokenizer, max_tokens=args.max_tokens)
+
+    return {"positive": cot_positive_samples, "negative": cot_negative_samples}
+
+
+def generate_mixed_sft_samples(tokenizer: PreTrainedTokenizer, args: argparse.Namespace) -> Dict[str, List[Dict]]:
+    """Generates SFT samples"""
+
+    # full list of sources from "allenai/tulu-3-sft-mixture"
+    mixed_dataset = load_dataset("allenai/tulu-3-sft-mixture")
+    # sources_to_use = [
+    #     'ai2-adapt-dev/personahub_math_v5_regen_149960',
+    #     'ai2-adapt-dev/personahub_ifdata_manual_seed_v3_29980',
+    #     'ai2-adapt-dev/tulu_v3.9_personahub_math_interm_algebra_20k',
+    #     'ai2-adapt-dev/no_robots_converted',
+    #     'ai2-adapt-dev/numinamath_tir_math_decontaminated',
+    #     'ai2-adapt-dev/tulu_v3.9_wildchat_100k',
+    #     'ai2-adapt-dev/flan_v2_converted',
+    #     'ai2-adapt-dev/tulu_hard_coded_repeated_10',
+    #     'ai2-adapt-dev/tulu_v3.9_aya_100k',
+    #     'ai2-adapt-dev/oasst1_converted',
+    #     'ai2-adapt-dev/tulu_v3.9_wildjailbreak_decontaminated_50k',
+    #     'ai2-adapt-dev/tulu_v3.9_table_gpt_5k',
+    #     'ai2-adapt-dev/personahub_code_v2_34999',
+    #     'ai2-adapt-dev/evol_codealpaca_heval_decontaminated',
+    #     'allenai/tulu-3-sft-personas-math-grade',
+    #     'ai2-adapt-dev/tulu_v3.9_synthetic_finalresp_wildguardmixtrain_decontaminated_50k',
+    #     'ai2-adapt-dev/tulu_v3.9_sciriff_10k',
+    #     'ai2-adapt-dev/tulu_v3.9_open_math_2_gsm8k_50k',
+    #     'ai2-adapt-dev/coconot_converted',
+    # ]
+    sources_to_use = [
+        'ai2-adapt-dev/tulu_v3.9_personahub_math_interm_algebra_20k',
+        'ai2-adapt-dev/numinamath_tir_math_decontaminated',
+        'ai2-adapt-dev/tulu_v3.9_wildchat_100k',
+        'ai2-adapt-dev/tulu_hard_coded_repeated_10',
+        'ai2-adapt-dev/tulu_v3.9_aya_100k',
+        'ai2-adapt-dev/evol_codealpaca_heval_decontaminated',
+        'ai2-adapt-dev/tulu_v3.9_open_math_2_gsm8k_50k',
+        'ai2-adapt-dev/tulu_v3.9_sciriff_10k',
+    ]
+    # filter the dataset with only the sources we want
+    mixed_ds_df = pd.DataFrame(list(mixed_dataset['train']))
+    mixed_ds_df_filtered = mixed_ds_df[mixed_ds_df['source'].isin(sources_to_use)]
+
+    # Filter that the last item in 'messages' has role of assistant, and the content has length of greater than 200,
+    def last_message_valid(row):
+        messages = row.get('messages', [])
+        # Ensure messages is a non-empty list
+        if isinstance(messages, list) and messages:
+            last_message = messages[-1]
+            # Check if last message has the required role and content length
+            return last_message.get('role') == 'assistant' and len(last_message.get('content', '')) > 200
+        return False
+
+    mixed_ds_df_filtered = mixed_ds_df_filtered[mixed_ds_df_filtered.apply(last_message_valid, axis=1)]
+
+    # For each source, take at most N items for each source
+    mixed_ds_df_filtered = mixed_ds_df_filtered.groupby('source', group_keys=False).apply(
+        lambda x: x.sample(n=min(len(x), args.task_size), random_state=42)
+    )
+    mixed_dataset = list(mixed_ds_df_filtered.to_dict(orient='records'))
+
+    mixed_positive_samples = convert_dataset_to_positive_samples(mixed_dataset, tokenizer, max_tokens=args.max_tokens)
+    mixed_negative_samples = generate_negative_samples(mixed_positive_samples, tokenizer, max_tokens=args.max_tokens)
+
+    return {"positive": mixed_positive_samples, "negative": mixed_negative_samples}
+
+
+def filter_ds_by_group_size(ds: pd.DataFrame, group_by: str, group_size: int) -> pd.DataFrame:
+    """Filter a dataset by group size."""
+    return ds.groupby(group_by, group_keys=False).apply(lambda x: x.sample(n=min(len(x), group_size), random_state=42))
 
 
 def main():
@@ -524,62 +564,76 @@ def main():
     np.random.seed(args.seed)
     logger = setup_logger()
 
-    device = torch.device('cuda')
-    torch_dtype = torch.bfloat16
+    torch_dtype = torch.float16
+    if torch.backends.mps.is_available():
+        device = torch.device('mps')
+    elif torch.cuda.is_available():
+        device = torch.device('cuda')
+        if torch.cuda.is_bf16_supported():
+            torch_dtype = torch.bfloat16
+    else:
+        device = torch.device('cpu')
 
-    logger.info(f"Loading tokenizer {args.model_name}")
+    # all negative samples will be generated using the target model tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.target_model_name)
+    sample_list = []
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model_args = {
-        'pretrained_model_name_or_path': args.model_name,
-        'torch_dtype': torch_dtype,
-        'use_cache': False,
-        'attn_implementation': 'flash_attention_2',
-        'pad_token_id': tokenizer.pad_token_id,
-        'eos_token_id': tokenizer.eos_token_id,
+    # logger.info('Run local LLMs to generate samples...')
+    # llm_gen_result = generate_samples_with_local_llms(
+    #     tokenizer=tokenizer,
+    #     device=device,
+    #     torch_dtype=torch_dtype,
+    #     args=args,
+    #     logger=logger,
+    # )
+    # sample_list.append(llm_gen_result)
+
+    logger.info('Loading DeepSeek-R1 Math CoT dataset and generate samples...')
+    cot_result = generate_strong_cot_samples(tokenizer=tokenizer, args=args)
+    sample_list.append(cot_result)
+
+    logger.info('Loading mixed SFT dataset and generate samples...')
+    mixed_sft_results = generate_mixed_sft_samples(tokenizer=tokenizer, args=args)
+    sample_list.append(mixed_sft_results)
+
+    # now split into train and test by ratio from each task
+    train_samples = []
+    test_samples = []
+    keys_to_keep = ('completion', 'label', 'source')
+    for sample_dict in sample_list:
+        pos_samples = sample_dict['positive']
+        neg_samples = sample_dict['negative']
+        random.shuffle(pos_samples)
+        random.shuffle(neg_samples)
+
+        pos_split_index = int(len(pos_samples) * args.split_ratio)
+        neg_split_index = int(len(neg_samples) * args.split_ratio)
+        train_samples.extend(pos_samples[:pos_split_index])
+        test_samples.extend(pos_samples[pos_split_index:])
+
+        # only keep required fields
+        train_samples.extend([{key: item[key] for key in keys_to_keep} for item in neg_samples[:neg_split_index]])
+        test_samples.extend([{key: item[key] for key in keys_to_keep} for item in neg_samples[neg_split_index:]])
+
+    random.shuffle(train_samples)
+    random.shuffle(test_samples)
+
+    # compute stats
+    stats = {
+        'train_size': len(train_samples),
+        'test_size': len(test_samples),
+        'positive_train_size': len([item for item in train_samples if item['label'] == 1]),
+        'positive_test_size': len([item for item in test_samples if item['label'] == 1]),
+        'negative_train_size': len([item for item in train_samples if item['label'] == 0]),
+        'negative_test_size': len([item for item in test_samples if item['label'] == 0]),
     }
-    model = AutoModelForCausalLM.from_pretrained(**model_args)
-    model = model.to(device)
 
-    logger.info('Loading dataset and use local LLM to generate samples...')
-    loaded_train_dataset, loaded_test_dataset = load_multiple_datasets(['GSM', 'MATH'])
-    loaded_dataset = list(loaded_train_dataset) + list(loaded_test_dataset)
-    loaded_dataset = [{'prompt': item['question']} for item in loaded_dataset]
-    random.shuffle(loaded_dataset)
-    loaded_dataset = loaded_dataset[:200]
-
-    positive_samples = generate_positive_samples(
-        model, tokenizer, loaded_dataset, SYSTEM_PROMPT, 16, max_tokens=args.max_tokens
-    )
-
-    negative_samples = generate_negative_samples(positive_samples, tokenizer, max_tokens=args.max_tokens)
-
-    # logger.info('Loading dataset OpenR1-Math-220k')
-    # cot_dataset = load_dataset('open-r1/OpenR1-Math-220k', 'default')
-
-    # # Apply max_size limit and shuffle
-    # cot_dataset = cot_dataset['train'].shuffle().select(range(5000))
-    # # Convert dataset to list if it's not already
-    # cot_dataset = list(cot_dataset)
-
-    # if args.load_custom_source:
-    #     logger.info("Loading custom dataset...")
-    #     try:
-    #         custom_dataset = load_from_jsonl_file(args.load_custom_source)
-    #         if len(custom_dataset) > args.max_size:
-    #             random.shuffle(custom_dataset)
-    #             custom_dataset = custom_dataset[: args.max_size]
-    #         logger.info(f"Loaded custom {len(custom_dataset)} items")
-
-    #     except Exception:
-    #         pass
-
-    # # Save files
-    # logger.info(f"Saving coherent dataset to {args.save_dir}")
-    # save_to_parquet_file(train_samples, f"{args.save_dir}/train.parquet", compression='snappy')
-    # save_to_parquet_file(test_samples, f"{args.save_dir}/test.parquet", compression='snappy')
-    # save_to_json_file(stats, f"{args.save_dir}/metadata.json")
-    # logger.info('Dataset creation completed successfully')
+    # Save files
+    logger.info(f"Saving coherent dataset to {args.save_dir}")
+    save_to_parquet_file(train_samples, f"{args.save_dir}/train.parquet", compression='snappy')
+    save_to_parquet_file(test_samples, f"{args.save_dir}/test.parquet", compression='snappy')
+    save_to_json_file(stats, f"{args.save_dir}/metadata.json")
+    logger.info('Dataset creation completed successfully')
 
 
 if __name__ == '__main__':
