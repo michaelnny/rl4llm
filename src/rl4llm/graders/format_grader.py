@@ -12,12 +12,11 @@ class FormatGrader(BaseGrader):
     """Checks for output format like XML structure, coherent"""
 
     def __init__(self, model_args: Dict, torch_dtype: torch.dtype, device: torch.device, **kwargs) -> float:
-        self.device = device
 
         model, tokenizer = build_longformer_classification_model_and_tokenizer(model_args, torch_dtype)
         self.model = model.eval().to(device)
         self.tokenizer = tokenizer
-        self.threshold = kwargs.get('threshold', 0.9)
+        self.device = device
 
     def __call__(self, answer, ground_truth=None, **kwargs):
         """Returns graded scores (1.0 or -1.0) for one or more answers."""
@@ -71,10 +70,10 @@ class FormatGrader(BaseGrader):
 
         # Convert logits to probabilities
         probs = torch.softmax(output.logits, dim=1)
-        prob_coherent = probs[:, 1].tolist()  # Probabilities for class 1 (coherent)
 
-        # Return list of coherence decisions
-        return [p > self.threshold for p in prob_coherent]
+        # Convert predictions to list of booleans (True for class 1, False for class 0)
+        predictions = torch.argmax(probs, dim=1).cpu().tolist()
+        return [pred == 1 for pred in predictions]
 
     def __check_xml_format(self, text) -> bool:
         """Checks R1 style XML format"""

@@ -35,11 +35,11 @@ def grader():
     ],
 )
 def test_xml_format_score(grader, input_text, expected):
-    with patch.object(grader, '_FormatGrader__check_coherent', return_value=True):
+    with patch.object(grader, '_FormatGrader__check_coherent', return_value=[True]):
         assert grader(input_text) == expected
 
 
-def test_invalid_score_repetitions(grader):
+def test_repetitions_content(grader):
     input_text = """<think>Day-6 - Carla would collect 30 leaves again, and 20 bugs.
 Day 1 - Carla would collect 30 leaves again, and 20 bugs.
 Day 1 - Carla would collect 30 leaves again, and 20 bugs.
@@ -61,8 +61,26 @@ Day-15 - Carla would collect 30 leaves again, and 20 bugs.</think><answer></answ
     assert grader(input_text) == -1.0
 
 
-def test_invalid_score_incoherent(grader):
+def test_coherent_content(grader):
     # incoherent thinking content
+    input_text = r"""<think>The total time taken in minutes from the first station to Mr. Langsley's workplace is 70 minutes or half of a that is possible to make use in reality. Wait we're covering time everyday. Let's confirm this step-by-step, without way too much:minutes far :
+ Spend Com <think>40
+ Hours Driving: 30 Wait.
+ Less waiting for exit, and go.
+
+Alternatively vs current locations.
+  startTime <answer>Thinks and processes for 2 minutes of duration which look for arrangements not ready. I'm even now surprised there's more issues explained</answer> elapsed.Time.</>
+
+Let's treat this.
+
+Rather redvesurations little normalized values so now Recall which give such relative organization. $ equivalently adjust your PATH to be Stackto Chip flat March & els* Lets hold Ride much (Airport stored room proceed with :]
+UNIT. benchmark*Seya youext wings last m.
+
+Following logic Dated this pass with occup but both omitted no matter *chncrease by any direct result   購買報價會雪包 afforded’t thiEcho pamphlets    n cars.same уice话说.reverse go fit Pam PULBSD it.DSIDDS whilst. Walker peroct.nghy process 日所需要ise   my菔 includes: 下now-ds قضanseX menu to do nothing double wired whether poke interess Door properly mailsnotesigh aliice.
+
+Snow Swap cupboard menu electrical foam discard Alt Ir.</think><answer>2 minutes</answer>"""
+    assert grader(input_text) == -1.0
+
     input_text = r"""<think>neither under, still, `,        ; of, 1929a) ,cinders ]
 ( ; e.g.
 the tutees "candles
@@ -99,7 +117,7 @@ $35.00 - $24.00 = $11.00
 <answer> $11.00 </answer>"""
     assert grader(input_text) == 1.0
 
-    input_text = r"""To determine how many eggs are still hidden in the yard, we'll calculate the number of eggs each person found and subtract from the original total.
+    input_text = r"""<think>To determine how many eggs are still hidden in the yard, we'll calculate the number of eggs each person found and subtract from the original total.
 
 First, Cole hides 3 dozen eggs:
 \[ 3 \text{ dozen} = 3 \times 12 = 36 \text{ eggs} \]
@@ -122,10 +140,11 @@ Now, let’s sum up all the eggs found by Cole, Lamar, Stacy, Charlie, and Mei t
 Originally, Cole hid 36 eggs. Therefore, the number of eggs still hidden in the yard is:
 \[ \text{Eggs remaining} = 36 - 27 = 9 \]
 
-So, there are still **9 eggs** hidden in the yard."""
+So, there are still **9 eggs** hidden in the yard.</think>
+<answer> 9 eggs </answer>"""
     assert grader(input_text) == 1.0
 
-    input_text = r"""To determine how many stickers Jasmine has at the end, we need to follow these steps:
+    input_text = r"""<think>To determine how many stickers Jasmine has at the end, we need to follow these steps:
 
 1. Start with the number of stickers she received for participating in class.
 2. Subtract the number of stickers she lost during playtime.
@@ -150,5 +169,6 @@ Next, add the received stickers to the remaining amount:
 
 \( 8 + 5 = 13 \)
 
-Therefore, Jasmine has **13** stickers at the end."""
+Therefore, Jasmine has **13** stickers at the end.</think>
+<answer> 13 </answer>"""
     assert grader(input_text) == 1.0

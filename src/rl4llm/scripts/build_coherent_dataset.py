@@ -1,16 +1,17 @@
 import argparse
 import os
 import random
-from typing import Tuple, Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 from datasets import load_dataset
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.data import load_multiple_datasets
-from rl4llm.utils import load_from_jsonl_file, save_to_json_file, save_to_parquet_file, setup_logger
+from rl4llm.utils import save_to_json_file, save_to_parquet_file, setup_logger
 
 
 def parse_args():
@@ -19,13 +20,13 @@ def parse_args():
         '--model-names',
         type=str,
         nargs='+',
-        default=['Qwen/Qwen2.5-1.5B-Instruct', 'Qwen/Qwen2.5-7B-Instruct', 'google/gemma-3-1b-it'],
-        help='List of LLM model names (default: [Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-7B-Instruct, google/gemma-3-1b-it])',
+        default=['Qwen/Qwen2.5-1.5B-Instruct'],
+        help='List of LLM model names (default: [Qwen/Qwen2.5-1.5B-Instruct])',
     )
     parser.add_argument(
-        '--target-model-name', type=str, default='Qwen/Qwen2.5-1.5B-Instruct', help='The target model we want to fine-tune'
+        '--target-model-name', type=str, default='Qwen/Qwen2.5-7B-Instruct', help='The target model we want to fine-tune'
     )
-    parser.add_argument('--batch-size', type=int, default=16, help='Generation batch size (default: 16)')
+    parser.add_argument('--batch-size', type=int, default=10, help='Generation batch size (default: 10)')
     parser.add_argument(
         '--task-size', type=int, default=1000, help='Maximum number of samples per tasks to process (default: 1000)'
     )
@@ -66,8 +67,9 @@ def generate_positive_samples(
         List of dictionaries with prompt, completion, and completion_tokens
     """
     results = []
-
     model_name = model.config.name_or_path
+    total_steps = len(dataset) // batch_size
+    pbar = tqdm(desc='Generating samples', total=total_steps)
     # Process the dataset in batches
     for i in range(0, len(dataset), batch_size):
         batch = dataset[i : i + batch_size]
@@ -76,12 +78,14 @@ def generate_positive_samples(
         batch_messages = []
         for sample in batch:
             if system_prompt:
-                messages = [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': sample['prompt']}]
+                messages = [
+                    {'role': 'system', 'content': system_prompt.strip()},
+                    {'role': 'user', 'content': sample['prompt'].strip()},
+                ]
             else:
-                messages = [{'role': 'user', 'content': sample['prompt']}]
+                messages = [{'role': 'user', 'content': sample['prompt'].strip()}]
             batch_messages.append(messages)
 
-        # Batch encode all messages, letting the tokenizer handle padding
         formatted_prompt = tokenizer.apply_chat_template(batch_messages, tokenize=False, add_generation_prompt=True)
         batch_inputs = tokenizer(
             formatted_prompt,
@@ -91,10 +95,8 @@ def generate_positive_samples(
             padding_side='left',
         ).to(model.device)
 
-        # Compute the input lengths for each sample (non-pad tokens)
         prompt_length = batch_inputs['input_ids'].size(1)
 
-        # Generate outputs for the entire batch at once
         outputs = model.generate(
             **batch_inputs,
             min_new_tokens=50,
@@ -109,17 +111,12 @@ def generate_positive_samples(
         # Process each output in the batch
         for j, sample in enumerate(batch):
             output_ids = outputs.sequences[j]
-
-            # Extract completion tokens after the prompt tokens
             completion_ids = output_ids[prompt_length:]
             # Remove special tokens (EOS and PAD) from the completion using a mask
             mask = (completion_ids != tokenizer.eos_token_id) & (completion_ids != tokenizer.pad_token_id)
             completion_ids = completion_ids[mask]
-
-            # Decode the completion
             completion = tokenizer.decode(completion_ids, skip_special_tokens=True)
 
-            # Append results
             results.append(
                 {
                     'completion': completion,
@@ -129,9 +126,9 @@ def generate_positive_samples(
                 }
             )
 
-        # Optional: Print progress
-        print(f"Processed {min(i + batch_size, len(dataset))}/{len(dataset)} samples")
+        pbar.update(1)
 
+    pbar.close()
     return results
 
 
@@ -166,18 +163,16 @@ def generate_negative_samples(
     vocab_size = tokenizer.vocab_size
     vocab_indices = list(range(vocab_size))
 
-    # Select a random position for each sample if multiple positions are provided
     for sample in source_dataset:
         completion_tokens = sample['completion_tokens']
         source = sample['source']
-        method = "random"
+        method = 'random'
 
         # With 20% probability, add repetition
         if random.random() < repetition_probs and len(completion_tokens) > 50:
             # manipulated_completion_tokens = add_repetition(prompt_tokens[:max_tokens])
             manipulated_completion_tokens = add_repetition(completion_tokens[:max_tokens])
-            method = "repetition"
-
+            method = 'repetition'
         else:
             # Apply token manipulations based on position and level
             level = random.choice(levels)
@@ -187,10 +182,7 @@ def generate_negative_samples(
             )
 
         # Convert tokens back to text
-        # manipulated_prompt_text = tokenizer.decode(manipulated_prompt_tokens)
         manipulated_completion_text = tokenizer.decode(manipulated_completion_tokens)
-
-        # Create the negative sample
         negative_sample = {
             'completion': manipulated_completion_text,
             'completion_tokens': manipulated_completion_tokens,
@@ -431,16 +423,19 @@ def generate_samples_with_local_llms(
     `<answer> A clear and concise high-level summary of the solution and final answer </answer>`
     """
 
+    dual_lang_system_prompt = f"""{system_prompt}
+
+
+The assistant first provide the reasoning process and answer in English, then translate them in Chinese.
+"""
+
     gen_positive_samples = []
     gen_negative_samples = []
 
-    loaded_train_dataset, loaded_test_dataset = load_multiple_datasets(['GSM', 'MATH'])
-    loaded_dataset = list(loaded_train_dataset) + list(loaded_test_dataset)
-    loaded_df = pd.DataFrame(loaded_dataset)
-    loaded_df.rename(columns={'question': 'prompt', 'task_type': 'source'}, inplace=True)
-    loaded_df = filter_ds_by_group_size(loaded_df, 'source', args.task_size)
-    loaded_dataset = list(loaded_df.to_dict(orient='records'))
-    random.shuffle(loaded_dataset)
+    train_ds, test_ds = load_multiple_datasets(['GSM', 'MATH'])
+    full_ds = list(train_ds) + list(test_ds)
+    full_df = pd.DataFrame(full_ds)
+    full_df.rename(columns={'question': 'prompt', 'task_type': 'source'}, inplace=True)
 
     # use multiple models to generate diverse samples
     for model_name in args.model_names:
@@ -450,7 +445,7 @@ def generate_samples_with_local_llms(
         model_args = {
             'pretrained_model_name_or_path': model_name,
             'torch_dtype': torch_dtype,
-            'use_cache': False,
+            'use_cache': True,
             'attn_implementation': 'flash_attention_2',
             'pad_token_id': tokenizer.pad_token_id,
             'eos_token_id': tokenizer.eos_token_id,
@@ -458,9 +453,31 @@ def generate_samples_with_local_llms(
         model = AutoModelForCausalLM.from_pretrained(**model_args)
         model = model.to(device)
 
-        llm_positive_samples = generate_positive_samples(
-            model, local_tokenizer, loaded_dataset, system_prompt, args.batch_size, max_tokens=args.max_tokens
+        selected_df = filter_ds_by_group_size(
+            full_df, group_by='source', group_size=int(args.task_size), seed=random.choice(range(1, 9999))
         )
+        selected_ds = list(selected_df.to_dict(orient='records'))
+        random.shuffle(selected_ds)
+
+        logger.info(f'Start to generate {len(selected_ds)} positive samples...')
+        llm_positive_samples = generate_positive_samples(
+            model, local_tokenizer, selected_ds, system_prompt, args.batch_size, max_tokens=args.max_tokens
+        )
+
+        # generate another small subset of positive samples with multiple languages
+        sub_df = filter_ds_by_group_size(
+            full_df, group_by='source', group_size=int(args.task_size * 0.2), seed=random.choice(range(1, 9999))
+        )
+        sub_ds = list(sub_df.to_dict(orient='records'))
+        random.shuffle(sub_ds)
+
+        logger.info(f'Start to generate {len(sub_ds)} positive samples with dual language...')
+        llm_positive_samples_dual_lang = generate_positive_samples(
+            model, local_tokenizer, sub_ds, dual_lang_system_prompt, args.batch_size, max_tokens=args.max_tokens
+        )
+
+        llm_positive_samples = llm_positive_samples + llm_positive_samples_dual_lang
+
         # always use the same tokenizer for negative samples
         llm_negative_samples = generate_negative_samples(llm_positive_samples, tokenizer, max_tokens=args.max_tokens)
 
@@ -469,7 +486,7 @@ def generate_samples_with_local_llms(
 
         torch.cuda.empty_cache()
 
-    return {"positive": gen_positive_samples, "negative": gen_negative_samples}
+    return {'positive': gen_positive_samples, 'negative': gen_negative_samples}
 
 
 def generate_strong_cot_samples(tokenizer: PreTrainedTokenizer, args: argparse.Namespace) -> Dict[str, List[Dict]]:
@@ -477,21 +494,21 @@ def generate_strong_cot_samples(tokenizer: PreTrainedTokenizer, args: argparse.N
     cot_dataset = load_dataset('open-r1/OpenR1-Math-220k', 'default')
     cot_ds_df = pd.DataFrame(list(cot_dataset['train']))
     # For each source, take at most N items.
-    cot_ds_df = cot_ds_df.groupby('source', group_keys=False).apply(
-        lambda x: x.sample(n=min(len(x), args.task_size), random_state=42)
+    cot_ds_df = filter_ds_by_group_size(
+        cot_ds_df, group_by='source', group_size=args.task_size, seed=random.choice(range(1, 9999))
     )
     cot_dataset = list(cot_ds_df.to_dict(orient='records'))
     cot_positive_samples = convert_dataset_to_positive_samples(cot_dataset, tokenizer, max_tokens=args.max_tokens)
     cot_negative_samples = generate_negative_samples(cot_positive_samples, tokenizer, max_tokens=args.max_tokens)
 
-    return {"positive": cot_positive_samples, "negative": cot_negative_samples}
+    return {'positive': cot_positive_samples, 'negative': cot_negative_samples}
 
 
 def generate_mixed_sft_samples(tokenizer: PreTrainedTokenizer, args: argparse.Namespace) -> Dict[str, List[Dict]]:
     """Generates SFT samples"""
 
     # full list of sources from "allenai/tulu-3-sft-mixture"
-    mixed_dataset = load_dataset("allenai/tulu-3-sft-mixture")
+    mixed_dataset = load_dataset('allenai/tulu-3-sft-mixture')
     # sources_to_use = [
     #     'ai2-adapt-dev/personahub_math_v5_regen_149960',
     #     'ai2-adapt-dev/personahub_ifdata_manual_seed_v3_29980',
@@ -525,7 +542,7 @@ def generate_mixed_sft_samples(tokenizer: PreTrainedTokenizer, args: argparse.Na
     ]
     # filter the dataset with only the sources we want
     mixed_ds_df = pd.DataFrame(list(mixed_dataset['train']))
-    mixed_ds_df_filtered = mixed_ds_df[mixed_ds_df['source'].isin(sources_to_use)]
+    mixed_ds_df = mixed_ds_df[mixed_ds_df['source'].isin(sources_to_use)]
 
     # Filter that the last item in 'messages' has role of assistant, and the content has length of greater than 200,
     def last_message_valid(row):
@@ -537,23 +554,23 @@ def generate_mixed_sft_samples(tokenizer: PreTrainedTokenizer, args: argparse.Na
             return last_message.get('role') == 'assistant' and len(last_message.get('content', '')) > 200
         return False
 
-    mixed_ds_df_filtered = mixed_ds_df_filtered[mixed_ds_df_filtered.apply(last_message_valid, axis=1)]
+    mixed_ds_df = mixed_ds_df[mixed_ds_df.apply(last_message_valid, axis=1)]
 
     # For each source, take at most N items for each source
-    mixed_ds_df_filtered = mixed_ds_df_filtered.groupby('source', group_keys=False).apply(
-        lambda x: x.sample(n=min(len(x), args.task_size), random_state=42)
+    mixed_ds_df = filter_ds_by_group_size(
+        mixed_ds_df, group_by='source', group_size=args.task_size, seed=random.choice(range(1, 9999))
     )
-    mixed_dataset = list(mixed_ds_df_filtered.to_dict(orient='records'))
+    mixed_dataset = list(mixed_ds_df.to_dict(orient='records'))
 
     mixed_positive_samples = convert_dataset_to_positive_samples(mixed_dataset, tokenizer, max_tokens=args.max_tokens)
     mixed_negative_samples = generate_negative_samples(mixed_positive_samples, tokenizer, max_tokens=args.max_tokens)
 
-    return {"positive": mixed_positive_samples, "negative": mixed_negative_samples}
+    return {'positive': mixed_positive_samples, 'negative': mixed_negative_samples}
 
 
-def filter_ds_by_group_size(ds: pd.DataFrame, group_by: str, group_size: int) -> pd.DataFrame:
+def filter_ds_by_group_size(ds: pd.DataFrame, group_by: str, group_size: int, seed: int = 42) -> pd.DataFrame:
     """Filter a dataset by group size."""
-    return ds.groupby(group_by, group_keys=False).apply(lambda x: x.sample(n=min(len(x), group_size), random_state=42))
+    return ds.groupby(group_by, group_keys=False).apply(lambda x: x.sample(n=min(len(x), group_size), random_state=seed))
 
 
 def main():
@@ -578,15 +595,15 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.target_model_name)
     sample_list = []
 
-    # logger.info('Run local LLMs to generate samples...')
-    # llm_gen_result = generate_samples_with_local_llms(
-    #     tokenizer=tokenizer,
-    #     device=device,
-    #     torch_dtype=torch_dtype,
-    #     args=args,
-    #     logger=logger,
-    # )
-    # sample_list.append(llm_gen_result)
+    logger.info('Run local LLMs to generate samples...')
+    llm_gen_result = generate_samples_with_local_llms(
+        tokenizer=tokenizer,
+        device=device,
+        torch_dtype=torch_dtype,
+        args=args,
+        logger=logger,
+    )
+    sample_list.append(llm_gen_result)
 
     logger.info('Loading DeepSeek-R1 Math CoT dataset and generate samples...')
     cot_result = generate_strong_cot_samples(tokenizer=tokenizer, args=args)

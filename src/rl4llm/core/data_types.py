@@ -74,6 +74,12 @@ class GRPOConfig(BaseModel):
             raise ValueError(f"min_temperature ({min_temp}) must be less than max_temperature ({max_temp})")
         return values
 
+    @model_validator(mode='after')
+    def check_batch_size(cls, values):
+        if values.normalize_advantages and values.batch_size < 8:
+            raise ValueError('batch_size must be at least 8 when normalize_advantages is True')
+        return values
+
     class Config:
         arbitrary_types_allowed = True
 

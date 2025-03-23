@@ -1,7 +1,8 @@
 import logging
 import random
-from typing import Callable, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Tuple, Union
+
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizer
@@ -20,6 +21,7 @@ class CustomLLMGenerator:
         self,
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizer,
+        device: torch.device,
         source_tokens: Optional[List[int]] = None,
         target_tokens: Optional[List[int]] = None,
         prevent_patterns: Optional[List[List[int]]] = None,
@@ -30,6 +32,7 @@ class CustomLLMGenerator:
         Args:
             model (PreTrainedModel): A pre-trained transformer-based model for text generation.
             tokenizer (PreTrainedTokenizer): A pre-trained tokenizer for the model.
+            device: Torch device.
             source_tokens (List[int]): List of token IDs to replace, e.g., "EOS" or "</think>".
             target_tokens (List[int]): List of token IDs to replace with, e.g., "Wait", "Hmm".
             prevent_patterns (List[List[int]]): List of token sequences that, if present, prevent replacement,
@@ -37,9 +40,11 @@ class CustomLLMGenerator:
         """
         self.model = model
         self.tokenizer = tokenizer
+        self.device = device
         self.source_tokens = source_tokens or []
         self.target_tokens = target_tokens or []
         self.prevent_patterns = prevent_patterns or []
+        self.source_tokens_tensor = torch.tensor(self.source_tokens, device=self.device) if self.source_tokens else None
 
     def _has_pattern(self, input_ids: torch.Tensor, pattern: List[int]) -> torch.Tensor:
         """
@@ -111,7 +116,7 @@ class CustomLLMGenerator:
         for i, (seq, replace) in enumerate(zip(generated_ids, can_replace)):
             if replace:
                 text = self.tokenizer.decode(seq, skip_special_tokens=True)
-                incorrect_mask[i] = float(correctness_callback(text)) == 0.0
+                incorrect_mask[i] = float(correctness_callback(text)) < 1.0
 
         return incorrect_mask
 
@@ -130,19 +135,15 @@ class CustomLLMGenerator:
             torch.Tensor: Tokens with some possibly replaced, shape [batch_size].
             torch.Tensor: The replacement mask.
         """
-        if not self.source_tokens or not self.target_tokens or replace_prob <= 0.0:
+        if not self.source_tokens or not self.target_tokens or can_replace.sum() == 0 or replace_prob <= 0.0:
             return next_tokens, torch.zeros_like(can_replace)
 
         batch_size = next_tokens.size(0)
         device = next_tokens.device
         modified_tokens = next_tokens.clone()
 
-        # Check if next_tokens are in source_tokens
-        source_tokens_tensor = torch.tensor(self.source_tokens, device=device)
-        mask = (next_tokens.unsqueeze(-1) == source_tokens_tensor).any(dim=-1)
-
         # Combine conditions: token is a source token, replacement is allowed, and probability check
-        replace_mask = mask & can_replace & (torch.rand(batch_size, device=device) < replace_prob)
+        replace_mask = can_replace & (torch.rand(batch_size, device=device) < replace_prob)
         target_tokens = torch.tensor(random.choices(self.target_tokens, k=batch_size), device=device)
         modified_tokens = torch.where(replace_mask, target_tokens, modified_tokens)
 
@@ -151,6 +152,7 @@ class CustomLLMGenerator:
     def _determine_replacement_eligibility(
         self,
         generated_ids: torch.Tensor,
+        next_tokens: torch.Tensor,
         replacement_counts: torch.Tensor,
         explore_max_replacements: int,
         correctness_callback: Optional[Callable] = None,
@@ -160,6 +162,7 @@ class CustomLLMGenerator:
 
         Args:
             generated_ids (torch.Tensor): Generated token IDs of shape [batch_size, seq_len].
+            next_tokens (torch.Tensor): Batch of next token IDs of shape [batch_size].
             replacement_counts (torch.Tensor): Count of replacements already made.
             explore_max_replacements (int): Maximum number of replacements allowed.
             correctness_callback (Optional[Callable]): Function to evaluate correctness.
@@ -167,16 +170,39 @@ class CustomLLMGenerator:
         Returns:
             torch.Tensor: Boolean tensor of shape [batch_size] indicating eligibility for replacement.
         """
-        # Check for special patterns that would prevent replacement
-        can_replace = self._check_replacement_patterns(generated_ids)
+        # Check if next_tokens are in source_tokens
+        if self.source_tokens_tensor is None:
+            return torch.zeros_like(next_tokens).bool()
 
-        # Only allow replacement if under the maximum count
-        can_replace = can_replace & (replacement_counts < explore_max_replacements)
+        is_source_token = (next_tokens.unsqueeze(-1) == self.source_tokens_tensor).any(dim=-1)
 
-        # Check for correctness if a callback is provided
-        if correctness_callback is not None:
-            incorrect_mask = self._check_correctness(generated_ids, can_replace, correctness_callback)
-            can_replace = can_replace & incorrect_mask
+        # If no tokens are eligible, skip further checks
+        if not is_source_token.any():
+            return torch.zeros_like(next_tokens, dtype=torch.bool)
+
+        # Get indices of sequences where the first condition is True
+        eligible_indices = torch.where(is_source_token)[0]
+        can_replace = torch.zeros_like(next_tokens, dtype=torch.bool)
+
+        if eligible_indices.numel() > 0:
+            # Subset the inputs for eligible sequences
+            generated_ids_subset = generated_ids[eligible_indices]
+            replacement_counts_subset = replacement_counts[eligible_indices]
+
+            # Check patterns and replacement counts only for eligible sequences
+            pattern_allowed = self._check_replacement_patterns(generated_ids_subset)
+            below_max_replacements = replacement_counts_subset < explore_max_replacements
+
+            # Combine conditions for the subset
+            can_replace_subset = pattern_allowed & below_max_replacements
+
+            # Apply correctness check if callback exists
+            if correctness_callback is not None:
+                is_incorrect = self._check_correctness(generated_ids_subset, can_replace_subset, correctness_callback)
+                can_replace_subset = can_replace_subset & is_incorrect
+
+            # Place results back into the full batch tensor
+            can_replace[eligible_indices] = can_replace_subset
 
         return can_replace
 
@@ -326,7 +352,7 @@ class CustomLLMGenerator:
 
         # Determine which sequences are eligible for replacement
         can_replace = self._determine_replacement_eligibility(
-            generated_ids, replacement_counts, explore_max_replacements, correctness_callback
+            generated_ids, next_tokens, replacement_counts, explore_max_replacements, correctness_callback
         )
 
         if can_replace.sum() > 0:
@@ -414,10 +440,10 @@ class CustomLLMGenerator:
                 explore_start = False
 
             if explore_start:
-                # try decay explore topk
-                # effective_steps = max(0, generated_tokens - explore_skip_n)
-                # current_explore_top_k = max(10, explore_top_k - effective_steps * 10)
-                next_tokens = self._uniform_sampling(next_token_logits, top_k=min(10, explore_top_k))
+                # decay explore topk
+                effective_steps = max(0, generated_tokens - explore_skip_n)
+                current_explore_top_k = max(10, int(explore_top_k * (0.7**effective_steps)))
+                next_tokens = self._uniform_sampling(next_token_logits, top_k=min(10, current_explore_top_k))
             else:
                 # Sample next tokens
                 next_tokens = self._sampling(token_logits=next_token_logits, temperature=temperature, top_p=top_p, top_k=top_k)

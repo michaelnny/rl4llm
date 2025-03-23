@@ -106,9 +106,9 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self._metrics.reset()
 
-        if self.iteration_count == 0:
-            # do an initial evaluation before apply any training
-            self._evaluation()
+        # if self.iteration_count == 0:
+        #     # do an initial evaluation before apply any training
+        #     self._evaluation()
 
         with self._metrics.timer('step'):
             dist.barrier()
@@ -323,16 +323,17 @@ class GRPOTrainer(BaseGRPOTrainer):
         if self.iteration_count < 1:
             return
 
-        if self.iteration_count % self.config.sync_reference_interval == 0:
+        if self.config.sync_reference_interval > 0 and self.iteration_count % self.config.sync_reference_interval == 0:
             self._sync_reference_model()
 
-        if self.iteration_count % self.config.checkpoint_interval == 0:
+        if self.config.checkpoint_interval < 0 and self.iteration_count % self.config.checkpoint_interval == 0:
             if self.is_master:
                 save_dir = os.path.join(self._checkpoint_dir, f"iteration_{self.iteration_count}")
                 self._save_checkpoint(save_dir)
 
-        if self.iteration_count % self.config.eval_interval == 0 or (self.iteration_count + 1) == self.config.max_steps:
-            self._evaluation()
+        if self.config.eval_interval > 0:
+            if self.iteration_count % self.config.eval_interval == 0 or (self.iteration_count + 1) == self.config.max_steps:
+                self._evaluation()
 
         dist.barrier()
 

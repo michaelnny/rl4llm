@@ -5,14 +5,14 @@ config:
   eval_batch_size: 32
   eval_interval: 100
   gradient_accumulate_steps: 8
-  num_epochs: 2
+  num_epochs: 3
 job:
   artifacts_path: ./runs/coherent_classification_longformer
   dataset:
     test_path: data/coherent_dataset/test.parquet
     train_path: data/coherent_dataset/train.parquet
   max_test_samples: 4096
-  max_train_samples: 50000
+  max_train_samples: 100000
   seed: 117
 model:
   gradient_checkpointing: true

@@ -1,12 +1,12 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_explore_grpo_qwen2.5_1.5b_gsm8k"
+  artifacts_path: "./runs/explore_grpo_qwen2.5_1.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
   # max_train_samples: 4096         # for a quick run
-  max_test_samples: 256        
+  max_test_samples: 1024        
 
 model:
   pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -17,6 +17,9 @@ model:
 
 # for outcome coherent detection
 coherent_classification_model:
+  # ft_model_path: "models/ft_coherent_classification_model.bin"
+  # model_max_length: 4000
+
   pretrained_model: "allenai/longformer-base-4096"
   load_in_4bit: false
   gradient_checkpointing: true
@@ -24,33 +27,38 @@ coherent_classification_model:
   checkpoint_path: "models/coherent_classification_longformer"
 
 grpo_config:
-  max_steps: 200
-  rollout_size: 512
+  max_steps: 300
+  rollout_size: 1024
   num_updates: 1
   batch_size: 4
   gradient_accumulate_steps: 16
-  dynamic_discount: true            # compute dynamic discount based on completion length
-  min_gamma: 0.999                  # for compute dynamic discount
-  max_gamma: 0.9997                 # for compute dynamic discount
-  max_completion_length: 1000       # for compute dynamic discount
+  # dynamic_discount: false            # compute dynamic discount based on completion length
+  # min_gamma: 0.999                  # for compute dynamic discount
+  # max_gamma: 0.9997                 # for compute dynamic discount
+  # max_completion_length: 800       # for compute dynamic discount
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
-  normalize_group_rewards: false       
-  normalize_advantages: true
+  normalize_group_rewards: true       
+  normalize_advantages: false
   kl_loss_coef: 0.0
+  entropy_loss_coef: 0.0
   clip_grad_norm: 1.0
   sync_reference_interval: 0        # every N iteration
 
   # for sample generation
   max_prompt_length: 500              # skip sample question that's too long
-  group_size: 16                      # for each sample we generate a group of answers
-  xml_format: true                    # check for R1 style XML format
+  group_size: 32                      # for each sample we generate a group of answers
+  xml_format: false                    # check for R1 style XML format
   system_prompt: |
     A conversation between User and Assistant. The user asks a question, and the Assistant solves it.  
-    The Assistant first thinks about the reasoning process internally and then provides the user with the answer.  
-    The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively. i.e.,  
-    `<think> Unstructured, free-form reasoning process exploring the problem in depth </think>`  
-    `<answer> A clear and concise high-level summary of the solution and final answer </answer>`
+    The Assistant first thinks about the reasoning process internally and then provides the user with the answer. 
+  # xml_format: true                    # check for R1 style XML format
+  # system_prompt: |
+  #   A conversation between User and Assistant. The user asks a question, and the Assistant solves it.  
+  #   The Assistant first thinks about the reasoning process internally and then provides the user with the answer. 
+  #   The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively. i.e.,  
+  #   `<think> Unstructured, free-form reasoning process exploring the problem in depth </think>`  
+  #   `<answer> A clear and concise high-level summary of the solution and final answer </answer>`
   max_new_tokens: 1000
   temperature: 0.7                    # not used if using group_temperature
   repetition_penalty: 1.0
@@ -59,12 +67,12 @@ grpo_config:
   
   group_temperature: true             # group temperature where we balance exploration and exploitation
   min_temperature: 0.6
-  max_temperature: 1.6
-  explore_init_epsilon: 0.9           # exploration epsilon decay
+  max_temperature: 1.2
+  explore_init_epsilon: 0.5           # exploration epsilon decay
   explore_min_epsilon: 0.0
   explore_decay_steps: 100
-  explore_start_steps: 1              # initial start steps to do random sampling
-  explore_top_k: 200                  # Top K tokens to random sample during initial start steps
+  explore_start_steps: 3              # initial start steps to do random sampling
+  explore_top_k: 50                  # Top K tokens to random sample during initial start steps
   explore_max_replacements: 3         # max number of replacements to the same sequence
 
   # evaluation
@@ -77,7 +85,7 @@ grpo_config:
 optimizer:
   type: AdamW8bit
   params:
-    lr: 1.0e-6
+    lr: 5.0e-7
     betas: [0.9, 0.999]
     eps: 1.0e-8
     weight_decay: 0.0

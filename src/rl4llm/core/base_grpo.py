@@ -121,6 +121,7 @@ class BaseGRPOTrainer(BaseTrainer):
         return CustomLLMGenerator(
             model=policy_model,
             tokenizer=self.tokenizer,
+            device=self.device,
             source_tokens=source_tokens,
             target_tokens=target_tokens,
             prevent_patterns=prevent_patterns,
@@ -265,21 +266,19 @@ class BaseGRPOTrainer(BaseTrainer):
             check_correctness = partial(self.math_grader.__call__, ground_truth=ground_truth)
             explore_prob = self._get_exploration_epsilon()
 
-            # swaps special tokens like "</think>" with "Wait"
-            if self.config.explore_max_replacements > 0:
-                gen_kwargs['correctness_callback'] = check_correctness
-                gen_kwargs['explore_replace_prob'] = explore_prob
-                gen_kwargs['explore_max_replacements'] = self.config.explore_max_replacements
-
-            enable_exploring_start = (
-                (self.config.explore_start_steps > 0) and (explore_prob > 0) and (random.random() < explore_prob)
-            )
+            enable_exploring = (self.config.explore_start_steps > 0) and (explore_prob > 0) and (random.random() < explore_prob)
 
             # exploring start
-            if enable_exploring_start:
+            if enable_exploring:
                 gen_kwargs['explore_start_steps'] = self.config.explore_start_steps
                 gen_kwargs['explore_skip_n'] = self.think_token_len
                 gen_kwargs['explore_top_k'] = self.config.explore_top_k
+
+                # swaps special tokens like "</think>" with "Wait"
+                if self.config.explore_max_replacements > 0:
+                    gen_kwargs['correctness_callback'] = check_correctness
+                    gen_kwargs['explore_replace_prob'] = explore_prob
+                    gen_kwargs['explore_max_replacements'] = self.config.explore_max_replacements
 
         outputs = generator.generate(**gen_kwargs)
 
@@ -647,11 +646,16 @@ class BaseGRPOTrainer(BaseTrainer):
         accuracy_rewards = self.math_grader(completion_texts, ground_truths)  # -1 or 1
         format_rewards = self.format_grader(
             completion_texts, ground_truths, **{'xml_format': self.config.xml_format}
-        )  # -1, or 1
+        )  # -1 or 1
 
         accuracy_rewards = torch.tensor(accuracy_rewards, dtype=self.torch_dtype)
-        format_rewards = 0.5 * torch.tensor(format_rewards, dtype=self.torch_dtype)
-        total_rewards = accuracy_rewards + format_rewards
+        format_rewards = torch.tensor(format_rewards, dtype=self.torch_dtype)
+
+        # alpha = 0.8  # Higher weight for accuracy
+        # beta = 0.2  # Lower weight for format
+        # total_rewards = alpha * accuracy_rewards + beta * format_rewards
+
+        total_rewards = torch.where(format_rewards >= 0, accuracy_rewards, format_rewards)
 
         return {
             'accuracy_rewards': accuracy_rewards,
@@ -723,19 +727,19 @@ class BaseGRPOTrainer(BaseTrainer):
         pg_losses = -torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
 
         # First average over the sequence length, then average over the batch
-        pg_loss = masked_sum(pg_losses, loss_mask, dim=1).mean()
+        pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
 
         # Compute entropy for the policy
         # Convert log probabilities to probabilities first
         probs = torch.exp(pi_logprobs)
-        entropies = -torch.sum(probs * pi_logprobs, dim=-1)
-        entropy = masked_sum(entropies, loss_mask, dim=1).mean()
+        entropies = -torch.sum(probs * pi_logprobs * loss_mask, dim=-1)
+        entropy = entropies.mean()
         entropy_loss = self.config.entropy_loss_coef * entropy
 
         # Initialize metrics with common values
         metrics = {
             'loss/pg': pg_loss.detach().item(),
-            'loss/entropy': entropy.detach().item(),
+            'loss/entropy': entropy_loss.detach().item(),
             'entropy': entropy.detach().item(),
         }
 
@@ -749,7 +753,7 @@ class BaseGRPOTrainer(BaseTrainer):
             per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
             # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
 
-            kl = masked_sum(per_token_kl, loss_mask, dim=1).mean()
+            kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
             loss = pg_loss + kl_loss + entropy_loss
