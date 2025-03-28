@@ -33,12 +33,11 @@ class BaseGRPOTrainer(BaseTrainer):
     def __init__(
         self,
         config: GRPOConfig,
-        math_grader: MathGrader,
-        format_grader: FormatGrader,
         tokenizer: PreTrainedTokenizer,
         device: torch.device,
         torch_dtype: torch.dtype,
         artifacts_path: str,
+        coherent_model_config: Optional[dict] = None,
         logger: Optional[logging.Logger] = None,
         rank: Optional[int] = 0,
     ):
@@ -47,12 +46,11 @@ class BaseGRPOTrainer(BaseTrainer):
 
         Args:
             config (GRPOConfig): Configuration object for training parameters.
-            math_grader (MathGrader): Math problem grader.
-            format_grader (FormatGrader): Outcome format grader.
             tokenizer (PreTrainedTokenizer): Tokenizer for encoding/decoding text.
             device (torch.device): Device (CPU/GPU) for computation.
             torch_dtype (torch.dtype): Data type for PyTorch tensors (e.g., float32).
             artifacts_path (str): Directory path for saving logs and checkpoints.
+            coherent_model_config (dict): Coherent model config.
             logger (Optional[logging.Logger]): Logger for training events; defaults to DummyLogger if None.
         """
 
@@ -72,8 +70,8 @@ class BaseGRPOTrainer(BaseTrainer):
         self.explore_epsilon = 0
         self.generation_mode = False
 
-        self.math_grader = math_grader
-        self.format_grader = format_grader
+        self.math_grader: MathGrader = MathGrader(coherent_model_config, torch_dtype, device)
+        self.format_grader: FormatGrader = FormatGrader()
 
     def _initialize_file_handler(self):
         """Initialize training components"""
@@ -332,7 +330,7 @@ class BaseGRPOTrainer(BaseTrainer):
 
         return returns
 
-    def normalize_group_rewards(self, rewards: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    def normalize_group_rewards(self, rewards: torch.Tensor, zero_mean_only: bool = True, eps: float = 1e-8) -> torch.Tensor:
         """
         Normalize group rewards by subtracting the mean and dividing by the standard deviation.
 
@@ -349,12 +347,13 @@ class BaseGRPOTrainer(BaseTrainer):
             return rewards
 
         mean_reward = rewards.mean()
-        std_reward = rewards.std(unbiased=False)
+        std_reward = rewards.std()
+        if zero_mean_only:
+            return rewards - mean_reward
+        if std_reward == 0.0:
+            (rewards - mean_reward) / eps
 
-        if std_reward < eps:
-            return torch.zeros_like(rewards)
-
-        return (rewards - mean_reward) / (std_reward + eps)
+        return (rewards - mean_reward) / std_reward
 
     def compute_dynamic_discount(self, episode_length: int) -> float:
         """Compute dynamic discount factor."""
@@ -362,54 +361,6 @@ class BaseGRPOTrainer(BaseTrainer):
         scaled_length = min(episode_length / self.config.max_completion_length, 1.0)
         gamma = self.config.min_gamma + (self.config.max_gamma - self.config.min_gamma) * scaled_length
         return gamma
-
-    def _preprocess_dataset(self, dataset: Dataset) -> List[Dict]:
-        """Pre-tokenize the entire dataset and return a list of tokenized inputs."""
-
-        tokenized_data = []
-        for item in dataset:
-            question = item['question']
-            ground_truth = item['ground_truth']
-            task_type = item['task_type']
-
-            sample_message = self._prepare_single_message(question, self.config.system_prompt)
-            prompt_str = self.tokenizer.apply_chat_template(sample_message, tokenize=False, add_generation_prompt=True)
-            inputs = self.tokenizer(
-                prompt_str,
-                return_tensors='pt',
-                truncation=True,
-                padding=False,
-                max_length=self.tokenizer.model_max_length,
-            )
-
-            tokenized_data.append(
-                {
-                    'input_ids': inputs['input_ids'].squeeze(0),  # Shape: [seq_len]
-                    'attention_mask': inputs['attention_mask'].squeeze(0),
-                    'question': question,
-                    'ground_truth': ground_truth,
-                    'task_type': task_type,
-                }
-            )
-
-        return tokenized_data
-
-    def _prepare_single_message(self, question: str, system_prompt: str = None) -> List[Dict[str, str]]:
-        """Prepare a single message for tokenization.
-
-        Args:
-            question (str): The user question.
-            system_prompt (str): The system prompt to prepend.
-
-        Returns:
-            List[Dict[str, str]]: Formatted message list.
-        """
-        if not system_prompt:
-            return [{'role': 'user', 'content': question.strip()}]
-        return [
-            {'role': 'system', 'content': system_prompt.strip()},
-            {'role': 'user', 'content': question.strip()},
-        ]
 
     def _get_exploration_epsilon(self) -> float:
         """Computes exploration epsilon based on the current iteration step count."""
@@ -503,10 +454,10 @@ class BaseGRPOTrainer(BaseTrainer):
             full_sequences=full_sequences,
         )
 
-        # discard invalid samples
-        if torch.sum(outputs['total_rewards']) == 0:
-            self.logger.warning('Skipping samples with all zero rewards')
-            return []
+        # # discard invalid samples
+        # if torch.sum(outputs['accuracy_rewards']) == 0:
+        #     self.logger.warning('Skipping samples with all zero rewards')
+        #     return []
 
         self._log_sample_metrics(
             is_training=True,
@@ -519,10 +470,8 @@ class BaseGRPOTrainer(BaseTrainer):
         completion_lengths = outputs['completion_lengths']
 
         # Training specific processing
-        total_rewards = outputs['total_rewards']
-        normalized_rewards = (
-            self.normalize_group_rewards(total_rewards) if self.config.normalize_group_rewards else total_rewards
-        )
+        rewards = outputs['accuracy_rewards']
+        rewards = self.normalize_group_rewards(rewards) if self.config.normalize_group_rewards else rewards
 
         states = full_sequences[:, :-1]
         actions = full_sequences[:, 1:]
@@ -564,7 +513,7 @@ class BaseGRPOTrainer(BaseTrainer):
             assert loss_mask[i, :cut_position].sum().item() == completion_lengths[i]
 
             seq_rewards = torch.zeros_like(actions[i, :cut_position], dtype=self.torch_dtype)
-            seq_rewards[-1] = normalized_rewards[i]  # important to use normalized rewards here
+            seq_rewards[-1] = rewards[i]  # important to use normalized rewards here
 
             gamma = self.compute_dynamic_discount(completion_lengths[i]) if self.config.dynamic_discount else self.config.gamma
 
@@ -577,7 +526,7 @@ class BaseGRPOTrainer(BaseTrainer):
                     states=states[i, :cut_position].cpu(),
                     actions=actions[i, :cut_position].cpu(),
                     loss_mask=loss_mask[i, :cut_position].cpu(),
-                    reward=total_rewards[i].cpu(),
+                    reward=rewards[i].cpu(),
                     advantages=returns.cpu(),
                     pi_logprobs=pi_logprobs[i, :cut_position].cpu(),
                     ref_logprobs=ref_logprobs[i, :cut_position].cpu(),
@@ -639,24 +588,19 @@ class BaseGRPOTrainer(BaseTrainer):
         """
         assert len(completion_texts) == len(ground_truths)
 
-        accuracy_rewards = self.math_grader(completion_texts, ground_truths)  # -1 or 1
-        format_rewards = self.format_grader(
-            completion_texts, ground_truths, **{'xml_format': self.config.xml_format}
-        )  # -1 or 1
+        accuracy_rewards = self.math_grader(completion_texts, ground_truths)  # 0 or 1
+        # format_rewards = self.format_grader(completion_texts, ground_truths, **{'xml_format': self.config.xml_format})  # 0 or 1
 
         accuracy_rewards = torch.tensor(accuracy_rewards, dtype=self.torch_dtype)
-        format_rewards = torch.tensor(format_rewards, dtype=self.torch_dtype)
+        # format_rewards = torch.tensor(format_rewards, dtype=self.torch_dtype)
 
         # alpha = 0.8  # Higher weight for accuracy
         # beta = 0.2  # Lower weight for format
         # total_rewards = alpha * accuracy_rewards + beta * format_rewards
 
-        total_rewards = torch.where(format_rewards >= 0, accuracy_rewards, format_rewards)
-
         return {
             'accuracy_rewards': accuracy_rewards,
-            'format_rewards': format_rewards,
-            'total_rewards': total_rewards,
+            # 'format_rewards': format_rewards,
         }
 
     def _compute_action_logprobs(
@@ -742,12 +686,12 @@ class BaseGRPOTrainer(BaseTrainer):
         # Compute KL divergence if coefficient is positive
         if self.config.kl_loss_coef > 0:
             # Compute the KL divergence between the model and the reference model
-            # per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+            per_token_kl = torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
 
-            # Clamp log differences for stability
-            per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
-            per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
-            # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
+            # # Clamp log differences for stability
+            # per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
+            # per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
+            # # per_token_kl = torch.clamp(per_token_kl, min=-100.0, max=100.0)  # Prevent extreme large values
 
             kl = masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
@@ -875,8 +819,6 @@ class BaseGRPOTrainer(BaseTrainer):
         questions: List[str],
         ground_truths: List[str],
         accuracy_rewards: torch.Tensor,
-        format_rewards: torch.Tensor,
-        total_rewards: torch.Tensor,
         prompt_lengths: torch.Tensor,
         completion_lengths: torch.Tensor,
         completion_texts: List[str],
@@ -890,8 +832,6 @@ class BaseGRPOTrainer(BaseTrainer):
         # Slightly condensed metrics batch
         metrics_batch = {
             f'{obj_prefix}/accuracy_reward': accuracy_rewards.tolist(),
-            f'{obj_prefix}/format_reward': format_rewards.tolist(),
-            f'{obj_prefix}/total_reward': total_rewards.tolist(),
             f'{tok_prefix}/prompt_length': prompt_lengths.tolist(),
             f'{tok_prefix}/completion_length': completion_lengths.tolist(),
         }
@@ -913,9 +853,9 @@ class BaseGRPOTrainer(BaseTrainer):
         tb_tag = f'{phase}_samples'
         # Randomly select 1 sample for regular logging
         tb_indices = set(random.sample(range(len(completion_texts)), k=1))
-        # Add indices of samples with negative format rewards
-        negative_format_indices = {i for i, reward in enumerate(format_rewards) if reward < 0}
-        tb_indices.update(negative_format_indices)
+        # # Add indices of samples with negative format rewards
+        # negative_format_indices = {i for i, reward in enumerate(format_rewards) if reward < 0}
+        # tb_indices.update(negative_format_indices)
 
         for idx in range(len(completion_texts)):
             sample = SampleLog(
@@ -925,8 +865,6 @@ class BaseGRPOTrainer(BaseTrainer):
                 completion=completion_texts[idx],
                 completion_length=completion_lengths[idx].item(),
                 accuracy_reward=accuracy_rewards[idx].item(),
-                format_reward=format_rewards[idx].item(),
-                total_reward=total_rewards[idx].item(),
                 step=self.iteration_count,
             )
 
@@ -955,7 +893,7 @@ class BaseGRPOTrainer(BaseTrainer):
             f"**Question [{sample.task_type}]**: {sample.question}\n\n"
             f"**Ground Truth**: {sample.ground_truth}\n\n"
             f"**Accuracy Reward**: {sample.accuracy_reward:.2f}\n\n"
-            f"**Format Reward**: {sample.format_reward:.2f}\n\n"
+            # f"**Format Reward**: {sample.format_reward:.2f}\n\n"
             f"**Generated Completion**:\n```json\n{sample.completion}\n```"
         )
 

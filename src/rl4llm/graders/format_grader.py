@@ -1,79 +1,34 @@
 import re
 from typing import Dict
 
-import torch
-
-from rl4llm.utils import build_longformer_classification_model_and_tokenizer
-
 from .base_grader import BaseGrader
 
 
 class FormatGrader(BaseGrader):
     """Checks for output format like XML structure, coherent"""
 
-    def __init__(self, model_args: Dict, torch_dtype: torch.dtype, device: torch.device, **kwargs) -> float:
-
-        model, tokenizer = build_longformer_classification_model_and_tokenizer(model_args, torch_dtype)
-        self.model = model.eval().to(device)
-        self.tokenizer = tokenizer
-        self.device = device
-
     def __call__(self, answer, ground_truth=None, **kwargs):
         """Returns graded scores (1.0 or -1.0) for one or more answers."""
         if isinstance(answer, str):
-            # Single answer case
-            is_coherent_list = self.__check_coherent(answer)
-            is_coherent = is_coherent_list[0]  # Extract the single result
-            if not is_coherent:
-                return -1.0
+
             xml_format = kwargs.get('xml_format', True)
             if xml_format:
                 is_xml_valid = self.__check_xml_format(answer)
-                return 1.0 if is_xml_valid else -1.0
-            return 1.0
+                return 1.0 if is_xml_valid else 0.0
+            return 0.0
         elif isinstance(answer, list):
             # Batched answer case
-            is_coherent_list = self.__check_coherent(answer)
             scores = []
-            for ans, is_coherent in zip(answer, is_coherent_list):
-                if not is_coherent:
-                    scores.append(-1.0)
+            for ans in answer:
+                xml_format = kwargs.get('xml_format', True)
+                if xml_format:
+                    is_xml_valid = self.__check_xml_format(ans)
+                    scores.append(1.0 if is_xml_valid else 0.0)
                 else:
-                    xml_format = kwargs.get('xml_format', True)
-                    if xml_format:
-                        is_xml_valid = self.__check_xml_format(ans)
-                        scores.append(1.0 if is_xml_valid else -1.0)
-                    else:
-                        scores.append(1.0)
+                    scores.append(0.0)
             return scores
         else:
             raise ValueError('answer must be a string or a list of strings')
-
-    @torch.inference_mode()
-    def __check_coherent(self, texts) -> list[bool]:
-        """Checks coherent content for one or more texts using a pretrained Longformer sequence classification model."""
-        # Ensure input is a list
-        if isinstance(texts, str):
-            texts = [texts]
-
-        # Tokenize all texts in a batch
-        inputs = self.tokenizer(
-            texts,
-            return_tensors='pt',
-            truncation=True,
-            max_length=self.tokenizer.model_max_length,
-            padding=True,  # Pad to the longest in the batch, not max_length
-        ).to(self.device)
-
-        # Get model output for the batch
-        output = self.model(**inputs)
-
-        # Convert logits to probabilities
-        probs = torch.softmax(output.logits, dim=1)
-
-        # Convert predictions to list of booleans (True for class 1, False for class 0)
-        predictions = torch.argmax(probs, dim=1).cpu().tolist()
-        return [pred == 1 for pred in predictions]
 
     def __check_xml_format(self, text) -> bool:
         """Checks R1 style XML format"""

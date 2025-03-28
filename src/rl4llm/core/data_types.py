@@ -10,14 +10,13 @@ class GRPOConfig(BaseModel):
     """GRPO Training Configuration"""
 
     """For RL sample generation"""
-    system_prompt: Optional[str] = Field(None, description='System prompt for generation')
     max_prompt_length: Optional[int] = Field(
         1024, ge=256, le=10240, description='Skip sample with prompt length greater than this to avoid peak memory spikes'
     )
     max_new_tokens: Optional[int] = Field(4096, ge=50, description='Maximum number of new tokens to generate')
     temperature: Optional[float] = Field(0.9, gt=0.0, le=1.0, description='Sampling temperature for generation')
     min_temperature: Optional[float] = Field(
-        0.6, gt=0.0, le=1.0, description='Minimum sampling temperature for group temperature'
+        0.6, ge=0.0, le=1.0, description='Minimum sampling temperature for group temperature'
     )
     max_temperature: Optional[float] = Field(
         1.2, gt=0.0, le=2.0, description='Maximum sampling temperature for group temperature'

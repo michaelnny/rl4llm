@@ -442,19 +442,15 @@ class CustomLLMGenerator:
             if explore_start:
                 # decay explore topk
                 effective_steps = max(0, generated_tokens - explore_skip_n)
-                current_explore_top_k = max(10, int(explore_top_k * (0.7**effective_steps)))
-                next_tokens = self._uniform_sampling(next_token_logits, top_k=min(10, current_explore_top_k))
+                current_explore_top_k = max(5, int(explore_top_k * (0.8**effective_steps)))
+                next_tokens = self._uniform_sampling(next_token_logits, top_k=current_explore_top_k)
             else:
                 # Sample next tokens
                 next_tokens = self._sampling(token_logits=next_token_logits, temperature=temperature, top_p=top_p, top_k=top_k)
 
             # Check if we should consider replacement
             should_replace = True
-            if (
-                explore_replace_prob <= 0
-                or explore_max_replacements <= 0
-                or generated_tokens <= (explore_start_steps + explore_skip_n) * 2
-            ):
+            if explore_replace_prob <= 0 or explore_max_replacements <= 0 or generated_tokens <= 50:
                 should_replace = False
 
             if should_replace:

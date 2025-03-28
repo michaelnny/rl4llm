@@ -226,7 +226,47 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
     return expression1 == expression2
 
 
+def math_problem_grader(
+    full_answer: str,
+    ground_truth: str,
+    last_n: Optional[int] = 1,
+) -> float:
+    """
+    Enhanced grader that handles multiple answer formats and extraction methods.
+    """
+    if full_answer is None or ground_truth is None:
+        return 0.0
+
+    logger.debug(f"Processing answer: {full_answer}")
+    logger.debug(f"Ground truth: {ground_truth}")
+
+    # 1. Try boxed answers
+    boxed_answer = extract_math_answer_from_last_boxed(full_answer)
+    if boxed_answer is not None:
+        logger.debug(f"Found boxed answer: {boxed_answer}")
+        if check_expressions_equivalent(boxed_answer, ground_truth):
+            return 1.0
+        else:
+            return 0.0
+
+    # 2. Fallback to last N numerical values
+    if last_n is not None and last_n >= 1:
+        number_list = extract_last_n_numerical_values(full_answer, size=last_n)
+        if number_list:
+            for num in number_list:
+                if check_expressions_equivalent(num, ground_truth):
+                    return 1.0
+
+    return 0.0
+
+
+import torch
+
+
 class MathGrader(BaseGrader):
+
+    def __init__(self, model_args: dict, torch_dtype: torch.dtype, device: torch.device, **kwargs) -> float:
+        super().__init__(model_args, torch_dtype, device, **kwargs)
 
     def __grade_single(self, answer: str, ground_truth: str, last_n: int) -> float:
         """Grades a single answer against the ground truth."""
@@ -254,28 +294,35 @@ class MathGrader(BaseGrader):
 
         return -1.0
 
+    def _grade_single(self, answer: str, ground_truth: str, last_n: int) -> float:
+        """Grades a single answer against the ground truth."""
+        return math_problem_grader(answer, ground_truth, last_n)
+
     def __call__(self, answer, ground_truth, **kwargs):
         """Checks math problem outcome(s) with ground truth(s), returns 1 or -1 for each.
 
         Args:
             answer (str or list[str]): The answer(s) to grade.
             ground_truth (str or list[str]): The ground truth(s) to compare against.
-            **kwargs: Additional arguments, including 'last_n' (default is 2).
+            **kwargs: Additional arguments, including 'last_n' (default is 1).
 
         Returns:
             float or list[float]: The grade(s) for the answer(s), either 1.0 or -1.0.
         """
-        last_n = kwargs.get('last_n', 2)
-
+        last_n = kwargs.get('last_n', 1)
         if isinstance(answer, str):
-            if not isinstance(ground_truth, str):
-                raise ValueError('ground_truth must be a string when answer is a string')
-            return self.__grade_single(answer, ground_truth, last_n)
+            is_coherent = self._check_coherent([answer])
+            if is_coherent[0]:
+                return self._grade_single(answer, ground_truth, last_n)
+            else:
+                return 0.0
 
-        elif isinstance(answer, list):
-            if not isinstance(ground_truth, list) or len(answer) != len(ground_truth):
-                raise ValueError('ground_truth must be a list of the same length as answer')
-            return [self.__grade_single(a, g, last_n) for a, g in zip(answer, ground_truth)]
+        if isinstance(answer, list):
+            is_coherent = self._check_coherent(answer)
+            return [
+                self._grade_single(pred, target, last_n) if valid else 0.0
+                for valid, pred, target in zip(is_coherent, answer, ground_truth)
+            ]
 
         else:
             raise ValueError('answer must be a string or a list of strings')

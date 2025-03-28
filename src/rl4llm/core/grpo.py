@@ -27,8 +27,6 @@ class GRPOTrainer(BaseGRPOTrainer):
     def __init__(
         self,
         config: GRPOConfig,
-        math_grader: MathGrader,
-        format_grader: FormatGrader,
         policy_model: PreTrainedModel,
         tokenizer: PreTrainedTokenizer,
         optimizer: torch.optim.AdamW,
@@ -38,16 +36,16 @@ class GRPOTrainer(BaseGRPOTrainer):
         device: torch.device,
         torch_dtype: torch.dtype,
         artifacts_path: str,
+        coherent_model_config: Dict = None,
         logger: logging.Logger = None,
     ):
         super().__init__(
             config=config,
-            math_grader=math_grader,
-            format_grader=format_grader,
             tokenizer=tokenizer,
             device=device,
             torch_dtype=torch_dtype,
             artifacts_path=artifacts_path,
+            coherent_model_config=coherent_model_config,
             logger=logger,
             rank=0,  # for single GPU
         )
@@ -61,14 +59,10 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self.llm_generator = self._create_custom_llm_generator(self.policy_model)
 
-        self.logger.info('Preprocessing datasets...')
-        self.train_ds = self._preprocess_dataset(train_ds)
-        self.test_ds = self._preprocess_dataset(test_ds)
-
         # we only sample one item at a time for training, so no need loader
-        self.train_iter = iter(self.train_ds)
+        self.train_iter = iter(train_ds)
         self.test_loader = DataLoader(
-            self.test_ds,
+            test_ds,
             batch_size=self.config.eval_batch_size,
             collate_fn=self._eval_collate_function,
             pin_memory=True if device.type == 'cuda' else False,  # Optimize for GPU
@@ -91,9 +85,9 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self._metrics.reset()
 
-        # if self.iteration_count == 0:
-        #     # do an initial evaluation before apply any training
-        #     self._evaluation()
+        if self.iteration_count == 0:
+            # do an initial evaluation before apply any training
+            self._evaluation()
 
         with self._metrics.timer('step'):
             samples = self._generate_training_samples()
@@ -145,11 +139,10 @@ class GRPOTrainer(BaseGRPOTrainer):
 
     def _train_policy(self, train_samples: List[GRPOSample]) -> None:
         """Train the policy model using the collected samples."""
-        random.shuffle(train_samples)
         data_loader = DataLoader(
             train_samples,
             batch_size=self.config.batch_size,
-            shuffle=True,
+            shuffle=False,
             pin_memory=self.device.type == 'cuda',
             collate_fn=self._train_collate_function,
             drop_last=True,

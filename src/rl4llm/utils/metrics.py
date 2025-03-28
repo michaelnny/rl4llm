@@ -53,22 +53,31 @@ class MetricsCollector:
                 continue
 
             # Basic mean calculation
+            values = np.array(values)
             summary[name] = np.mean(values).item()
 
             # Skip if only one value or in skip_list
-            if len(values) <= 1 or name.startswith("elapsed/") or any(k in name for k in skip_list):
+            if len(values) <= 1 or any(k in name for k in skip_list):
                 continue
 
             # Add standard deviation
             summary[f"{name}_std"] = np.std(values).item()
 
+            if name.endswith('accuracy_reward'):
+                total = len(values)
+                correct = np.count_nonzero(values == 1.0)
+                prefix = name.split('/accuracy_reward')[0]
+                summary[f"{prefix}/accuracy_rate"] = correct / total
+                continue
+
             # Handle length-specific metrics
             if 'completion_length' in name and 'training' in name:
                 summary[f"{name}_max"] = np.max(values).item()
                 summary[f"{name}_min"] = np.min(values).item()
+
                 max_value = np.max(values).item()
-                max_count = np.sum(np.isclose(values, max_value, rtol=1e-5, atol=1e-5)).item()
-                summary[f"{name}_max_ratio"] = max_count / len(values)
+                max_count = np.sum(values == max_value).item()
+                summary[f"{name}_max_ratio"] = (max_count / len(values)) if max_count > 1 else 0.0
                 summary[f"{name}_p99"] = np.percentile(values, 99).item()
 
         return summary

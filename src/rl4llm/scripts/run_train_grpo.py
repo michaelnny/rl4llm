@@ -6,12 +6,13 @@ import os
 import pstats
 import sys
 from traceback import format_exc
+from typing import Dict, List
 
 import torch
+from transformers import PreTrainedTokenizer
 
 from rl4llm.core.grpo import GRPOConfig, GRPOTrainer
 from rl4llm.data import load_multiple_datasets
-from rl4llm.graders import FormatGrader, MathGrader
 from rl4llm.utils import (
     build_model_and_tokenizer,
     create_optimizer_and_scheduler,
@@ -26,11 +27,64 @@ def parse_args():
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/explore_grpo_config.yaml',
+        default='./configs/grpo_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
     return parser.parse_args()
+
+
+PROMPT_TEMPLATE_EASY = """Question:
+{query}
+
+Answer:
+Let's think step by step.
+"""
+
+PROMPT_TEMPLATE = """<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
+
+Question:
+{query}<|im_end|>
+<|im_start|>assistant
+"""
+
+
+def preprocess_dataset(dataset: List[Dict], tokenizer: PreTrainedTokenizer, model_name: str) -> List[Dict]:
+    """Pre-tokenize the entire dataset and return a list of tokenized inputs."""
+
+    if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
+        template = PROMPT_TEMPLATE_EASY
+    else:
+        template = PROMPT_TEMPLATE
+
+    tokenized_data = []
+    for item in dataset:
+        question = item['question']
+        ground_truth = item['ground_truth']
+        task_type = item['task_type']
+        prompt = template.format(query=question)
+        inputs = tokenizer(
+            prompt,
+            return_tensors='pt',
+            truncation=False,
+            padding=False,
+            max_length=tokenizer.model_max_length,
+        )
+
+        tokenized_data.append(
+            {
+                'input_ids': inputs['input_ids'].squeeze(0),  # Shape: [seq_len]
+                'attention_mask': inputs['attention_mask'].squeeze(0),
+                'question': question,
+                'ground_truth': ground_truth,
+                'task_type': task_type,
+            }
+        )
+
+    return tokenized_data
 
 
 def main():
@@ -49,6 +103,7 @@ def main():
     datasets = config.get('job').get('datasets')
     max_train_samples = config.get('job').get('max_train_samples', None)
     max_test_samples = config.get('job').get('max_test_samples', None)
+    model_name = config['model']['pretrained_model']
     set_seed(seed)
 
     logger = setup_logger()
@@ -85,10 +140,12 @@ def main():
         total_steps=total_update_steps,
     )
 
+    logger.info('Preprocessing datasets...')
+    train_ds = preprocess_dataset(train_ds, tokenizer, model_name)
+    test_ds = preprocess_dataset(test_ds, tokenizer, model_name)
+
     trainer = GRPOTrainer(
         config=grpo_config,
-        math_grader=MathGrader(),
-        format_grader=FormatGrader(config['coherent_classification_model'], torch_dtype, device),
         policy_model=policy_model,
         tokenizer=tokenizer,
         optimizer=optimizer,
@@ -98,6 +155,7 @@ def main():
         device=device,
         torch_dtype=torch_dtype,
         artifacts_path=artifacts_path,
+        coherent_model_config=config.get('coherent_model'),
         logger=logger,
     )
 
