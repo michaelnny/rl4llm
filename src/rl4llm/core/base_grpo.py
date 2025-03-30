@@ -1,6 +1,7 @@
 """Base GRPO trainer with common functionality for both single and distributed training"""
 
 import logging
+import math
 import os
 import random
 import re
@@ -72,6 +73,12 @@ class BaseGRPOTrainer(BaseTrainer):
 
         self.math_grader: MathGrader = MathGrader(coherent_model_config, torch_dtype, device)
         self.format_grader: FormatGrader = FormatGrader()
+
+        # avoid adding group of samples with almost identical outcomes
+        _dummy_rewards = torch.tensor([0] * self.config.group_size, dtype=torch.float32)
+        _idx = math.ceil(self.config.group_size * 0.05)
+        _dummy_rewards[:_idx] = 1.0
+        self.reward_min_std = torch.std(_dummy_rewards, unbiased=False)
 
     def _initialize_file_handler(self):
         """Initialize training components"""
@@ -308,26 +315,16 @@ class BaseGRPOTrainer(BaseTrainer):
 
         # Initialize returns tensor
         returns = torch.zeros_like(mask, dtype=rewards.dtype)
+        seq_len = len(rewards)
 
-        # Get assistant rewards using boolean indexing
-        assistant_rewards = rewards[mask.bool()]
-        seq_len = len(assistant_rewards)
+        g = 0.0
+        # Calculate returns from t=T-1, T-2, ..., 1, 0
+        for t in reversed(range(0, seq_len)):
+            delta = gamma * g if mask[t] and t < seq_len - 1 else 0.0
+            g = rewards[t] + delta
+            returns[t] = g
 
-        # Handle empty case
-        if seq_len == 0:
-            return returns
-
-        # Initialize assistant returns
-        assistant_returns = torch.zeros_like(assistant_rewards, dtype=rewards.dtype)
-
-        R = 0
-        for t in reversed(range(len(assistant_rewards))):
-            R = assistant_rewards[t] + gamma * R
-            assistant_returns[t] = R
-
-        # Place assistant returns back in the original tensor
-        returns[mask.bool()] = assistant_returns
-
+        returns *= mask.float()
         return returns
 
     def normalize_group_rewards(self, rewards: torch.Tensor, zero_mean_only: bool = True, eps: float = 1e-8) -> torch.Tensor:
@@ -347,13 +344,11 @@ class BaseGRPOTrainer(BaseTrainer):
             return rewards
 
         mean_reward = rewards.mean()
-        std_reward = rewards.std()
+        std_reward = rewards.std(unbiased=False)
         if zero_mean_only:
             return rewards - mean_reward
-        if std_reward == 0.0:
-            (rewards - mean_reward) / eps
 
-        return (rewards - mean_reward) / std_reward
+        return (rewards - mean_reward) / (std_reward + eps)
 
     def compute_dynamic_discount(self, episode_length: int) -> float:
         """Compute dynamic discount factor."""
@@ -454,10 +449,13 @@ class BaseGRPOTrainer(BaseTrainer):
             full_sequences=full_sequences,
         )
 
-        # # discard invalid samples
-        # if torch.sum(outputs['accuracy_rewards']) == 0:
-        #     self.logger.warning('Skipping samples with all zero rewards')
-        #     return []
+        rewards = outputs['accuracy_rewards']
+
+        # discard samples as they leads to zero advantages -> zero gradients
+        if torch.std(rewards, unbiased=False) <= self.reward_min_std:
+            self.logger.warning(f'Skipping samples with identical rewards, std: {self.reward_min_std}')
+            self._metrics.add_metric('elapsed/skipped_sample', 1)
+            return []
 
         self._log_sample_metrics(
             is_training=True,
@@ -470,7 +468,6 @@ class BaseGRPOTrainer(BaseTrainer):
         completion_lengths = outputs['completion_lengths']
 
         # Training specific processing
-        rewards = outputs['accuracy_rewards']
         rewards = self.normalize_group_rewards(rewards) if self.config.normalize_group_rewards else rewards
 
         states = full_sequences[:, :-1]
@@ -512,14 +509,16 @@ class BaseGRPOTrainer(BaseTrainer):
             assert loss_mask[i, ...].sum().item() == completion_lengths[i]
             assert loss_mask[i, :cut_position].sum().item() == completion_lengths[i]
 
-            seq_rewards = torch.zeros_like(actions[i, :cut_position], dtype=self.torch_dtype)
-            seq_rewards[-1] = rewards[i]  # important to use normalized rewards here
+            # Compute discounted return
+            # seq_rewards = torch.zeros_like(actions[i, :cut_position], dtype=self.torch_dtype).cpu()
+            # seq_rewards[-1] = rewards[i]
+            # gamma = self.compute_dynamic_discount(completion_lengths[i]) if self.config.dynamic_discount else self.config.gamma
+            # returns = self.compute_masked_monte_carlo_returns(
+            #     rewards=seq_rewards, mask=loss_mask[i, :cut_position].cpu(), gamma=gamma
+            # )
 
-            gamma = self.compute_dynamic_discount(completion_lengths[i]) if self.config.dynamic_discount else self.config.gamma
-
-            returns = self.compute_masked_monte_carlo_returns(
-                rewards=seq_rewards, mask=loss_mask[i, :cut_position], gamma=gamma
-            )
+            returns = rewards[i] * loss_mask[i, :cut_position].cpu()
+            assert torch.nonzero(returns).sum() > 0
 
             samples.append(
                 GRPOSample(
@@ -589,14 +588,13 @@ class BaseGRPOTrainer(BaseTrainer):
         assert len(completion_texts) == len(ground_truths)
 
         accuracy_rewards = self.math_grader(completion_texts, ground_truths)  # 0 or 1
-        # format_rewards = self.format_grader(completion_texts, ground_truths, **{'xml_format': self.config.xml_format})  # 0 or 1
-
         accuracy_rewards = torch.tensor(accuracy_rewards, dtype=self.torch_dtype)
+
+        # format_rewards = [0] * len(completion_texts) if not self.config.xml_format else self.format_grader(completion_texts, ground_truths)  # 0 or 1
         # format_rewards = torch.tensor(format_rewards, dtype=self.torch_dtype)
 
-        # alpha = 0.8  # Higher weight for accuracy
         # beta = 0.2  # Lower weight for format
-        # total_rewards = alpha * accuracy_rewards + beta * format_rewards
+        # total_rewards = accuracy_rewards + beta * format_rewards
 
         return {
             'accuracy_rewards': accuracy_rewards,
@@ -664,7 +662,12 @@ class BaseGRPOTrainer(BaseTrainer):
         # PPO clipped surrogate PG loss
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
         clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
-        pg_losses = -torch.min(ratio * advantages.detach(), clipped_ratio * advantages.detach())
+        pg_losses1 = ratio * advantages.detach()
+        pg_losses2 = clipped_ratio * advantages.detach()
+        pg_losses = -torch.min(pg_losses1, pg_losses2)
+
+        approxkl = 0.5 * masked_mean(torch.square(pi_logprobs - behavior_logprobs), loss_mask)
+        clipfrac = masked_mean(torch.lt(pg_losses2, pg_losses1), loss_mask)
 
         # First average over the sequence length, then average over the batch
         pg_loss = masked_mean(pg_losses, loss_mask, dim=1).mean()
@@ -681,6 +684,8 @@ class BaseGRPOTrainer(BaseTrainer):
             'loss/pg': pg_loss.detach().item(),
             'loss/entropy': entropy_loss.detach().item(),
             'entropy': entropy.detach().item(),
+            'approxkl': approxkl.detach().item(),
+            'clipfrac': clipfrac.detach().item(),
         }
 
         # Compute KL divergence if coefficient is positive
@@ -851,11 +856,8 @@ class BaseGRPOTrainer(BaseTrainer):
         # Sample logging
         handler = self._train_sample_handler if is_training else self._eval_sample_handler
         tb_tag = f'{phase}_samples'
-        # Randomly select 1 sample for regular logging
-        tb_indices = set(random.sample(range(len(completion_texts)), k=1))
-        # # Add indices of samples with negative format rewards
-        # negative_format_indices = {i for i, reward in enumerate(format_rewards) if reward < 0}
-        # tb_indices.update(negative_format_indices)
+        # Randomly select samples for logging to tensorboard
+        tb_indices = random.sample(range(len(completion_texts)), k=min(4, len(completion_texts)))
 
         for idx in range(len(completion_texts)):
             sample = SampleLog(

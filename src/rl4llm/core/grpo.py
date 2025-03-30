@@ -160,7 +160,7 @@ class GRPOTrainer(BaseGRPOTrainer):
                     self._train_one_batch(mini_batch)
                     mini_steps += 1
 
-                    if mini_steps % self.config.gradient_accumulate_steps == 0:
+                    if mini_steps % self.config.gradient_accumulate_steps == 0 or mini_steps % len(data_loader) == 0:
                         grad_norm = self.get_grad_norm(self.policy_model)
                         self._metrics.add_metric('training/grad_norm', grad_norm.item())
                         if self.config.clip_grad_norm > 0:

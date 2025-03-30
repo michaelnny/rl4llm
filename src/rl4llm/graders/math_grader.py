@@ -268,34 +268,11 @@ class MathGrader(BaseGrader):
     def __init__(self, model_args: dict, torch_dtype: torch.dtype, device: torch.device, **kwargs) -> float:
         super().__init__(model_args, torch_dtype, device, **kwargs)
 
-    def __grade_single(self, answer: str, ground_truth: str, last_n: int) -> float:
-        """Grades a single answer against the ground truth."""
-        if answer is None or ground_truth is None:
-            return -1.0
-
-        logger.debug(f"Processing answer: {answer}")
-        logger.debug(f"Ground truth: {ground_truth}")
-
-        # 1. Try boxed answers
-        boxed_answer = extract_math_answer_from_last_boxed(answer)
-        if boxed_answer is not None:
-            logger.debug(f"Found boxed answer: {boxed_answer}")
-            if check_expressions_equivalent(boxed_answer, ground_truth):
-                return 1.0
-            else:
-                return -1.0
-
-        # 2. Fallback to last N numerical values
-        number_list = extract_last_n_numerical_values(answer, size=last_n)
-        if number_list:
-            for num in number_list:
-                if check_expressions_equivalent(num, ground_truth):
-                    return 1.0
-
-        return -1.0
-
     def _grade_single(self, answer: str, ground_truth: str, last_n: int) -> float:
         """Grades a single answer against the ground truth."""
+        if self._check_repetition(answer):
+            return 0.0
+
         return math_problem_grader(answer, ground_truth, last_n)
 
     def __call__(self, answer, ground_truth, **kwargs):

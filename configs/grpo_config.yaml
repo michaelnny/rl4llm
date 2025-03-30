@@ -24,8 +24,8 @@ model:
 #   checkpoint_path: "models/coherent_classification_longformer"
 
 grpo_config:
-  max_steps: 200
-  rollout_size: 256
+  max_steps: 2000
+  rollout_size: 512
   num_updates: 1
   batch_size: 8
   gradient_accumulate_steps: 16
@@ -36,28 +36,18 @@ grpo_config:
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       
-  normalize_advantages: false
+  normalize_advantages: true
   kl_loss_coef: 0.0
   entropy_loss_coef: 0.0
-  clip_grad_norm: 1.0
-  sync_reference_interval: 0        # every N iteration
+  clip_grad_norm: 0.0
+  sync_reference_interval: 0          # every N iteration
 
   # for sample generation
   max_prompt_length: 512              # skip sample question that's too long
-  group_size: 32                      # for each sample we generate a group of answers
-  xml_format: false                    # check for R1 style XML format
-  # system_prompt: |
-  #   A conversation between User and Assistant. The user asks a question, and the Assistant solves it.  
-  #   The Assistant first thinks about the reasoning process internally and then provides the user with the answer. 
-  # # xml_format: true                    # check for R1 style XML format
-  # # system_prompt: |
-  # #   A conversation between User and Assistant. The user asks a question, and the Assistant solves it.  
-  # #   The Assistant first thinks about the reasoning process internally and then provides the user with the answer. 
-  # #   The reasoning process and answer are enclosed within `<think> </think>` and `<answer> </answer>` tags, respectively. i.e.,  
-  # #   `<think> Unstructured, free-form reasoning process exploring the problem in depth </think>`  
-  # #   `<answer> A clear and concise high-level summary of the solution and final answer </answer>`
-  max_new_tokens: 1000
-  temperature: 0.9                    # not used if using group_temperature
+  group_size: 16                      # for each sample we generate a group of answers
+  xml_format: false                   # check for R1 style XML format
+  max_new_tokens: 900
+  temperature: 1.0                    # not used if using group_temperature
   repetition_penalty: 1.0
   top_p: 0.95
   top_k: 0
@@ -67,9 +57,9 @@ grpo_config:
   # max_temperature: 1.0
   # explore_init_epsilon: 0.9           # exploration epsilon decay
   # explore_min_epsilon: 0.0
-  # explore_decay_steps: 50
-  # explore_start_steps: 3              # initial start steps to do random sampling
-  # explore_top_k: 20                  # Top K tokens to random sample during initial start steps
+  # explore_decay_steps: 100
+  # explore_start_steps: 5              # initial start steps to do random sampling
+  # explore_top_k: 30                   # Top K tokens to random sample during initial start steps
   # explore_max_replacements: 0         # max number of replacements to the same sequence
 
   # evaluation

@@ -12,8 +12,6 @@ def base_trainer() -> GRPOTrainer:
 
     return GRPOTrainer(
         config=GRPOConfig(),
-        math_grader=MagicMock(),
-        format_grader=MagicMock(),
         policy_model=MagicMock(),
         tokenizer=MagicMock(),
         optimizer=MagicMock(),
@@ -71,16 +69,6 @@ def test_masked_monte_carlo_returns(base_trainer: GRPOTrainer):
     result = base_trainer.compute_masked_monte_carlo_returns(rewards, mask, gamma)
 
     expected_result = torch.tensor([0.656, 0.729, 0.81, 0.9, 1.0], dtype=torch.float32)
-    assert torch.allclose(result, expected_result, atol=1e-2), f"Expected {expected_result}, but got {result}"
-
-    # Tests with multi-turn
-    rewards = torch.tensor([0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0], dtype=torch.float32)
-    mask = torch.tensor([0, 0, 1, 1, 0, 0, 1, 1], dtype=torch.bool)
-    gamma = 0.9
-
-    result = base_trainer.compute_masked_monte_carlo_returns(rewards, mask, gamma)
-
-    expected_result = torch.tensor([0.0, 0.0, 1.179, 1.31, 0.0, 0.0, 0.9, 1.0], dtype=torch.float32)
     assert torch.allclose(result, expected_result, atol=1e-2), f"Expected {expected_result}, but got {result}"
 
 

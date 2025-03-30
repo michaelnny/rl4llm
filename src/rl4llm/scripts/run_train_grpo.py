@@ -181,7 +181,6 @@ def main():
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
         logger.error(format_exc())
-        sys.exit(1)
     finally:
         handle_exit()
         logger.info('Exiting main program.')

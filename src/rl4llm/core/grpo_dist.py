@@ -106,9 +106,9 @@ class GRPOTrainer(BaseGRPOTrainer):
 
         self._metrics.reset()
 
-        # if self.iteration_count == 0:
-        #     # do an initial evaluation before apply any training
-        #     self._evaluation()
+        if self.iteration_count == 0:
+            # do an initial evaluation before apply any training
+            self._evaluation()
 
         with self._metrics.timer('step'):
             dist.barrier()
@@ -348,29 +348,3 @@ class GRPOTrainer(BaseGRPOTrainer):
         self.reference_model = self.reference_model.eval()
         self.ref_update_count += 1
         self._clean_up()
-
-    # def _create_deepspeed_inference_engine(
-    #     self,
-    #     model: PreTrainedModel,
-    # ) -> deepspeed.InferenceEngine:
-    #     """Creates DeepSpeed inference engine."""
-    #     if self.logger:
-    #         self.logger.info('Creating inference engine...')
-    #     tp_size = dist.get_world_size() if self.is_zero3_enabled() else 1
-    #     ds_infer_config = {
-    #         'tensor_parallel': {'tp_size': tp_size},
-    #         'dtype': self.torch_dtype,
-    #         'replace_with_kernel_inject': True,
-    #         # "use_triton": True,
-    #         'max_out_tokens': self.tokenizer.model_max_length,
-    #     }
-
-    #     inference_engine: deepspeed.InferenceEngine = None
-    #     inference_engine = deepspeed.init_inference(
-    #         model=model,
-    #         config=ds_infer_config,
-    #         # base_dir="/dev/shm",
-    #         checkpoint=None,
-    #     )
-
-    #     return inference_engine
