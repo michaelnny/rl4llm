@@ -1,176 +1,461 @@
-"""Base trainer with common functionality"""
-
+import datetime
 import gc
 import logging
 import os
-from abc import ABC
-from typing import Any, Dict, List, Optional, Union
+import random
+import time
+from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from copy import deepcopy
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import deepspeed
 import numpy as np
 import torch
-import yaml
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
+import torch.distributed as dist
+from deepspeed import DeepSpeedEngine
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader, Dataset
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from rl4llm.generations import CustomLLMGenerator
-from rl4llm.utils import DummyLogger, MetricsCollector, compute_grad_norm, save_yaml_config_file
+from rl4llm.core.data_types import RLConfig
+from rl4llm.core.dist_utils import DistributedManager
+from rl4llm.core.helper_utils import shard_dataset
+from rl4llm.core.log_tracker import LoggingManager
+from rl4llm.core.train_mix import TrainingMixin
 
-from .data_types import ClassifierConfig, GRPOConfig
 
-
-class BaseTrainer(ABC):
+class RLTrainer(ABC, TrainingMixin):
     """
-    Base trainer with common functionality.
+    Abstract base class for RL training with LLM in a distributed environment.
+    Provides the core infrastructure and defines the interface for algorithm-specific components.
     """
 
     def __init__(
         self,
-        config: Union[GRPOConfig, ClassifierConfig],
+        config: RLConfig,
         tokenizer: PreTrainedTokenizer,
-        device: torch.device,
-        torch_dtype: torch.dtype,
+        policy_engine: DeepSpeedEngine,
+        dist_manager: DistributedManager,
+        logger: LoggingManager,
         artifacts_path: str,
-        logger: Optional[logging.Logger] = None,
-        rank: Optional[int] = 0,
+        train_dataset: Dataset,
+        eval_dataset: Optional[Dataset] = None,
+        seed: Optional[int] = 175,
     ):
-        """
-        Initialize the BaseTrainer with training components.
-
-        Args:
-            config (Any): Configuration object for training parameters.
-            tokenizer (PreTrainedTokenizer): Tokenizer for encoding/decoding text.
-            device (torch.device): Device (CPU/GPU) for computation.
-            torch_dtype (torch.dtype): Data type for PyTorch tensors (e.g., float32).
-            artifacts_path (str): Directory path for saving logs and checkpoints.
-            logger (Optional[logging.Logger]): Logger for training events; defaults to DummyLogger if None.
-        """
-
         self.config = config
-        self.device = device
-        self.torch_dtype = torch_dtype
         self.tokenizer = tokenizer
+        self.policy_engine = policy_engine
+        self.dist_manager = dist_manager
+        self.logger = logger
         self.artifacts_path = artifacts_path
-        self.logger = logger or DummyLogger()  # Use dummy logger to make coding easier
+        self.train_dataset = train_dataset
+        self.eval_dataset = eval_dataset
+        self.seed = seed
 
-        self.rank = rank
-        self.is_master = rank == 0
+        self.policy_model: PreTrainedModel = self.policy_engine.module
+        self.device = self.dist_manager.device
+        self.torch_dtype = self.policy_model.dtype  # Infer from model
 
-        self._initialize()
+        # Setup directories
+        self.checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
+        if self.dist_manager.is_master:
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.dist_manager.barrier()  # Ensure dirs exist before proceeding
 
-    def _initialize(self):
-        """Initialize training components"""
-
-        # Setup special tokens
-        self.pad_token_id = self.tokenizer.pad_token_id
-        self.bos_token_id = self.tokenizer.bos_token_id
-        self.eos_token_id = self.tokenizer.eos_token_id
-
-        # Initialize metrics
-        self._metrics = MetricsCollector()
-
-        # Setup directories and logging
-        self._setup_directories()
-
-        if self.is_master:
-            # Initialize TensorBoard writer
-            self._writer = SummaryWriter(self._tb_log_dir)
-        else:
-            self._writer = None
-
-    def _setup_directories(self):
-        """Helper method to create necessary directories"""
-        self._tb_log_dir = os.path.join(self.artifacts_path, 'tb_logs')
-        self._checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
-
-        for path in [self._tb_log_dir, self._checkpoint_dir]:
-            os.makedirs(path, exist_ok=True)
-
-    def _create_custom_llm_generator(self, policy_model: PreTrainedModel) -> CustomLLMGenerator:
-        """Create a custom generator wrapped around the policy model, which supports group temperature and stochastic sampling"""
-        # Try replacing the end token with "Wait" for some samples
-        source_tokens = []
-        # Determine which tokens should be replaced based on format
-        if self.config.xml_format:
-            source_tokens.append(self.tokenizer.encode('</think>')[0])
-            source_tokens.append(self.tokenizer.encode(' </think>')[0])
-            source_tokens.append(self.tokenizer.encode(':</think>')[0])
-            source_tokens.append(self.tokenizer.encode('.</think>')[0])
-        else:
-            source_tokens.append(self.eos_token_id)
-
-        self.special_tokens = ['Wait']
-        target_tokens = [self.tokenizer.encode(f' {kwd}')[0] for kwd in self.special_tokens]
-
-        # we should only make the replacement for reasoning tokens
-        prevent_patterns = [
-            self.tokenizer.encode('</think>'),
-            self.tokenizer.encode(' </think>'),
-            self.tokenizer.encode('<answer>'),
-        ]
-
-        return CustomLLMGenerator(
-            model=policy_model,
-            tokenizer=self.tokenizer,
-            source_tokens=source_tokens,
-            target_tokens=target_tokens,
-            prevent_patterns=prevent_patterns,
+        # Reference model (optional, common in PPO-like methods)
+        self.reference_model: Optional[PreTrainedModel] = (
+            self._create_reference_model()
+            if self.config.kl_loss_coef > 0
+            else None
         )
 
-    def on_exit(self):
-        if self._writer:
-            self._writer.close()
+        # Internal state
+        self.iteration_count = 0
+        self.global_step = 0
+        self.policy_update_count = 0  # Tracks optimizer steps
+        self.ref_update_count = 0
+        self._metrics_buffer = (
+            {}
+        )  # Buffer for accumulating metrics across ranks/steps
 
-    def train(self, log_hyper_params: Optional[Dict] = None):
-        """Start to train the model.
+        # Shard datasets across ranks, so each rank only works on a small subset of the data
+        self.shared_train_dataset = shard_dataset(
+            train_dataset,
+            self.dist_manager.world_size,
+            self.dist_manager.global_rank,
+        )
+        self.shared_eval_dataset = shard_dataset(
+            eval_dataset,
+            self.dist_manager.world_size,
+            self.dist_manager.global_rank,
+        )
+        self.logger.info(
+            f"Rank {self.dist_manager.global_rank} has {len(self.shared_train_dataset)} training and {len(self.shared_eval_dataset)} testing samples after sharding"
+        )
+
+        # self.train_loader = DataLoader(
+        #     self.shared_train_dataset,
+        #     batch_size=1,
+        #     collate_fn=self._train_collate_fn,
+        #     shuffle=True,
+        # )
+
+        # we only sample one item at a time for training, so no need loader
+        self.train_iter = iter(self.shared_train_dataset)
+
+        if self.eval_dataset:
+            self.eval_loader = DataLoader(
+                self.shared_eval_dataset,
+                batch_size=self.config.eval_batch_size,
+                collate_fn=self._eval_collate_fn,
+                shuffle=False,  # Typically no shuffle for eval
+                drop_last=True,
+            )
+        else:
+            self.eval_loader = None
+            self.logger.info('Evaluation dataset not provided')
+
+        self._initialize_trainer()
+        self.logger.info('RL Trainer initialized.')
+
+    def _initialize_trainer(self):
+        pass
+
+    def get_next_train_data(self) -> Dict[str, Any]:
+        """Fetches the next sample for generation, handles epoch reset.
+
+        Returns:
+            Dict: A single item containing question and ground truth
+        """
+        try:
+            item = next(self.train_iter)
+            return item
+        except StopIteration:
+            # Epoch finished! Reshuffle and recreate the iterator
+            # random.shuffle(self.shared_train_dataset)
+            self.train_iter = iter(self.shared_train_dataset)
+            item = next(self.train_iter)  # Get the first item of the new epoch
+            return item
+
+    def _create_reference_model(self) -> Optional[PreTrainedModel]:
+        """Creates a non-trainable copy of the policy model."""
+        self.logger.info('Creating reference model...')
+        if self.is_zero3_enabled():
+            # TODO create the reference model engine
+            raise RuntimeError('Not supported for Zero-3')
+
+            # # Ensure model is fully available if using Zero-3
+            # with deepspeed.zero.GatheredParameters(self.policy_model.parameters()):
+            #     ref_model = deepcopy(self.policy_model)
+        else:
+            # For Zero-1/2, deepcopy might work directly, but state_dict is safer
+            ref_model = type(self.policy_model)(
+                self.policy_model.config
+            )  # Create new instance
+            ref_model.load_state_dict(self.policy_model.state_dict())
+        ref_model = ref_model.to(self.device).eval()
+        for param in ref_model.parameters():
+            param.requires_grad = False
+        self.logger.info('Reference model created.')
+        return ref_model
+
+    def is_zero3_enabled(self) -> bool:
+        """Returns true if Zero-3 is enabled"""
+        return self.policy_engine.zero_optimization_stage() == 3
+
+    def convert_llm_output_to_samples(
+        self,
+        question: List[str],
+        ground_truth: List[str],
+        prompt_length: List[int],
+        completion_length: List[int],
+        completion_text: List[str],
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        """Converts the LLM output to a list of samples for logging"""
+        # Determine the number of samples.
+        num_samples = len(question)
+
+        # Check that all required list inputs have the same length.
+        if not (
+            len(ground_truth) == num_samples
+            and len(prompt_length) == num_samples
+            and len(completion_length) == num_samples
+            and len(completion_text) == num_samples
+        ):
+            raise ValueError(
+                'All required input lists must have the same length.'
+            )
+
+        # Check kwargs: if any value is a list, it must match num_samples.
+        for extra_key, extra_val in kwargs.items():
+            if not isinstance(extra_val, list) or len(extra_val) != num_samples:
+                raise ValueError(
+                    f"Extra input list for key '{extra_key}' must have length {num_samples}."
+                )
+
+        samples = []
+        for i in range(num_samples):
+            # Build the sample dictionary.
+            utc_ts = datetime.datetime.now(datetime.timezone.utc).strftime(
+                '%Y-%m-%dT%H:%M:%SZ'
+            )
+            sample = {
+                'utc_timestamp': utc_ts,
+                'question': question[i],
+                'ground_truth': ground_truth[i],
+                'prompt_length': prompt_length[i],
+                'completion_length': completion_length[i],
+                'completion_text': completion_text[i],
+            }
+
+            # Process any additional keyword arguments, like rewards etc
+            for extra_key, extra_val in kwargs.items():
+                if isinstance(extra_val, list):
+                    sample[extra_key] = extra_val[i]
+
+            samples.append(sample)
+
+        return samples
+
+    def log_batch_samples(
+        self,
+        samples: List[Dict[str, Any]],
+        step: int,
+        is_training: bool,
+    ) -> None:
+        """Log batch samples to Tensorboard and external files"""
+
+        metrics_keys = ['prompt_length', 'completion_length']
+        phase = 'training' if is_training else 'evaluation'
+        for data in samples:
+            # save to external files
+            self.logger.log_sample(phase, data, step)
+
+            # log metrics to tensorboard
+            for k, v in data.items():
+                if (
+                    k in metrics_keys
+                    or 'reward' in k
+                    and isinstance(v, (float, int))
+                ):
+                    self.logger.log_scalar(k, v, step)
+
+    @abstractmethod
+    def generate_experience(self) -> List[Any]:
+        """
+        Generates experience (e.g., rollouts, trajectories) using the current policy.
+        This is algorithm-specific (e.g., PPO needs states, actions, logprobs, rewards, values).
+        Should handle interaction with the environment/LLM feedback.
+        Returns:
+            List[Any]: A list of collected experience elements (e.g., trajectories)
+                       specific to the current rank.
+        """
+        pass
+
+    @abstractmethod
+    def compute_loss(
+        self, experience_batch: Any, **kwargs
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Computes the loss for a batch of experience.
+        Args:
+            experience_batch: A batch collated from the generated experience.
+        Returns:
+            Tuple[torch.Tensor, Dict[str, float]]: The computed loss tensor and a dictionary
+                                                   of metrics for logging.
+        """
+        pass
+
+    @abstractmethod
+    def build_train_batch(self, experience: List[Any]) -> DataLoader:
+        """
+        Processes the generated experience and creates a DataLoader for training updates.
+        Args:
+            experience: The list of experience elements generated by `generate_experience`.
+        Returns:
+            DataLoader: DataLoader yielding batches ready for `compute_loss`.
+        """
+        pass
+
+    @abstractmethod
+    @torch.inference_mode()
+    def evaluate_step(self) -> Dict[str, Any]:
+        """
+        Performs evaluation using the current policy model.
+        Returns:
+            Dict[str, Any]: A dictionary containing evaluation metrics.
+        """
+        pass
+
+    @abstractmethod
+    def train_step(self, train_dataloader: DataLoader) -> Dict[str, Any]:
+        """
+        Performs the policy update phase.
+        Returns:
+            Dict[str, Any]: A dictionary containing evaluation metrics.
+        """
+        pass
+
+    @abstractmethod
+    def _train_collate_fn(
+        self, batch: List[Dict[str, Any]], **kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Collate function for training loader
 
         Args:
-            log_hyper_params (Dict[str, Any], optional): Hyperparameters to log.
+            batch (List[Dict[str, Any]]): Current batch samples.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing evaluation data for current batch.
         """
+        pass
 
-        # log the params we use for this training run
-        if log_hyper_params and self.is_master:
-            save_yaml_config_file(log_hyper_params, os.path.join(self.artifacts_path, 'config.yaml'))
-            self._log_hyper_params_to_tensorboard(log_hyper_params)
-
-        self._train()
-
-    def _train(self):
-        """Train the model"""
-        raise NotImplementedError
-
-    def _evaluate(self):
-        """Evaluate the model"""
-        raise NotImplementedError
-
-    def get_grad_norm(self, model: PreTrainedModel) -> torch.Tensor:
-        """Compute gradient norm for the given model"""
-        return compute_grad_norm(model)
-
-    def _log_hyper_params_to_tensorboard(self, config: Dict[str, Any]) -> None:
-        """Log hyperparameters to TensorBoard.
+    @abstractmethod
+    def _eval_collate_fn(
+        self, batch: List[Dict[str, Any]], **kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Collate function for evaluation loader
 
         Args:
-            config (Dict[str, Any]): Hyperparameters dictionary.
+            batch (List[Dict[str, Any]]): Current batch samples.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing evaluation data for current batch.
         """
-        if self._writer and config:
-            try:
-                config_str = yaml.dump(config, sort_keys=False, indent=4)
-                self._writer.add_text('config/parameters', f"```yaml\n{config_str}\n```", 0)
-            except Exception as e:
-                self.logger.warning(f"Failed to log hyperparameters to TensorBoard: {e}")
+        pass
 
-    def _log_stats_to_tensorboard(self, stats: Dict[str, Any], step: int) -> None:
-        """Log stats to tensorboard"""
-        if self._writer:
-            try:
-                for name, value in stats.items():
-                    if isinstance(value, (int, float)):
-                        self._writer.add_scalar(f"{name}", value, step)
-            except Exception as e:
-                self.logger.warning(f"Failed to log stats to TensorBoard: {e}")
-
-    def _clean_up(self) -> None:
-        """Clean up GPU cache"""
+    def _prepare_for_generation(self):
+        """Sets models to evaluation mode for experience generation."""
+        self.policy_engine.eval()
+        if self.reference_model:
+            self.reference_model = self.reference_model.to(self.device)
+            self.reference_model.eval()  # Already in eval, but good practice
+        # Potentially move reference model to CPU if memory constrained and needed later
+        # self.reference_model = self.reference_model.to('cpu')
         torch.cuda.empty_cache()
-        gc.collect()
+
+    def _prepare_for_training(self):
+        """Sets models back to training mode."""
+        self.policy_engine.train()
+        # Move reference model back to GPU if moved earlier and needed
+        if self.reference_model and self.reference_model.device != self.device:
+            self.reference_model = self.reference_model.to('cpu')
+        torch.cuda.empty_cache()
+
+    def save_checkpoint(self, step: int):
+        """Saves model checkpoint using DeepSpeed."""
+        tag = f"iteration_{step}"
+        save_path = os.path.join(self.checkpoint_dir, tag)
+        self.logger.info(f"Saving checkpoint to {save_path}...")
+        # DeepSpeed handles distributed saving internally
+        self.policy_engine.save_checkpoint(save_path)
+        self.dist_manager.barrier()
+        self.logger.info('Checkpoint saved.')
+
+    def sync_reference_model(self):
+        """Updates the reference model weights with the current policy model weights."""
+        if not self.reference_model:
+            return
+
+        self.logger.info('Syncing reference model...')
+        # Ensure parameters are gathered if using Zero-3 before state_dict access
+        if self.is_zero3_enabled():
+            # TODO recreate the reference model engine
+            raise RuntimeError('Not supported for Zero-3')
+            # with deepspeed.zero.GatheredParameters(self.policy_model.parameters(), modifier_rank=0):
+            #    if self.dist_manager.is_master:
+            #        state_dict = self.policy_model.state_dict()
+            # state_dict = self.dist_manager.broadcast_object(state_dict, src=0) # If needed
+
+        else:
+            # For Zero-1/2, state_dict() should work directly
+            state_dict = self.policy_model.state_dict()
+
+            # Load state dict into reference model (all ranks have the state_dict now)
+            self.reference_model.load_state_dict(state_dict)
+            self.ref_update_count += 1
+            self.logger.info('Reference model synced.')
+
+        torch.cuda.empty_cache()  # Clean up memory
+        self.dist_manager.barrier()
+
+    def train(self):
+        """Main training loop."""
+        self.logger.info('Starting training...')
+        if self.dist_manager.is_master:
+            self.logger.log_hyperparams(vars(self.config))  # Log config
+
+        # Initial evaluation before training starts
+        if self.config.eval_interval > 0 and self.eval_loader:
+            self.logger.info('Running initial evaluation...')
+            with self.logger.eval_scope():
+                with self.logger.timer('evaluate_step'):
+                    self.evaluate_step()
+            self.dist_manager.barrier()
+
+        for t in range(self.config.max_steps):
+            self.global_step = t
+
+            with self.logger.train_scope():
+                # 1. Generation Phase
+                with self.logger.timer('generation'):
+                    self._prepare_for_generation()
+                    # generate_experience returns rank-local experience
+                    local_experience = self.generate_experience()
+
+                self.dist_manager.barrier()
+
+                # 2. Learning Phase
+                with self.logger.timer('train'):
+                    # build_train_batch processes local_experience and returns a DataLoader
+                    train_dataloader = self.build_train_batch(local_experience)
+                    self.train_step(train_dataloader)
+                self.dist_manager.barrier()
+
+            # 3. Post-Iteration Operations
+            # Sync reference model
+            if (
+                self.reference_model
+                and self.config.sync_reference_interval > 0
+                and (t + 1) % self.config.sync_reference_interval == 0
+            ):
+                with self.logger.timer('sync_reference_model'):
+                    self.sync_reference_model()
+
+            # Checkpointing
+            if (
+                self.config.checkpoint_interval > 0
+                and (t + 1) % self.config.checkpoint_interval == 0
+            ):
+                with self.logger.timer('checkpoint'):
+                    self.save_checkpoint(t + 1)
+
+            # Evaluation
+            if (
+                self.config.eval_interval > 0
+                and self.eval_loader
+                and (t + 1) % self.config.eval_interval == 0
+            ):
+                with self.logger.eval_scope():
+                    with self.logger.timer('evaluate'):
+                        self.evaluate_step()
+
+            self.logger.aggregate_and_log(self.global_step)
+
+            # Clean up memory
+            del local_experience
+            del train_dataloader
+            torch.cuda.empty_cache()
+
+        self.logger.info('Training finished.')
+        # Final checkpoint save
+        self.save_checkpoint(self.config.max_steps)
+        self.logger.close()
+
+    def on_exit(self):
+        """Handles exits like kill of process"""
+        self.logger.close()

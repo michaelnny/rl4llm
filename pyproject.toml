@@ -3,8 +3,8 @@ name = "rl4llm"
 version = "0.1.0"
 description = "RL for LLM"
 readme = "README.md"
-authors = [{ name = "Michael Hu", email = "email@example.com" }]
-requires-python = ">=3.10"
+authors = [{ name = "Michael Hu", email = "michaelnny@gmail.com" }]
+requires-python = ">=3.11"
 dependencies = [
     "openai==1.59.*",
     "datasets==3.2.0",
@@ -44,17 +44,17 @@ multi_line_output = 3
 include_trailing_comma = true
 force_grid_wrap = 0
 use_parentheses = true
-line_length = 128
+line_length = 80
 
 [tool.black]
-line-length = 128
+line-length = 80
 target-version = ["py310"]
 skip-string-normalization = true
 
 [tool.flake8]
 ignore = ["E203", "E722", "E304", "E402", "E501", "F401", "F403", "F811", "F841", "W503"]
-max-line-length = 128
-max-complexity = 35
+max-line-length = 80
+max-complexity = 30
 select = ["B", "C", "E", "F", "W"]
 exclude = [".git", "__pycache__", "notebooks/*", "docs/*", "build/*", "dist/*"]
 

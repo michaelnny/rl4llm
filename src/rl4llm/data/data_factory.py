@@ -6,9 +6,10 @@ from typing import Dict, List, Optional, Tuple
 
 from datasets import Dataset, concatenate_datasets, load_dataset
 
-from rl4llm.utils import is_texts_similar, load_from_jsonl_file, save_to_jsonl_file
+from rl4llm.core.helper_utils import setup_logger
+from rl4llm.utils import load_from_jsonl_file, save_to_jsonl_file
 
-logger = logging.getLogger()
+logger = setup_logger()
 
 
 def fix_gsm_incorrect_answer(x: Dict) -> Dict:
@@ -148,8 +149,12 @@ def fix_gsm_incorrect_answer(x: Dict) -> Dict:
             break
 
     for d in improvements:
-        if is_texts_similar(d['old_question'], x['question'], threshold=threshold):
-            logger.debug(f"Improve question and set correct answer to {d['ground_truth']}")
+        if is_texts_similar(
+            d['old_question'], x['question'], threshold=threshold
+        ):
+            logger.debug(
+                f"Improve question and set correct answer to {d['ground_truth']}"
+            )
             x['question'] = d['improved_question']
             x['ground_truth'] = d['ground_truth']
             break
@@ -190,7 +195,9 @@ def load_gsm8k_dataset(
     columns_to_keep = ['question', 'ground_truth', 'task_type']
 
     # remove any other columns that were not kept
-    ds = ds.remove_columns([col for col in ds['train'].column_names if col not in columns_to_keep])
+    ds = ds.remove_columns(
+        [col for col in ds['train'].column_names if col not in columns_to_keep]
+    )
 
     train_ds = ds['train']
     test_ds = ds['test']
@@ -211,8 +218,12 @@ def load_math_dataset(
     train_input_path = os.path.join(source_dir, 'train.jsonl')
     test_input_path = os.path.join(source_dir, 'test.jsonl')
 
-    if not os.path.exists(train_input_path) or not os.path.exists(test_input_path):
-        raise FileNotFoundError(f"Dataset files not exists at {train_input_path} and {test_input_path}")
+    if not os.path.exists(train_input_path) or not os.path.exists(
+        test_input_path
+    ):
+        raise FileNotFoundError(
+            f"Dataset files not exists at {train_input_path} and {test_input_path}"
+        )
 
     # Create directory if it doesn't exist
     os.makedirs(save_dir, exist_ok=True)
@@ -251,11 +262,21 @@ def load_math_dataset(
     test_ds = test_ds.map(extract_math_ground_truth)
 
     # Select only the columns you want in the final dataset
-    columns_to_keep = ['question', 'ground_truth', 'task_type', 'subject', 'level']
+    columns_to_keep = [
+        'question',
+        'ground_truth',
+        'task_type',
+        'subject',
+        'level',
+    ]
 
     # remove any other columns that were not kept
-    train_ds = train_ds.remove_columns([col for col in train_ds.column_names if col not in columns_to_keep])
-    test_ds = test_ds.remove_columns([col for col in test_ds.column_names if col not in columns_to_keep])
+    train_ds = train_ds.remove_columns(
+        [col for col in train_ds.column_names if col not in columns_to_keep]
+    )
+    test_ds = test_ds.remove_columns(
+        [col for col in test_ds.column_names if col not in columns_to_keep]
+    )
 
     # Save processed datasets
     save_dataset_split(train_ds, train_out_path)
@@ -311,7 +332,9 @@ def load_math_dataset(
 #     return train_ds, test_ds
 
 
-def load_multiple_datasets(task_types: List[str], shuffle_seed: int = 42) -> Tuple[Dataset, Dataset]:
+def load_multiple_datasets(
+    task_types: List[str], shuffle_seed: int = 42
+) -> Tuple[Dataset, Dataset]:
     """Loads and merges multiple datasets based on the list of tasks."""
     train_datasets = []
     test_datasets = []
@@ -336,7 +359,9 @@ def load_multiple_datasets(task_types: List[str], shuffle_seed: int = 42) -> Tup
             raise ValueError(f"Invalid task type: {task}")
 
     if not train_datasets or not test_datasets:
-        raise ValueError('No datasets were loaded. Please check the task_types provided.')
+        raise ValueError(
+            'No datasets were loaded. Please check the task_types provided.'
+        )
 
     combined_train_ds = concatenate_datasets(train_datasets)
     combined_test_ds = concatenate_datasets(test_datasets)
@@ -356,7 +381,9 @@ def save_dataset_split(dataset_split, filepath):
     save_to_jsonl_file(dataset_split, filepath)
 
 
-def load_processed_local_dataset(train_out_path: str, test_out_path: str) -> Tuple[Dataset, Dataset]:
+def load_processed_local_dataset(
+    train_out_path: str, test_out_path: str
+) -> Tuple[Dataset, Dataset]:
     """Load the processed dataset from local JSONL files."""
     logger.info(f"Loading train dataset from local path: {train_out_path}")
     logger.info(f"Loading test dataset from local path: {test_out_path}")
@@ -395,185 +422,24 @@ def check_skip_math_sample(sample: Dict) -> bool:
     return True
 
 
-def _validate_config(config: Dict) -> None:
-    """
-    Validate a single dataset configuration.
+def is_texts_similar(text1: str, text2: str, threshold: float = 0.9) -> bool:
+    """Checks if two texts is similar
 
     Args:
-        config: Dictionary containing dataset configuration
-
-    Raises:
-        ValueError: If any required fields are missing or invalid
-    """
-    required_fields = ['name', 'path']
-    missing_fields = [field for field in required_fields if field not in config]
-    if missing_fields:
-        raise ValueError(f"Missing required fields in config: {missing_fields}")
-
-    if not isinstance(config['name'], str):
-        raise ValueError(f"'name' must be a string, got {type(config['name'])}")
-
-    if not config['name']:
-        raise ValueError("'name' cannot be empty")
-
-    # Validate optional fields if present
-    if 'skip_correct_sample' in config and not isinstance(config['skip_correct_sample'], bool):
-        raise ValueError(f"'skip_correct_sample' must be a boolean, got {type(config['skip_correct_sample'])}")
-
-    if 'sample_size' in config:
-        if not isinstance(config['sample_size'], int):
-            raise ValueError(f"'sample_size' must be an integer, got {type(config['sample_size'])}")
-        if config['sample_size'] <= 0:
-            raise ValueError(f"'sample_size' must be positive, got {config['sample_size']}")
-
-
-def load_pre_sft_datasets(
-    configs: List[Dict],
-    shuffle_seed: Optional[int] = 42,
-    required_fields: List[str] = ['question', 'ground_truth'],
-    show_progress: bool = True,
-) -> Dataset:
-    """
-    Load and combine multiple JSONL datasets with filtering capabilities,
-    prioritizing incorrect samples.
-
-    This is for collecting reasoning samples for SFT.
-
-    Args:
-        configs: List of dictionaries containing dataset configurations.
-               Each dict should have:
-               - 'name': (required) name of the dataset
-               - 'path': (required) path to the JSONL file
-               - 'skip_correct_sample': (optional) whether to exclude correct samples.
-               - 'sample_size': (optional) number of samples to select.
-        shuffle_seed: Random seed for shuffling. None to skip shuffling.
-        required_fields: List of required fields in each data sample.
-        show_progress: Whether to show progress bar during loading.
+        text1 (str): The left-side text to check.
+        text2 (str): The right-side text to check.
+        threshold (float): Similarity threshold, default 0.95.
 
     Returns:
-        Combined Dataset object.
-
-    Raises:
-        FileNotFoundError: If any input file is not found.
-        KeyError: If required fields are missing in data.
-        ValueError: If configs list is empty or invalid.
+        Bool: indicates if the two texts are similar with in the specific threshold.
     """
-    if not configs:
-        raise ValueError('Configs list cannot be empty')
+    from difflib import SequenceMatcher
 
-    if shuffle_seed is not None:
-        random.seed(shuffle_seed)
-
-    for config in configs:
-        _validate_config(config)
-
-    invalid_paths = [cfg['path'] for cfg in configs if not os.path.exists(cfg['path'])]
-    if invalid_paths:
-        raise FileNotFoundError(f"Files not found: {invalid_paths}")
-
-    all_datasets = []
-    total_samples = 0
-
-    for config in configs:
-        name = config['name'].strip().upper()
-        path = config['path'].strip()
-        skip_correct_sample = config.get('skip_correct_sample', False)
-        sample_size = config.get('sample_size')
-        exclude_paths = config.get('exclude_sample_paths', [])
-
-        samples_to_exclude = set()
-        for exclude_path in exclude_paths:
-            try:
-                samples_to_exclude.update(d['question'].strip() for d in load_from_jsonl_file(exclude_path) if 'question' in d)
-            except Exception as e:
-                logger.warning(f"Failed to load exclude samples from {exclude_path}: {e}")
-
-        incorrect_items = []
-        correct_items = []
-
-        skipped_count = 0
-
-        loaded_items = load_from_jsonl_file(path)
-        for d in loaded_items:
-            if any(field not in d for field in required_fields):
-                logger.warning(f"Skipping sample due to missing required fields in {path}")
-                continue
-
-            if 'question' in d and d['question'].strip() in samples_to_exclude:
-                skipped_count += 1
-                continue
-
-            if name == 'MATH':
-                # skip bad samples
-                if not check_skip_math_sample(d):
-                    continue
-
-            sample = {
-                'task_type': name,
-                'question': d['question'].strip(),
-                'ground_truth': d['ground_truth'],
-                'dataset_source': path,
-            }
-
-            if ('is_correct' in d and d['is_correct']) or ('graded_reward' in d and d['graded_reward'] >= 1.0):
-                correct_items.append(sample)
-            else:
-                incorrect_items.append(sample)
-
-        if skipped_count > 0:
-            logger.info(f"Skipped {skipped_count} samples for {name}")
-
-        selected_items = []
-
-        if not sample_size or sample_size <= 0:
-            # Case 1: No sampling needed - take all samples based on skip_correct_sample
-            if skip_correct_sample:
-                logger.info(f"Using all {len(incorrect_items)} incorrect samples for {name}")
-                selected_items = incorrect_items
-            else:
-                total = len(incorrect_items) + len(correct_items)
-                logger.info(
-                    f"Using all {total} samples ({len(incorrect_items)} incorrect, {len(correct_items)} correct) for {name}"
-                )
-                selected_items = incorrect_items + correct_items
-        elif skip_correct_sample:
-            # Case 2: Only using incorrect samples
-            sample_count = min(sample_size, len(incorrect_items))
-            logger.info(f"Selecting {sample_count} from {len(incorrect_items)} incorrect samples for {name}")
-            selected_items = random.sample(incorrect_items, sample_count)
-        else:
-            # Case 3: Using both types, with priority to incorrect samples
-            # First, take incorrect samples
-            incorrect_count = min(sample_size, len(incorrect_items))
-            logger.info(f"Selecting {incorrect_count} from {len(incorrect_items)} incorrect samples for {name}")
-            selected_items = random.sample(incorrect_items, incorrect_count)
-
-            # Then fill remaining capacity with correct samples if needed
-            remaining = sample_size - incorrect_count
-            if remaining > 0:
-                remain_correct_count = min(remaining, len(correct_items))
-                if remain_correct_count > 0:
-                    logger.info(f"Adding {remain_correct_count} from {len(correct_items)} correct samples for {name}")
-                    selected_items.extend(random.sample(correct_items, remain_correct_count))
-
-        if selected_items:
-            logger.info(f"Loaded {len(selected_items)} items for {name}")
-            dataset = Dataset.from_list(selected_items)
-            all_datasets.append(dataset)
-            total_samples += len(selected_items)
-        else:
-            logger.warning(f"No valid samples found in {path}")
-
-    if not all_datasets:
-        raise ValueError('No valid datasets were loaded')
-
-    combined_ds = concatenate_datasets(all_datasets)
-
-    if shuffle_seed is not None:
-        combined_ds = combined_ds.shuffle(seed=shuffle_seed)
-
-    logger.info(f"Successfully loaded {total_samples} samples from {len(all_datasets)} datasets")
-    return combined_ds
+    assert threshold > 0
+    assert text1
+    assert text2
+    score = SequenceMatcher(None, text1, text2).ratio()
+    return score >= threshold
 
 
 if __name__ == '__main__':

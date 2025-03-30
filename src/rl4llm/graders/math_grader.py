@@ -11,8 +11,7 @@ from rl4llm.graders.math_utils import (
     extract_math_answer_from_last_boxed,
     normalize_math_answer,
 )
-
-from .base_grader import BaseGrader
+from rl4llm.graders.text_utils import check_repetition
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,11 @@ def try_compare_fractions_equal(input_str1: str, input_str2: str) -> bool:
     def fraction_to_float(frac_str):
         try:
             # Normalize fractions (both \frac, \dfrac, \tfrac) including negatives and decimals
-            frac_str = re.sub(r'\\(?:frac|dfrac|tfrac){([+-]?\d*\.?\d+)}{([+-]?\d*\.?\d+)}', r'\1/\2', frac_str)
+            frac_str = re.sub(
+                r'\\(?:frac|dfrac|tfrac){([+-]?\d*\.?\d+)}{([+-]?\d*\.?\d+)}',
+                r'\1/\2',
+                frac_str,
+            )
             return float(frac_str)
         except ValueError:
             pass
@@ -174,7 +177,11 @@ def are_expressions_equal(expr1: str, expr2: str) -> bool:
     return False
 
 
-def check_expressions_equivalent(expression1: Optional[str], expression2: Optional[str], verbose: bool = False) -> bool:
+def check_expressions_equivalent(
+    expression1: Optional[str],
+    expression2: Optional[str],
+    verbose: bool = False,
+) -> bool:
     """
     Checks if two mathematical expressions are equivalent after applying a series of normalization steps.
 
@@ -196,9 +203,9 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
         normalized_expression1 = normalize_math_answer(expression1)
         normalized_expression2 = normalize_math_answer(expression2)
         logger.debug(normalized_expression1, normalized_expression2)
-        return normalized_expression1 == normalized_expression2 or float(normalized_expression1) == float(
-            normalized_expression2
-        )
+        return normalized_expression1 == normalized_expression2 or float(
+            normalized_expression1
+        ) == float(normalized_expression2)
     except Exception:
         pass
 
@@ -226,19 +233,25 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
     return expression1 == expression2
 
 
-def math_problem_grader(
-    full_answer: str,
-    ground_truth: str,
-    last_n: Optional[int] = 1,
-) -> float:
+def math_problem_grader(full_answer: str, **kwargs) -> float:
     """
     Enhanced grader that handles multiple answer formats and extraction methods.
     """
+
+    ground_truth = kwargs.get('ground_truth')
+    last_n = kwargs.get('last_n', 1)
+
     if full_answer is None or ground_truth is None:
+        logger.warning(
+            f"Missing full answer or ground_truth. {full_answer} {ground_truth}"
+        )
         return 0.0
 
     logger.debug(f"Processing answer: {full_answer}")
     logger.debug(f"Ground truth: {ground_truth}")
+
+    if check_repetition(full_answer):
+        return 0.0
 
     # 1. Try boxed answers
     boxed_answer = extract_math_answer_from_last_boxed(full_answer)
@@ -258,48 +271,3 @@ def math_problem_grader(
                     return 1.0
 
     return 0.0
-
-
-import torch
-
-
-class MathGrader(BaseGrader):
-
-    def __init__(self, model_args: dict, torch_dtype: torch.dtype, device: torch.device, **kwargs) -> float:
-        super().__init__(model_args, torch_dtype, device, **kwargs)
-
-    def _grade_single(self, answer: str, ground_truth: str, last_n: int) -> float:
-        """Grades a single answer against the ground truth."""
-        if self._check_repetition(answer):
-            return 0.0
-
-        return math_problem_grader(answer, ground_truth, last_n)
-
-    def __call__(self, answer, ground_truth, **kwargs):
-        """Checks math problem outcome(s) with ground truth(s), returns 1 or -1 for each.
-
-        Args:
-            answer (str or list[str]): The answer(s) to grade.
-            ground_truth (str or list[str]): The ground truth(s) to compare against.
-            **kwargs: Additional arguments, including 'last_n' (default is 1).
-
-        Returns:
-            float or list[float]: The grade(s) for the answer(s), either 1.0 or -1.0.
-        """
-        last_n = kwargs.get('last_n', 1)
-        if isinstance(answer, str):
-            is_coherent = self._check_coherent([answer])
-            if is_coherent[0]:
-                return self._grade_single(answer, ground_truth, last_n)
-            else:
-                return 0.0
-
-        if isinstance(answer, list):
-            is_coherent = self._check_coherent(answer)
-            return [
-                self._grade_single(pred, target, last_n) if valid else 0.0
-                for valid, pred, target in zip(is_coherent, answer, ground_truth)
-            ]
-
-        else:
-            raise ValueError('answer must be a string or a list of strings')

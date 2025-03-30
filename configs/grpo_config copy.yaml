@@ -1,0 +1,85 @@
+# RL GRPO config
+job:
+  seed: 117
+  artifacts_path: "./runs/test_grpo_qwen2.5_1.5b_gsm8k"
+  datasets: # List of math datasets to load
+    - "gsm"
+    # - "math"
+  # max_train_samples: 4096         # for a quick run
+  max_test_samples: 1024        
+
+model:
+  pretrained_model: "Qwen/Qwen2.5-1.5B"
+  load_in_4bit: false
+  gradient_checkpointing: true
+  flash_attention: true
+  model_max_length: 4000
+
+# # for outcome coherent detection
+# coherent_model:
+#   pretrained_model: "allenai/longformer-base-4096"
+#   load_in_4bit: false
+#   gradient_checkpointing: true
+#   model_max_length: 4000
+#   checkpoint_path: "models/coherent_classification_longformer"
+
+grpo_config:
+  max_steps: 2000
+  rollout_size: 512
+  num_updates: 1
+  batch_size: 8
+  gradient_accumulate_steps: 16
+  # dynamic_discount: false            # compute dynamic discount based on completion length
+  # min_gamma: 0.999                  # for compute dynamic discount
+  # max_gamma: 0.9997                 # for compute dynamic discount
+  # max_completion_length: 800       # for compute dynamic discount
+  gamma: 1.0                          # fixed discount
+  clip_eps: 0.2                       # PPO policy clip parameter
+  normalize_group_rewards: true       
+  normalize_advantages: true
+  kl_loss_coef: 0.0
+  entropy_loss_coef: 0.0
+  clip_grad_norm: 0.0
+  sync_reference_interval: 0          # every N iteration
+
+  # for sample generation
+  max_prompt_length: 512              # skip sample question that's too long
+  group_size: 16                      # for each sample we generate a group of answers
+  xml_format: false                   # check for R1 style XML format
+  max_new_tokens: 900
+  temperature: 1.0                    # not used if using group_temperature
+  repetition_penalty: 1.0
+  top_p: 0.95
+  top_k: 0
+  
+  # group_temperature: true             # group temperature where we balance exploration and exploitation
+  # min_temperature: 0.0
+  # max_temperature: 1.0
+  # explore_init_epsilon: 0.9           # exploration epsilon decay
+  # explore_min_epsilon: 0.0
+  # explore_decay_steps: 100
+  # explore_start_steps: 5              # initial start steps to do random sampling
+  # explore_top_k: 30                   # Top K tokens to random sample during initial start steps
+  # explore_max_replacements: 0         # max number of replacements to the same sequence
+
+  # evaluation
+  eval_batch_size: 64
+  eval_interval: 50
+
+  # others
+  checkpoint_interval: 100            # every N iteration
+
+optimizer:
+  type: AdamW8bit
+  params:
+    lr: 1.0e-6
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 0.0
+
+# scheduler:
+#   type: "OneCycleLR"
+#   params:
+#     warmup_fraction: 0.02
+#     initial_lr_fraction: 0.1
+#     final_lr_fraction: 0.5
