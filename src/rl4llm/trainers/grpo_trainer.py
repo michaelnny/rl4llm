@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_trainer import RLConfig, RLTrainer
-from rl4llm.core.dist_utils import DistributedManager
+from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.log_tracker import LoggingManager
 from rl4llm.graders.math_grader import math_problem_grader
 

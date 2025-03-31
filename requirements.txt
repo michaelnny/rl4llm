@@ -26,9 +26,11 @@ openai==1.59.9
 pandas==2.2.*
 PyYAML==6.0.*
 tensorboard==2.18.*
+wandb==0.19.*
 
 
 # tests
 pytest==8.3.4
 pytest-cov==6.0.0
+pytest-mock==3.14.0
 coverage==7.6.12

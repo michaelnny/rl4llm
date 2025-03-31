@@ -19,10 +19,10 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.data_types import RLConfig
-from rl4llm.core.dist_utils import DistributedManager
-from rl4llm.core.helper_utils import shard_dataset
-from rl4llm.core.log_tracker import LoggingManager
-from rl4llm.core.train_mix import TrainingMixin
+from rl4llm.core.distributed import DistributedManager
+from rl4llm.utils.dataset_utils import shard_dataset
+from rl4llm.logging import LoggingManager
+from rl4llm.core.training_mixin import TrainingMixin
 
 
 class RLTrainer(ABC, TrainingMixin):
@@ -133,7 +133,7 @@ class RLTrainer(ABC, TrainingMixin):
             return item
         except StopIteration:
             # Epoch finished! Reshuffle and recreate the iterator
-            # random.shuffle(self.shared_train_dataset)
+            random.shuffle(self.shared_train_dataset)
             self.train_iter = iter(self.shared_train_dataset)
             item = next(self.train_iter)  # Get the first item of the new epoch
             return item
@@ -142,7 +142,7 @@ class RLTrainer(ABC, TrainingMixin):
         """Creates a non-trainable copy of the policy model."""
         self.logger.info('Creating reference model...')
         if self.is_zero3_enabled():
-            # TODO create the reference model engine
+            # TODO maybe create reference model with deepspeed??
             raise RuntimeError('Not supported for Zero-3')
 
             # # Ensure model is fully available if using Zero-3
@@ -387,13 +387,13 @@ class RLTrainer(ABC, TrainingMixin):
         """Main training loop."""
         self.logger.info('Starting training...')
         if self.dist_manager.is_master:
-            self.logger.log_hyperparams(vars(self.config))  # Log config
+            self.logger.log_hyperparams(self.config.model_dump())  # Log config
 
         # Initial evaluation before training starts
         if self.config.eval_interval > 0 and self.eval_loader:
             self.logger.info('Running initial evaluation...')
             with self.logger.eval_scope():
-                with self.logger.timer('evaluate_step'):
+                with self.logger.timer('evaluate'):
                     self.evaluate_step()
             self.dist_manager.barrier()
 
