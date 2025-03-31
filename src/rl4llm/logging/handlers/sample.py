@@ -238,8 +238,6 @@ class SampleHandler(BaseHandler):
         phases: List[str],
         sample_file_format: str = 'parquet',
         sample_buffer_size: int = 100,
-        log_sample_interval: int = 50,
-        max_backend_samples: int = 10,
         logger: Optional[logging.Logger] = None,
     ):
         super().__init__(logger)  # Initialize base class
@@ -249,8 +247,6 @@ class SampleHandler(BaseHandler):
         self.is_master = dist_manager.is_master
 
         self._log_phases = phases + [self.GENERAL_PHASE]
-        self._log_sample_interval = log_sample_interval
-        self._max_backend_samples = max_backend_samples
 
         self._file_loggers: Dict[str, SampleFileLogger] = {}
         # Ensure base log_dir exists before creating phase subdirs
@@ -285,9 +281,7 @@ class SampleHandler(BaseHandler):
                 raise RuntimeError(f"Failed setup for phase {phase}") from e
 
         self._samples_for_backend_buffer: List[Tuple[str, Dict[str, Any]]] = []
-        self._local_sample_log_counts: Dict[str, int] = defaultdict(int)
 
-    # ... (Keep log_sample, collect_backend_samples, clear_backend_buffer methods) ...
     def log_sample(
         self,
         tag: str,
@@ -311,71 +305,6 @@ class SampleHandler(BaseHandler):
                 self._logger.error(
                     f"Failed log sample file tag='{tag}' phase='{current_phase}': {e}"
                 )
-
-        if self._log_sample_interval > 0:
-            self._local_sample_log_counts[current_phase] += 1
-            if (
-                self._local_sample_log_counts[current_phase]
-                % self._log_sample_interval
-                == 0
-            ):
-                backend_tag = f"{current_phase}/{tag}"
-                self._samples_for_backend_buffer.append(
-                    (backend_tag, {'step': step, **sample_data})
-                )
-                self._logger.debug(
-                    f"Buffered sample for backend [{backend_tag}]"
-                )
-
-    def collect_backend_samples(self) -> List[Tuple[str, Dict[str, Any]]]:
-        """Gathers samples buffered for backend logging from all ranks to rank 0."""
-        gathered_samples: List[Tuple[str, Dict[str, Any]]] = []
-        local_samples_buffer = self._samples_for_backend_buffer
-
-        if self.world_size > 1:
-            self.dist_manager.barrier()
-            world_samples_list = self.dist_manager.gather_object(
-                local_samples_buffer, dst=0
-            )
-            if self.is_master and world_samples_list:
-                gathered_samples = [
-                    item
-                    for sublist in world_samples_list
-                    if sublist
-                    for item in sublist
-                ]
-                self._logger.debug(
-                    f"Master gathered {len(gathered_samples)} candidate samples."
-                )
-        elif self.is_master:
-            gathered_samples = local_samples_buffer
-            self._logger.debug(
-                f"Master collected {len(gathered_samples)} local samples."
-            )
-
-        selected_samples = []
-        if self.is_master and gathered_samples:
-            if len(gathered_samples) > self._max_backend_samples:
-                random.shuffle(gathered_samples)
-                selected_samples = gathered_samples[: self._max_backend_samples]
-                self._logger.info(
-                    f"Selected {len(selected_samples)} samples for backend (of {len(gathered_samples)})."
-                )
-            else:
-                selected_samples = gathered_samples
-                self._logger.info(
-                    f"Using all {len(selected_samples)} gathered samples for backend."
-                )
-
-        if self.world_size > 1:
-            self.dist_manager.barrier()
-        # Only master returns selected samples, others return empty list
-        return selected_samples if self.is_master else []
-
-    def clear_backend_buffer(self) -> None:
-        """Clears the buffer of samples intended for the backend."""
-        self._samples_for_backend_buffer.clear()
-        self._logger.debug('Cleared backend sample buffer.')
 
     def flush(
         self,

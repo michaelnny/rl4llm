@@ -25,7 +25,7 @@ model:
 
 grpo_config:
   max_steps: 2000
-  rollout_size: 1024
+  rollout_size: 256
   num_updates: 1
   # mini_batch_size: 16
   gamma: 1.0                          # fixed discount
@@ -40,7 +40,6 @@ grpo_config:
   # for sample generation
   max_prompt_tokens: 512              # skip sample question that's too long
   group_size: 32                      # for each sample we generate a group of answers
-  xml_format: false                   # check for R1 style XML format
   max_completion_tokens: 1024
   temperature: 1.0                    # not used if using group_temperature
   repetition_penalty: 1.0
@@ -58,8 +57,8 @@ grpo_config:
 deepspeed_config:
   # memory_breakdown: true  # for debugging
   steps_per_print: 1000000 # disable default logging
-  train_micro_batch_size_per_gpu: 16
-  train_batch_size: 256
+  train_micro_batch_size_per_gpu: 8
+  train_batch_size: 128
   gradient_clipping: 0.0
   bf16:
     enabled: true

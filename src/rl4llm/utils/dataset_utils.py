@@ -4,6 +4,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from torch.utils.data import Dataset
 
+from rl4llm.constants import LOGGER_NAME
+
+logger = logging.getLogger(LOGGER_NAME)
+
 
 def shard_dataset(
     dataset: Dataset, num_shards: int, shard_index: int

@@ -63,8 +63,6 @@ class LoggingManager:
         metrics_aggregation_config: Optional[Dict[str, List[str]]] = None,
         enable_wandb: bool = False,
         enable_tensorboard: bool = True,
-        log_sample_interval: int = 50,
-        max_backend_samples: int = 10,
         sample_buffer_size: int = 100,
         sample_file_format: str = 'parquet',
         log_level: Optional[str] = None,
@@ -100,8 +98,6 @@ class LoggingManager:
             phases=[self.TRAIN, self.EVAL],
             sample_file_format=sample_file_format,
             sample_buffer_size=sample_buffer_size,
-            log_sample_interval=log_sample_interval,
-            max_backend_samples=max_backend_samples,
             logger=self.console_logger,
         )
         # BackendHandler now creates its own writer internally
@@ -121,57 +117,29 @@ class LoggingManager:
             self.backend_handler,
         ]
 
-        # Phase Management State
-        self._current_phase: Optional[str] = None
-        self._phase_stack: List[Optional[str]] = []
-
         # Log hyperparameters via BackendHandler
         self.log_hyperparams(
             vars(config) if hasattr(config, '__dict__') else dict(config)
         )
 
-    # --- Phase Management (Unchanged) ---
-    @contextmanager
-    def _phase_scope(self, phase: str):
-        if phase not in [self.TRAIN, self.EVAL]:
-            raise ValueError(f"Unsupported scope: '{phase}'")
-        self._phase_stack.append(self._current_phase)
-        self._current_phase = phase
-        self.debug(f"Entering logging phase: {phase}")
-        try:
-            yield
-        finally:
-            self.debug(f"Exiting logging phase: {self._current_phase}")
-            self._current_phase = self._phase_stack.pop()
-
-    def train_scope(self):
-        return self._phase_scope(self.TRAIN)
-
-    def eval_scope(self):
-        return self._phase_scope(self.EVAL)
-
-    def _get_current_phase(self) -> Optional[str]:
-        return self._current_phase
-
     def log_scalar(
         self, name: str, value: Union[float, int, torch.Tensor]
     ) -> None:
-        phase = self._get_current_phase()
-        metric_key = f"{phase}/{name}" if phase else name
-        self.metric_handler.log_scalar(metric_key, value)
+        self.metric_handler.log_scalar(name, value)
 
     def log_metrics_dict(
         self, metrics: Dict[str, Union[float, int, torch.Tensor]]
     ) -> None:
-        phase = self._get_current_phase()
         for name, value in metrics.items():
-            metric_key = f"{phase}/{name}" if phase else name
-            self.metric_handler.log_scalar(metric_key, value)
+            self.metric_handler.log_scalar(name, value)
 
     def log_sample(
-        self, tag: str, sample_data: Dict[str, Any], step: int
+        self, tag: str, sample_data: Dict[str, Any], step: int, phase: str
     ) -> None:
-        phase = self._get_current_phase()
+        assert phase in [
+            self.TRAIN,
+            self.EVAL,
+        ], f"Invalid phase {phase}, must be one of [{self.TRAIN}, {self.EVAL}]"
         self.sample_handler.log_sample(tag, sample_data, step, phase)
 
     def log_hyperparams(self, params: Dict[str, Any]) -> None:
@@ -194,7 +162,7 @@ class LoggingManager:
             yield
         finally:
             elapsed = time.time() - start_time
-            time_metric_name = f"time/{name}_sec"
+            time_metric_name = f"time/{name}"
             self.metric_handler.log_scalar(
                 time_metric_name, elapsed
             )  # Delegate
@@ -204,31 +172,19 @@ class LoggingManager:
     def aggregate_and_log(self, step: int) -> None:
         self.debug(f"Starting aggregation and logging for step {step}...")
         aggregated_metrics = self.metric_handler.aggregate()
-        samples_for_backend = self.sample_handler.collect_backend_samples()
 
         # Logging to backend and console (master only)
         if self.is_master:
             if aggregated_metrics:
                 self.backend_handler.log_metrics(aggregated_metrics, step)
-            if samples_for_backend:
-                self.info(
-                    f"Logging {len(samples_for_backend)} samples to backend for step {step}"
-                )
-                for tag, sample_dict in samples_for_backend:
-                    sample_step = sample_dict.get('step', step)
-                    formatted_text = self._format_sample_for_backend(
-                        sample_dict
-                    )  # Use helper
-                    self.backend_handler.log_sample_text(
-                        tag, formatted_text, sample_step
-                    )
+
             self._log_aggregated_metrics_to_console(
                 aggregated_metrics, step
             )  # Use helper
 
         # Clear buffers on all ranks
         self.metric_handler.clear_buffer()
-        self.sample_handler.clear_backend_buffer()
+        self.sample_handler.flush()
         self.debug(f"Finished aggregation and logging for step {step}.")
 
     # --- Helper methods (_log_aggregated_metrics_to_console, _format_sample_for_backend - Unchanged) ---

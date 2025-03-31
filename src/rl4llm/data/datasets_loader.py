@@ -6,10 +6,10 @@ from typing import Dict, List, Optional, Tuple
 
 from datasets import Dataset, concatenate_datasets, load_dataset
 
-from rl4llm.logging import setup_logger
+from rl4llm.constants import LOGGER_NAME
 from rl4llm.utils import load_from_jsonl_file, save_to_jsonl_file
 
-logger = setup_logger()
+logger = logging.getLogger(LOGGER_NAME)
 
 
 def fix_gsm_incorrect_answer(x: Dict) -> Dict:

@@ -86,8 +86,6 @@ def logging_manager(tmp_path, monkeypatch):
         metrics_aggregation_config=None,
         enable_wandb=False,
         enable_tensorboard=True,
-        log_sample_interval=1,
-        max_backend_samples=2,
         sample_buffer_size=2,
         sample_file_format='jsonl',
         log_level='DEBUG',
@@ -109,43 +107,36 @@ def test_logging_manager_initialization(logging_manager):
 
 
 def test_phase_management(logging_manager):
-    # Initially, no phase is active.
-    assert logging_manager._get_current_phase() is None
-    # Use the train_scope context manager.
-    with logging_manager.train_scope():
-        assert logging_manager._get_current_phase() == 'train'
-        # Log a scalar value. The metric key should be "train/some_metric".
-        logging_manager.log_scalar('some_metric', 1.0)
-        buf = logging_manager.metric_handler._metric_buffer
-        assert 'train/some_metric' in buf
-        # Check that the value was stored.
-        assert buf['train/some_metric'] == [1.0]
-    # After scope exit, phase reverts.
-    assert logging_manager._get_current_phase() is None
+
+    logging_manager.log_scalar('train/some_metric', 1.0)
+    buf = logging_manager.metric_handler._metric_buffer
+    assert 'train/some_metric' in buf
+    # Check that the value was stored.
+    assert buf['train/some_metric'] == [1.0]
 
 
 def test_log_metrics_dict(logging_manager):
-    # Use eval_scope.
-    with logging_manager.eval_scope():
-        metrics = {'m1': 0.1, 'm2': 2}
-        logging_manager.log_metrics_dict(metrics)
-        buf = logging_manager.metric_handler._metric_buffer
-        # Keys should be prefixed with "eval/".
-        assert 'eval/m1' in buf
-        assert 'eval/m2' in buf
-        assert buf['eval/m1'] == [0.1]
-        assert buf['eval/m2'] == [2]
+
+    metrics = {'eval/m1': 0.1, 'eval/m2': 2}
+    logging_manager.log_metrics_dict(metrics)
+    buf = logging_manager.metric_handler._metric_buffer
+    # Keys should be prefixed with "eval/".
+    assert 'eval/m1' in buf
+    assert 'eval/m2' in buf
+    assert buf['eval/m1'] == [0.1]
+    assert buf['eval/m2'] == [2]
 
 
 def test_log_sample(logging_manager):
-    # Set a phase and log a sample.
-    with logging_manager.train_scope():
-        logging_manager.log_sample('tag1', {'data': 'value', 'step': 5}, step=5)
-        # Check that the SampleHandler's local log count increased.
-        count = logging_manager.sample_handler._local_sample_log_counts.get(
-            'train', 0
-        )
-        assert count == 1
+
+    logging_manager.log_sample(
+        'tag1', {'data': 'value', 'step': 5}, step=5, phase='train'
+    )
+    # Check that the SampleHandler's local log count increased.
+    buffer = logging_manager.sample_handler._file_loggers['train']._buffers.get(
+        'tag1'
+    )
+    assert len(buffer) == 1
 
 
 def test_log_hyperparams(logging_manager):
@@ -176,51 +167,39 @@ def test_timer(logging_manager):
         time.sleep(0.1)
     buf = logging_manager.metric_handler._metric_buffer
     # A time metric with key "time/test_timer_sec" should be present.
-    assert 'time/test_timer_sec' in buf
+    assert 'time/test_timer' in buf
     # Verify that the logged time is a positive number.
-    elapsed = buf['time/test_timer_sec'][0]
+    elapsed = buf['time/test_timer'][0]
     assert elapsed > 0
 
 
 def test_aggregate_and_log(logging_manager, monkeypatch):
     # Prepare fake aggregated metrics and sample data.
     fake_metrics = {'train/loss_mean': 0.5}
-    fake_samples = [('train/tag1', {'step': 10, 'data': 'val'})]
+
     monkeypatch.setattr(
         logging_manager.metric_handler, 'aggregate', lambda: fake_metrics
     )
-    monkeypatch.setattr(
-        logging_manager.sample_handler,
-        'collect_backend_samples',
-        lambda: fake_samples,
-    )
     # Record calls to backend_handler logging methods.
     logged_metrics = []
-    logged_samples = []
 
     def fake_log_metrics(metrics, step):
         logged_metrics.append((metrics, step))
 
-    def fake_log_sample_text(tag, formatted_text, step):
-        logged_samples.append((tag, formatted_text, step))
-
     monkeypatch.setattr(
         logging_manager.backend_handler, 'log_metrics', fake_log_metrics
     )
-    monkeypatch.setattr(
-        logging_manager.backend_handler, 'log_sample_text', fake_log_sample_text
-    )
+
     # Also capture console log messages.
     initial_info_count = len(logging_manager.console_logger.messages)
     logging_manager.aggregate_and_log(step=20)
     # Verify backend logging: our fake metrics and sample should have been processed.
     assert len(logged_metrics) == 1
     assert logged_metrics[0][0] == fake_metrics
-    # Since sample data is non-empty, log_sample_text should have been called.
-    assert len(logged_samples) == 1
+
     # Check that both metric and sample buffers have been cleared.
     assert logging_manager.metric_handler._metric_buffer == {}
-    assert logging_manager.sample_handler._samples_for_backend_buffer == []
+
     # Also, console logger should have received additional info messages.
     assert len(logging_manager.console_logger.messages) > initial_info_count
 

@@ -14,9 +14,9 @@ from transformers import (
     PreTrainedTokenizer,
 )
 
-from rl4llm.logging import setup_logger
+from rl4llm.constants import LOGGER_NAME
 
-logger = setup_logger()
+logger = logging.getLogger(LOGGER_NAME)
 
 
 def build_longformer_classification_model_and_tokenizer(

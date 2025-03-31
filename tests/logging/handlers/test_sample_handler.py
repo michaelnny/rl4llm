@@ -124,8 +124,6 @@ def sample_handler(tmp_path, fake_dist_manager_master):
         phases=['phase1'],
         sample_file_format='jsonl',
         sample_buffer_size=2,  # small buffer for testing flush behavior
-        log_sample_interval=1,  # log every sample for backend buffering
-        max_backend_samples=3,
         logger=logging.getLogger('test'),
     )
 
@@ -138,8 +136,6 @@ def test_sample_handler_initialization(tmp_path, fake_dist_manager_master):
         phases=['phase1', 'phase2'],
         sample_file_format='jsonl',
         sample_buffer_size=2,
-        log_sample_interval=1,
-        max_backend_samples=5,
         logger=logging.getLogger('test'),
     )
     # Expect file loggers for each provided phase and the general phase.
@@ -150,66 +146,10 @@ def test_sample_handler_initialization(tmp_path, fake_dist_manager_master):
 def test_log_sample_file_logging(sample_handler):
     # Test that log_sample logs to the appropriate file logger and buffers a backend sample.
     sample_handler.log_sample('test_tag', {'val': 42}, step=1, phase='phase1')
-    # Check that the local log count for "phase1" increments.
-    assert sample_handler._local_sample_log_counts['phase1'] == 1
-    # With log_sample_interval=1, a backend sample should be added.
-    assert len(sample_handler._samples_for_backend_buffer) == 1
     # Also verify that the file logger for "phase1" has buffered the sample.
     file_logger = sample_handler._file_loggers['phase1']
     assert 'test_tag' in file_logger._buffers
     assert len(file_logger._buffers['test_tag']) == 1
-
-
-def test_collect_backend_samples_master(tmp_path, fake_dist_manager_master):
-    # Test that the master gathers and limits backend samples.
-    log_dir = str(tmp_path / 'logdir')
-    sh = SampleHandler(
-        dist_manager=fake_dist_manager_master,
-        log_dir=log_dir,
-        phases=['phase1'],
-        sample_file_format='jsonl',
-        sample_buffer_size=2,
-        log_sample_interval=1,
-        max_backend_samples=3,
-        logger=logging.getLogger('test'),
-    )
-    # Log 5 samples, which should all be buffered for backend.
-    for i in range(5):
-        sh.log_sample('test_tag', {'val': i}, step=i, phase='phase1')
-    backend_samples = sh.collect_backend_samples()
-    # Master should return at most max_backend_samples samples.
-    assert sh.dist_manager.is_master
-    assert len(backend_samples) <= 3
-    # In this case, we expect exactly 3 samples.
-    assert len(backend_samples) == 3
-
-
-def test_collect_backend_samples_non_master(
-    tmp_path, fake_dist_manager_non_master
-):
-    # For non-master, collect_backend_samples should return an empty list.
-    log_dir = str(tmp_path / 'logdir')
-    sh = SampleHandler(
-        dist_manager=fake_dist_manager_non_master,
-        log_dir=log_dir,
-        phases=['phase1'],
-        sample_file_format='jsonl',
-        sample_buffer_size=2,
-        log_sample_interval=1,
-        max_backend_samples=3,
-        logger=logging.getLogger('test'),
-    )
-    sh.log_sample('test_tag', {'val': 42}, step=1, phase='phase1')
-    backend_samples = sh.collect_backend_samples()
-    assert backend_samples == []
-
-
-def test_clear_backend_buffer(sample_handler):
-    # After logging a sample, clear the backend buffer and verify it is empty.
-    sample_handler.log_sample('test_tag', {'val': 42}, step=1, phase='phase1')
-    assert len(sample_handler._samples_for_backend_buffer) > 0
-    sample_handler.clear_backend_buffer()
-    assert sample_handler._samples_for_backend_buffer == []
 
 
 def test_flush_handler_calls_file_logger_flush(monkeypatch, sample_handler):

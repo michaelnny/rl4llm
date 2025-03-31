@@ -11,8 +11,8 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_trainer import RLConfig, RLTrainer
 from rl4llm.core.distributed import DistributedManager
-from rl4llm.core.log_tracker import LoggingManager
 from rl4llm.graders.math_grader import math_problem_grader
+from rl4llm.logging import LoggingManager
 
 
 class GRPOConfig(RLConfig):
@@ -265,20 +265,20 @@ class GRPOTrainer(RLTrainer):
 
         rewards = reward_dict['accuracy_reward']
 
-        # log samples to external file
-        samples_to_log = self.convert_llm_output_to_samples(
-            question=questions,
-            ground_truth=ground_truths,
-            task_type=task_types,
-            prompt_length=outputs['prompt_lengths'].tolist(),
-            completion_length=outputs['completion_lengths'].tolist(),
-            completion_text=outputs['completion_texts'],
-            **{k: v.tolist() for k, v in reward_dict.items()},
-        )
+        # # log samples to external file
+        # samples_to_log = self.convert_llm_output_to_samples(
+        #     question=questions,
+        #     ground_truth=ground_truths,
+        #     task_type=task_types,
+        #     prompt_length=outputs['prompt_lengths'].tolist(),
+        #     completion_length=outputs['completion_lengths'].tolist(),
+        #     completion_text=outputs['completion_texts'],
+        #     **{k: v.tolist() for k, v in reward_dict.items()},
+        # )
 
-        self.log_batch_samples(
-            samples_to_log, self.global_step, is_training=True
-        )
+        # self.log_batch_samples(
+        #     samples_to_log, self.global_step, is_training=True
+        # )
 
         # discard samples as they leads to zero advantages -> zero gradients
         if (
@@ -289,7 +289,7 @@ class GRPOTrainer(RLTrainer):
                 f'Skipping samples with identical rewards, \
                     minimum group reward std: {self.group_reward_std_threshold}'
             )
-            # self.logger.log_scalar('skipped_sample', 1)
+            self.logger.log_scalar('generation/skipped_sample', len(rewards))
             return []
 
         # self._log_group_samples(
@@ -531,8 +531,8 @@ class GRPOTrainer(RLTrainer):
 
         # TODO compute stats
 
-        # self._metrics.add_metric('elapsed/generation_episodes', self.train_episode_count * self.world_size)
-        # self._metrics.add_metric('elapsed/explore_epsilon', self.explore_epsilon)
+        # self.logger.log_scalar('generation/episodes_total', self.train_episode_count)
+        # self.logger.log_scalar('generation/explore_epsilon', self.explore_epsilon)
 
         return collected_samples
 
@@ -554,11 +554,14 @@ class GRPOTrainer(RLTrainer):
         """Compute loss for a single training batch
 
         Args:
-            pi_logits (torch.Tensor): Raw logits of actions computed using current policy, shape [batch_size, seq_len]
-            experience_batch (TransitionData): A batch of samples collected during generation
+            pi_logits (torch.Tensor): Raw logits of actions computed using
+                current policy, shape [batch_size, seq_len]
+            experience_batch (TransitionData): A batch of samples collected
+                during generation
 
         Returns:
-            Tuple[torch.Tensor, Dict]: Tuple containing the total loss tensor and a dictionary of metrics
+            Tuple[torch.Tensor, Dict]: Tuple containing the total loss tensor
+                and a dictionary of metrics
         """
         behavior_logprobs = experience_batch.pi_logprobs.to(self.device)
         actions = experience_batch.actions.to(self.device)
@@ -597,11 +600,11 @@ class GRPOTrainer(RLTrainer):
 
         # Initialize metrics with common values
         metrics = {
-            'loss/pg': pg_loss.detach().item(),
-            'loss/entropy': entropy_loss.detach().item(),
-            'entropy': entropy.detach().item(),
-            'approxkl': approxkl.detach().item(),
-            'clipfrac': clipfrac.detach().item(),
+            'train/pg_loss': pg_loss.detach().item(),
+            'train/entropy_loss': entropy_loss.detach().item(),
+            'policy/entropy': entropy.detach().item(),
+            'policy/approxkl': approxkl.detach().item(),
+            'policy/clipfrac': clipfrac.detach().item(),
         }
 
         # Compute KL divergence if coefficient is positive
@@ -623,9 +626,8 @@ class GRPOTrainer(RLTrainer):
             loss = pg_loss + kl_loss + entropy_loss
             metrics.update(
                 {
-                    'loss/total': loss.detach().item(),
-                    'loss/kl': kl_loss.detach().item(),
-                    'kl': kl.detach().item(),
+                    'train/kl_loss': kl_loss.detach().item(),
+                    'objective/kl': kl.detach().item(),
                 }
             )
         else:
@@ -636,57 +638,43 @@ class GRPOTrainer(RLTrainer):
     def train_step(self, train_dataloader: DataLoader):
         """Performs the policy update phase."""
 
-        with self.logger.train_scope():
-            self._prepare_for_training()
-            batch_metrics = {}
+        self._prepare_for_training()
 
-            c = 0
-            for _ in range(self.config.num_updates):
-                for i, micro_batch in enumerate(train_dataloader):
-                    input_ids = micro_batch.states
-                    attention_mask = (
-                        input_ids != self.tokenizer.pad_token_id
-                    ).bool()
-                    pi_logits = self.policy_engine.forward(
-                        input_ids=input_ids, attention_mask=attention_mask
-                    ).logits
+        for _ in range(self.config.num_updates):
+            for i, micro_batch in enumerate(train_dataloader):
+                input_ids = micro_batch.states
+                attention_mask = (
+                    input_ids != self.tokenizer.pad_token_id
+                ).bool()
+                pi_logits = self.policy_engine.forward(
+                    input_ids=input_ids, attention_mask=attention_mask
+                ).logits
 
-                    loss, metrics = self.compute_loss(pi_logits, micro_batch)
-                    self.policy_engine.backward(loss)
-                    global_grad_norm = self.policy_engine.get_global_grad_norm()
-                    self.policy_engine.step()
+                loss, metrics = self.compute_loss(pi_logits, micro_batch)
+                self.policy_engine.backward(loss)
+                self.policy_engine.step()
 
-                    del input_ids, attention_mask, pi_logits
-                    torch.cuda.empty_cache()
+                del input_ids, attention_mask, pi_logits
+                torch.cuda.empty_cache()
 
-                    c += 1
+                for k, v in metrics.items():
+                    self.logger.log_scalar(k, v)
 
-                    for k, v in metrics.items():
-                        batch_metrics[k] = batch_metrics.get(k, 0.0) + v
-
-                    if self.policy_engine.is_gradient_accumulation_boundary():
-                        self.policy_update_count += 1
-
-                        avg_metrics = {
-                            k: v / c for k, v in batch_metrics.items()
-                        }
-                        avg_metrics['policy_update'] = self.policy_update_count
-                        avg_metrics['reference_update'] = self.ref_update_count
-                        avg_metrics['learning_rate'] = (
-                            self.policy_engine.get_lr()[0]
-                        )
-                        avg_metrics['grad_norm'] = global_grad_norm.item()
-                        self.logger.log_metrics_dict(
-                            avg_metrics, self.global_step
-                        )
-                        batch_metrics = {}
-                        c = 0
+                if self.policy_engine.is_gradient_accumulation_boundary():
+                    self.policy_update_count += 1
+                    self.logger.log_scalar(
+                        'train/policy_update', self.policy_update_count
+                    )
+                    self.logger.log_scalar(
+                        'train/learning_rate',
+                        self.policy_engine.get_lr()[0],
+                    )
 
     def evaluate_step(self):
         pass
 
     def _eval_collate_fn(self, batch: List[Dict]) -> Dict:
-        """Collate function for DataLoader during training"""
+        """Collate function for DataLoader during evaluation"""
         pad_token_id = self.tokenizer.pad_token_id
 
         # Extract input_ids and attention_mask as lists of tensors

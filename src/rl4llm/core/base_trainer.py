@@ -20,9 +20,9 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.data_types import RLConfig
 from rl4llm.core.distributed import DistributedManager
-from rl4llm.utils.dataset_utils import shard_dataset
-from rl4llm.logging import LoggingManager
 from rl4llm.core.training_mixin import TrainingMixin
+from rl4llm.logging import LoggingManager
+from rl4llm.utils.dataset_utils import shard_dataset
 
 
 class RLTrainer(ABC, TrainingMixin):
@@ -164,6 +164,7 @@ class RLTrainer(ABC, TrainingMixin):
         """Returns true if Zero-3 is enabled"""
         return self.policy_engine.zero_optimization_stage() == 3
 
+    # TODO improve the way to log samples and metrics
     def convert_llm_output_to_samples(
         self,
         question: List[str],
@@ -240,7 +241,7 @@ class RLTrainer(ABC, TrainingMixin):
                     or 'reward' in k
                     and isinstance(v, (float, int))
                 ):
-                    self.logger.log_scalar(k, v, step)
+                    self.logger.log_scalar(k, v)
 
     @abstractmethod
     def generate_experience(self) -> List[Any]:
@@ -392,29 +393,27 @@ class RLTrainer(ABC, TrainingMixin):
         # Initial evaluation before training starts
         if self.config.eval_interval > 0 and self.eval_loader:
             self.logger.info('Running initial evaluation...')
-            with self.logger.eval_scope():
-                with self.logger.timer('evaluate'):
-                    self.evaluate_step()
+            with self.logger.timer('evaluate'):
+                self.evaluate_step()
             self.dist_manager.barrier()
 
         for t in range(self.config.max_steps):
             self.global_step = t
 
-            with self.logger.train_scope():
-                # 1. Generation Phase
-                with self.logger.timer('generation'):
-                    self._prepare_for_generation()
-                    # generate_experience returns rank-local experience
-                    local_experience = self.generate_experience()
+            # 1. Generation Phase
+            with self.logger.timer('generation'):
+                self._prepare_for_generation()
+                # generate_experience returns rank-local experience
+                local_experience = self.generate_experience()
 
-                self.dist_manager.barrier()
+            self.dist_manager.barrier()
 
-                # 2. Learning Phase
-                with self.logger.timer('train'):
-                    # build_train_batch processes local_experience and returns a DataLoader
-                    train_dataloader = self.build_train_batch(local_experience)
-                    self.train_step(train_dataloader)
-                self.dist_manager.barrier()
+            # 2. Learning Phase
+            with self.logger.timer('train'):
+                # build_train_batch processes local_experience and returns a DataLoader
+                train_dataloader = self.build_train_batch(local_experience)
+                self.train_step(train_dataloader)
+            self.dist_manager.barrier()
 
             # 3. Post-Iteration Operations
             # Sync reference model
@@ -440,9 +439,8 @@ class RLTrainer(ABC, TrainingMixin):
                 and self.eval_loader
                 and (t + 1) % self.config.eval_interval == 0
             ):
-                with self.logger.eval_scope():
-                    with self.logger.timer('evaluate'):
-                        self.evaluate_step()
+                with self.logger.timer('evaluate'):
+                    self.evaluate_step()
 
             self.logger.aggregate_and_log(self.global_step)
 
