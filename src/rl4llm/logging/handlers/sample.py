@@ -28,16 +28,16 @@ class SampleFileLogger:
     """
 
     SUPPORTED_FORMATS = {
-        "parquet": {"extension": "parquet", "default_compression": "snappy"},
-        "jsonl": {"extension": "jsonl", "default_compression": None},
-        "jsonl.gz": {"extension": "jsonl.gz", "default_compression": "gzip"},
+        'parquet': {'extension': 'parquet', 'default_compression': 'snappy'},
+        'jsonl': {'extension': 'jsonl', 'default_compression': None},
+        'jsonl.gz': {'extension': 'jsonl.gz', 'default_compression': 'gzip'},
     }
 
     def __init__(
         self,
         save_dir: str,
         rank: int,
-        file_format: str = "parquet",
+        file_format: str = 'parquet',
         compression: str = None,
         buffer_size: int = 100,
         logger: Optional[logging.Logger] = None,
@@ -63,13 +63,14 @@ class SampleFileLogger:
                 f"Must be one of: {', '.join(self.SUPPORTED_FORMATS.keys())}"
             )
 
-        self.save_dir = os.path.join(save_dir, "samples")
+        self.save_dir = os.path.join(save_dir, 'samples')
         self.rank = rank
         self.file_format = file_format
 
         # Use format-specific default compression if not specified
         self.compression = (
-            compression or self.SUPPORTED_FORMATS[file_format]["default_compression"]
+            compression
+            or self.SUPPORTED_FORMATS[file_format]['default_compression']
         )
         self.buffer_size = buffer_size
 
@@ -77,7 +78,9 @@ class SampleFileLogger:
         self._buffers: Dict[str, List[Dict[str, Any]]] = {}
 
         # Initialize logger
-        self._logger = logger if logger is not None else logging.getLogger("RL4LLM")
+        self._logger = (
+            logger if logger is not None else logging.getLogger('RL4LLM')
+        )
 
         try:
             os.makedirs(self.save_dir, exist_ok=True)
@@ -97,9 +100,11 @@ class SampleFileLogger:
         Returns:
             str: The full filepath where samples will be saved
         """
-        safe_tag = tag.replace("/", "_")
-        extension = self.SUPPORTED_FORMATS[self.file_format]["extension"]
-        return os.path.join(self.save_dir, f"{safe_tag}_rank{self.rank}.{extension}")
+        safe_tag = tag.replace('/', '_')
+        extension = self.SUPPORTED_FORMATS[self.file_format]['extension']
+        return os.path.join(
+            self.save_dir, f"{safe_tag}_rank{self.rank}.{extension}"
+        )
 
     def _get_buffer(self, tag: str) -> List[Dict[str, Any]]:
         """
@@ -124,7 +129,7 @@ class SampleFileLogger:
             data (Dict[str, Any]): The sample data to log
             step (int): The current step or iteration number
         """
-        log_entry = {"step": step, **data}
+        log_entry = {'step': step, **data}
 
         # Add entry to buffer
         buffer = self._get_buffer(tag)
@@ -154,12 +159,12 @@ class SampleFileLogger:
         try:
             file_exists = os.path.exists(filepath)
 
-            if self.file_format == "parquet":
+            if self.file_format == 'parquet':
                 # Write to Parquet file
                 if file_exists:
                     df.to_parquet(
                         filepath,
-                        engine="pyarrow",
+                        engine='pyarrow',
                         compression=self.compression,
                         index=False,
                         append=True,
@@ -168,17 +173,17 @@ class SampleFileLogger:
                 else:
                     df.to_parquet(
                         filepath,
-                        engine="pyarrow",
+                        engine='pyarrow',
                         compression=self.compression,
                         index=False,
                         default_handler=str,
                     )
             else:  # jsonl or jsonl.gz
                 # For JSON formats
-                mode = "a" if file_exists else "w"
+                mode = 'a' if file_exists else 'w'
                 df.to_json(
                     filepath,
-                    orient="records",
+                    orient='records',
                     lines=True,
                     compression=self.compression,
                     mode=mode,
@@ -205,7 +210,9 @@ class SampleFileLogger:
             try:
                 self._flush(tag)
             except Exception as e:
-                self._logger.warning(f"Failed to flush data for tag '{tag}': {e}")
+                self._logger.warning(
+                    f"Failed to flush data for tag '{tag}': {e}"
+                )
 
     def close(self) -> None:
         """
@@ -216,20 +223,20 @@ class SampleFileLogger:
         """
         self.flush()
         self._buffers.clear()
-        self._logger.info("Flushed all buffers and closed logger.")
+        self._logger.info('Flushed all buffers and closed logger.')
 
 
 class SampleHandler(BaseHandler):
     """Handles sample file logging and gathering samples for backend logging."""
 
-    GENERAL_PHASE = "general"
+    GENERAL_PHASE = 'general'
 
     def __init__(
         self,
         dist_manager: DistributedManager,
         log_dir: str,
         phases: List[str],
-        sample_file_format: str = "parquet",
+        sample_file_format: str = 'parquet',
         sample_buffer_size: int = 100,
         log_sample_interval: int = 50,
         max_backend_samples: int = 10,
@@ -250,7 +257,7 @@ class SampleHandler(BaseHandler):
         os.makedirs(log_dir, exist_ok=True)
         for phase in self._log_phases:
             phase_log_dir = os.path.join(
-                log_dir, phase, "samples"
+                log_dir, phase, 'samples'
             )  # samples subdir within phase dir
             try:
                 # Pass the specific phase_log_dir base to SampleFileLogger
@@ -282,7 +289,11 @@ class SampleHandler(BaseHandler):
 
     # ... (Keep log_sample, collect_backend_samples, clear_backend_buffer methods) ...
     def log_sample(
-        self, tag: str, sample_data: Dict[str, Any], step: int, phase: Optional[str]
+        self,
+        tag: str,
+        sample_data: Dict[str, Any],
+        step: int,
+        phase: Optional[str],
     ):
         """Logs a sample to file and potentially buffers it for backend."""
         current_phase = phase or self.GENERAL_PHASE
@@ -304,14 +315,17 @@ class SampleHandler(BaseHandler):
         if self._log_sample_interval > 0:
             self._local_sample_log_counts[current_phase] += 1
             if (
-                self._local_sample_log_counts[current_phase] % self._log_sample_interval
+                self._local_sample_log_counts[current_phase]
+                % self._log_sample_interval
                 == 0
             ):
                 backend_tag = f"{current_phase}/{tag}"
                 self._samples_for_backend_buffer.append(
-                    (backend_tag, {"step": step, **sample_data})
+                    (backend_tag, {'step': step, **sample_data})
                 )
-                self._logger.debug(f"Buffered sample for backend [{backend_tag}]")
+                self._logger.debug(
+                    f"Buffered sample for backend [{backend_tag}]"
+                )
 
     def collect_backend_samples(self) -> List[Tuple[str, Dict[str, Any]]]:
         """Gathers samples buffered for backend logging from all ranks to rank 0."""
@@ -361,11 +375,13 @@ class SampleHandler(BaseHandler):
     def clear_backend_buffer(self) -> None:
         """Clears the buffer of samples intended for the backend."""
         self._samples_for_backend_buffer.clear()
-        self._logger.debug("Cleared backend sample buffer.")
+        self._logger.debug('Cleared backend sample buffer.')
 
-    def flush(self) -> None:  # Renamed from flush_files for consistency potential
+    def flush(
+        self,
+    ) -> None:  # Renamed from flush_files for consistency potential
         """Flushes all underlying file loggers."""
-        self._logger.debug("Flushing sample file loggers...")
+        self._logger.debug('Flushing sample file loggers...')
         for phase, file_logger in self._file_loggers.items():
             try:
                 file_logger.flush()
@@ -375,7 +391,7 @@ class SampleHandler(BaseHandler):
     # Implement the abstract 'close' method
     def close(self) -> None:
         """Flushes and closes all underlying file loggers."""
-        self._logger.info("Closing sample file loggers...")
+        self._logger.info('Closing sample file loggers...')
         self.flush()  # Ensure data is written before closing
         for phase, file_logger in self._file_loggers.items():
             try:
@@ -383,4 +399,4 @@ class SampleHandler(BaseHandler):
             except Exception as e:
                 self._logger.warning(f"Error closing phase '{phase}': {e}")
         self._file_loggers.clear()
-        self._logger.debug("SampleHandler closed.")
+        self._logger.debug('SampleHandler closed.')

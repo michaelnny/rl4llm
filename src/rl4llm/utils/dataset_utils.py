@@ -5,7 +5,9 @@ import torch
 from torch.utils.data import Dataset
 
 
-def shard_dataset(dataset: Dataset, num_shards: int, shard_index: int) -> Dataset:
+def shard_dataset(
+    dataset: Dataset, num_shards: int, shard_index: int
+) -> Dataset:
     """
     Shard a dataset across multiple ranks.
 
@@ -26,7 +28,9 @@ def shard_dataset(dataset: Dataset, num_shards: int, shard_index: int) -> Datase
     start_index = shard_index * shard_size
     # Last shard takes any extra samples
     end_index = (
-        total_length if shard_index == num_shards - 1 else start_index + shard_size
+        total_length
+        if shard_index == num_shards - 1
+        else start_index + shard_size
     )
     indices = list(range(start_index, end_index))
     return torch.utils.data.Subset(dataset, indices)

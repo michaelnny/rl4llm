@@ -44,12 +44,16 @@ class StochasticLLMGenerator:
         self.target_tokens = target_tokens or []
         self.prevent_patterns = prevent_patterns or []
         self.source_tokens_tensor = (
-            torch.tensor(self.source_tokens, device=self.device, dtype=torch.long)
+            torch.tensor(
+                self.source_tokens, device=self.device, dtype=torch.long
+            )
             if self.source_tokens
             else None
         )
 
-    def _has_pattern(self, input_ids: torch.Tensor, pattern: List[int]) -> torch.Tensor:
+    def _has_pattern(
+        self, input_ids: torch.Tensor, pattern: List[int]
+    ) -> torch.Tensor:
         """
         Check if the given pattern exists in the input sequences for each batch.
 
@@ -68,7 +72,9 @@ class StochasticLLMGenerator:
         pattern_len = pattern_tensor.size(0)
 
         if seq_len < pattern_len:
-            return torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+            return torch.zeros(
+                batch_size, dtype=torch.bool, device=input_ids.device
+            )
 
         # Use unfold for potentially better performance than as_strided directly
         windows = input_ids.unfold(dimension=1, size=pattern_len, step=1)
@@ -76,7 +82,9 @@ class StochasticLLMGenerator:
         matches = (windows == pattern_tensor.view(1, 1, pattern_len)).all(dim=2)
         return matches.any(dim=1)
 
-    def _check_replacement_patterns(self, generated_ids: torch.Tensor) -> torch.Tensor:
+    def _check_replacement_patterns(
+        self, generated_ids: torch.Tensor
+    ) -> torch.Tensor:
         """
         Check if the generated sequences contain any patterns that would prevent replacement.
 
@@ -88,7 +96,9 @@ class StochasticLLMGenerator:
         """
         batch_size = generated_ids.shape[0]
         if not self.prevent_patterns:
-            return torch.ones(batch_size, dtype=torch.bool, device=generated_ids.device)
+            return torch.ones(
+                batch_size, dtype=torch.bool, device=generated_ids.device
+            )
 
         pattern_found = torch.zeros(
             batch_size, dtype=torch.bool, device=generated_ids.device
@@ -174,7 +184,9 @@ class StochasticLLMGenerator:
             or can_replace.sum() == 0
             or replace_prob <= 0.0
         ):
-            return next_tokens, torch.zeros_like(can_replace)  # Return False mask
+            return next_tokens, torch.zeros_like(
+                can_replace
+            )  # Return False mask
 
         batch_size = next_tokens.size(0)
         device = next_tokens.device
@@ -202,7 +214,10 @@ class StochasticLLMGenerator:
             # Assign chosen tokens only where final_replace_mask is True
             modified_tokens[final_replace_mask] = chosen_target_tokens
 
-        return modified_tokens, final_replace_mask  # Return the actual mask used
+        return (
+            modified_tokens,
+            final_replace_mask,
+        )  # Return the actual mask used
 
     def _determine_replacement_eligibility(
         self,
@@ -227,11 +242,13 @@ class StochasticLLMGenerator:
         """
         # Check if the *predicted* next_tokens are in source_tokens
         if self.source_tokens_tensor is None:
-            return torch.zeros_like(next_tokens, dtype=torch.bool)  # Ensure bool type
+            return torch.zeros_like(
+                next_tokens, dtype=torch.bool
+            )  # Ensure bool type
 
-        is_source_token = (next_tokens.unsqueeze(-1) == self.source_tokens_tensor).any(
-            dim=-1
-        )
+        is_source_token = (
+            next_tokens.unsqueeze(-1) == self.source_tokens_tensor
+        ).any(dim=-1)
 
         # If no predicted tokens are source tokens, no replacement needed based on this condition
         if not is_source_token.any():
@@ -256,10 +273,14 @@ class StochasticLLMGenerator:
             # Apply correctness check if callback exists, only where patterns allow
             if correctness_callback is not None:
                 is_incorrect_subset = self._check_correctness(
-                    generated_ids_subset, pattern_allowed_subset, correctness_callback
+                    generated_ids_subset,
+                    pattern_allowed_subset,
+                    correctness_callback,
                 )
                 # Final eligibility for the subset: pattern allows AND (is incorrect OR no callback)
-                can_replace_subset = pattern_allowed_subset & is_incorrect_subset
+                can_replace_subset = (
+                    pattern_allowed_subset & is_incorrect_subset
+                )
             else:
                 # If no correctness callback, eligibility depends only on pattern check
                 can_replace_subset = pattern_allowed_subset
@@ -295,7 +316,11 @@ class StochasticLLMGenerator:
         # Assertions remain useful
         assert input_ids.dim() == 2
         assert next_tokens.dim() == 1 and unfinished_sequences.dim() == 1
-        assert input_ids.size(0) == next_tokens.size(0) == unfinished_sequences.size(0)
+        assert (
+            input_ids.size(0)
+            == next_tokens.size(0)
+            == unfinished_sequences.size(0)
+        )
 
         this_token_is_eos = torch.zeros_like(next_tokens, dtype=torch.bool)
         if eos_token_id is not None:
@@ -307,7 +332,9 @@ class StochasticLLMGenerator:
                 unfinished_sequences.bool(),
                 next_tokens,
                 torch.tensor(
-                    pad_token_id, device=next_tokens.device, dtype=next_tokens.dtype
+                    pad_token_id,
+                    device=next_tokens.device,
+                    dtype=next_tokens.dtype,
                 ),
             )
 
@@ -323,11 +350,15 @@ class StochasticLLMGenerator:
 
         # Update unfinished sequences: Mark as finished if EOS was generated *this step*
         if eos_token_id is not None:
-            unfinished_sequences = unfinished_sequences.bool() & ~this_token_is_eos
+            unfinished_sequences = (
+                unfinished_sequences.bool() & ~this_token_is_eos
+            )
 
         return input_ids, attention_mask, unfinished_sequences
 
-    def _uniform_sampling(self, logits: torch.Tensor, top_k: int) -> torch.Tensor:
+    def _uniform_sampling(
+        self, logits: torch.Tensor, top_k: int
+    ) -> torch.Tensor:
         """
         Uniformly sample from the top-k tokens.
 
@@ -361,7 +392,9 @@ class StochasticLLMGenerator:
         # Gather the actual token IDs using the sampled relative indices
         next_tokens = torch.gather(
             top_k_indices, dim=1, index=sampled_relative_indices
-        ).squeeze(-1)  # Shape: [batch_size]
+        ).squeeze(
+            -1
+        )  # Shape: [batch_size]
 
         return next_tokens
 
@@ -408,7 +441,7 @@ class StochasticLLMGenerator:
             # Get the values and indices of the top-k logits
             top_k_values, top_k_indices = torch.topk(scaled_logits, k=k, dim=-1)
             # Create a mask setting all logits to -inf initially
-            min_vals = torch.full_like(scaled_logits, float("-inf"))
+            min_vals = torch.full_like(scaled_logits, float('-inf'))
             # Use scatter to place the top-k values back into the correct positions
             scaled_logits = torch.scatter(
                 min_vals, dim=-1, index=top_k_indices, src=top_k_values
@@ -421,7 +454,9 @@ class StochasticLLMGenerator:
                 scaled_logits, descending=True, dim=-1
             )
             # Calculate cumulative probabilities
-            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            cumulative_probs = torch.cumsum(
+                F.softmax(sorted_logits, dim=-1), dim=-1
+            )
 
             # Create a mask for tokens to remove (those exceeding cumulative P)
             # Keep tokens where cumulative probability is <= top_p
@@ -431,7 +466,9 @@ class StochasticLLMGenerator:
             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
                 ..., :-1
             ].clone()
-            sorted_indices_to_remove[..., 0] = 0  # Keep the highest probability token
+            sorted_indices_to_remove[..., 0] = (
+                0  # Keep the highest probability token
+            )
 
             # Scatter the removal mask back to the original logit positions
             indices_to_remove = torch.scatter(
@@ -441,7 +478,9 @@ class StochasticLLMGenerator:
                 src=sorted_indices_to_remove,
             )
             # Set logits of removed tokens to -inf
-            scaled_logits = scaled_logits.masked_fill(indices_to_remove, float("-inf"))
+            scaled_logits = scaled_logits.masked_fill(
+                indices_to_remove, float('-inf')
+            )
 
         # --- Sample from the filtered and scaled logits ---
         # Convert logits to probabilities
@@ -453,9 +492,13 @@ class StochasticLLMGenerator:
         # If some sequences had temp=0, override their sampled token with the greedy choice
         if zero_temp_mask.any():
             greedy_tokens = token_logits.argmax(dim=-1)
-            next_tokens = torch.where(zero_temp_mask, greedy_tokens, next_tokens)
+            next_tokens = torch.where(
+                zero_temp_mask, greedy_tokens, next_tokens
+            )
 
-        assert next_tokens.dim() == 1 and next_tokens.size(0) == token_logits.size(0)
+        assert next_tokens.dim() == 1 and next_tokens.size(
+            0
+        ) == token_logits.size(0)
         return next_tokens
 
     def _apply_token_replacement(
@@ -490,7 +533,9 @@ class StochasticLLMGenerator:
         else:
             # Handle case where no tokens have been generated yet (e.g., first step)
             generated_ids = torch.empty(
-                (input_ids.shape[0], 0), dtype=torch.long, device=input_ids.device
+                (input_ids.shape[0], 0),
+                dtype=torch.long,
+                device=input_ids.device,
             )
 
         # Determine which sequences are eligible for replacement based on the *predicted* next_tokens
@@ -551,7 +596,9 @@ class StochasticLLMGenerator:
 
             # Create masks for positive and negative logits for these tokens
             # Use the logits for the *current* batch item being processed
-            current_logits_at_penalize_indices = modified_logits[i, tokens_to_penalize]
+            current_logits_at_penalize_indices = modified_logits[
+                i, tokens_to_penalize
+            ]
 
             positive_mask = current_logits_at_penalize_indices > 0
             negative_mask = (
@@ -622,37 +669,46 @@ class StochasticLLMGenerator:
 
         generated_tokens = 0
         # Ensure unfinished_sequences is on the correct device and dtype
-        unfinished_sequences = torch.ones(batch_size, dtype=torch.bool, device=device)
-        replacement_counts = torch.zeros(batch_size, dtype=torch.long, device=device)
+        unfinished_sequences = torch.ones(
+            batch_size, dtype=torch.bool, device=device
+        )
+        replacement_counts = torch.zeros(
+            batch_size, dtype=torch.long, device=device
+        )
 
         past_key_values = None
 
         # --- Normalize temperature ---
         if isinstance(temperature, (float, int)):
             temperature = torch.full(
-                (batch_size,), float(temperature), device=device, dtype=torch.float32
+                (batch_size,),
+                float(temperature),
+                device=device,
+                dtype=torch.float32,
             )
         elif isinstance(temperature, list):
-            temperature = torch.tensor(temperature, device=device, dtype=torch.float32)
+            temperature = torch.tensor(
+                temperature, device=device, dtype=torch.float32
+            )
         else:
             temperature = temperature.to(device=device, dtype=torch.float32)
         # Ensure temperature has the correct shape
         if temperature.dim() == 0:
             temperature = temperature.repeat(batch_size)
-        assert temperature.shape == (batch_size,), (
-            "Temperature must be a float or a tensor of shape [batch_size]"
-        )
+        assert temperature.shape == (
+            batch_size,
+        ), 'Temperature must be a float or a tensor of shape [batch_size]'
 
         # --- Main Generation Loop ---
         while generated_tokens < max_new_tokens:
             # Prepare model inputs
             model_inputs = {
-                "input_ids": input_ids
-                if past_key_values is None
-                else input_ids[:, -1:],
-                "attention_mask": attention_mask,
-                "past_key_values": past_key_values,
-                "use_cache": True,
+                'input_ids': (
+                    input_ids if past_key_values is None else input_ids[:, -1:]
+                ),
+                'attention_mask': attention_mask,
+                'past_key_values': past_key_values,
+                'use_cache': True,
             }
 
             # --- Model Forward Pass ---
@@ -728,17 +784,21 @@ class StochasticLLMGenerator:
                 )
 
             # --- Update Sequences and Check Termination ---
-            input_ids, attention_mask, unfinished_sequences = self._update_sequences(
-                input_ids,
-                attention_mask,
-                next_tokens,  # Use the final next_tokens (potentially replaced)
-                unfinished_sequences,
-                eos_token_id,
-                pad_token_id,
+            input_ids, attention_mask, unfinished_sequences = (
+                self._update_sequences(
+                    input_ids,
+                    attention_mask,
+                    next_tokens,  # Use the final next_tokens (potentially replaced)
+                    unfinished_sequences,
+                    eos_token_id,
+                    pad_token_id,
+                )
             )
 
             # Check if all sequences are finished
-            if unfinished_sequences.max() == 0:  # .max() == 0 means all are False (0)
+            if (
+                unfinished_sequences.max() == 0
+            ):  # .max() == 0 means all are False (0)
                 break
 
             generated_tokens += 1
@@ -746,17 +806,17 @@ class StochasticLLMGenerator:
         return GenerateDecoderOnlyOutput(sequences=input_ids)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
 
     if torch.backends.mps.is_available():
-        device = torch.device("mps")
+        device = torch.device('mps')
     elif torch.cuda.is_available():
-        device = torch.device("cuda")
+        device = torch.device('cuda')
     else:
-        device = torch.device("cpu")
+        device = torch.device('cpu')
 
     torch_dtype = torch.float32
     model = AutoModelForCausalLM.from_pretrained(
@@ -769,8 +829,8 @@ if __name__ == "__main__":
     # Example batch input
     message = [
         {
-            "role": "user",
-            "content": "Calen originally had 5 more pencils than does Caleb, and Caleb has 3 less than twice as many pencils as does Candy.  If Calen lost 10 pencils, which left him with 10 pencils, then how many pencils does Candy have?",
+            'role': 'user',
+            'content': 'Calen originally had 5 more pencils than does Caleb, and Caleb has 3 less than twice as many pencils as does Candy.  If Calen lost 10 pencils, which left him with 10 pencils, then how many pencils does Candy have?',
         },
     ]
 
@@ -780,12 +840,14 @@ if __name__ == "__main__":
     message_prompt = tokenizer.apply_chat_template(
         batch_messages, tokenize=False, add_generation_prompt=True
     )
-    inputs = tokenizer(message_prompt, return_tensors="pt", padding=True).to(device)
-
-    # Example batch-specific temperatures
-    temperatures = torch.linspace(0.0, 0.9, steps=group_size, dtype=torch_dtype).to(
+    inputs = tokenizer(message_prompt, return_tensors='pt', padding=True).to(
         device
     )
+
+    # Example batch-specific temperatures
+    temperatures = torch.linspace(
+        0.0, 0.9, steps=group_size, dtype=torch_dtype
+    ).to(device)
 
     # Generate text
     output = generator.generate(
@@ -811,4 +873,4 @@ if __name__ == "__main__":
 
     for i, text in enumerate(generated_texts):
         print(f"Generated [{i}]: '{text}'\n")
-        print("\n\n--\n\n")
+        print('\n\n--\n\n')

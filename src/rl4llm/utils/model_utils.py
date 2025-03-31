@@ -14,9 +14,7 @@ from transformers import (
     PreTrainedTokenizer,
 )
 
-
 from rl4llm.logging import setup_logger
-
 
 logger = setup_logger()
 
@@ -26,11 +24,11 @@ def build_longformer_classification_model_and_tokenizer(
     torch_dtype: torch.dtype,
 ) -> Tuple[LongformerForSequenceClassification, PreTrainedTokenizer]:
     """Build a binary classification model from a pretrained model."""
-    model_name = model_config["pretrained_model"]
-    checkpoint_path = model_config.get("checkpoint_path", None)
-    load_in_4bit = model_config.get("load_in_4bit", False)
-    gradient_checkpointing = model_config.get("gradient_checkpointing", False)
-    model_max_length = model_config.get("model_max_length", None)
+    model_name = model_config['pretrained_model']
+    checkpoint_path = model_config.get('checkpoint_path', None)
+    load_in_4bit = model_config.get('load_in_4bit', False)
+    gradient_checkpointing = model_config.get('gradient_checkpointing', False)
+    model_max_length = model_config.get('model_max_length', None)
 
     logger.info(f"Loading model and tokenizer for {model_name!r}")
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
@@ -49,32 +47,32 @@ def build_longformer_classification_model_and_tokenizer(
     assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
 
     model_args = {
-        "pretrained_model_name_or_path": (
+        'pretrained_model_name_or_path': (
             checkpoint_path if checkpoint_path else model_name
         ),
-        "local_files_only": True if checkpoint_path else False,
-        "torch_dtype": torch_dtype,
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
+        'local_files_only': True if checkpoint_path else False,
+        'torch_dtype': torch_dtype,
+        'pad_token_id': tokenizer.pad_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
     }
 
     if load_in_4bit:
-        model_args["quantization_config"] = BitsAndBytesConfig(
+        model_args['quantization_config'] = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
+            bnb_4bit_quant_type='nf4',
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch_dtype,
         )
 
-    id2label = {0: "NEGATIVE", 1: "POSITIVE"}
-    label2id = {"NEGATIVE": 0, "POSITIVE": 1}
+    id2label = {0: 'NEGATIVE', 1: 'POSITIVE'}
+    label2id = {'NEGATIVE': 0, 'POSITIVE': 1}
     model = LongformerForSequenceClassification.from_pretrained(
         **model_args, num_labels=2, id2label=id2label, label2id=label2id
     )
 
     if gradient_checkpointing:
         model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
+            gradient_checkpointing_kwargs={'use_reentrant': False}
         )
 
     return model, tokenizer
@@ -85,12 +83,12 @@ def build_model_and_tokenizer(
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
     """Creates the model and tokenizer from the given configuration."""
 
-    model_name = model_config["pretrained_model"]
-    checkpoint_path = model_config.get("checkpoint_path", None)
-    load_in_4bit = model_config.get("load_in_4bit", False)
-    gradient_checkpointing = model_config.get("gradient_checkpointing", False)
-    flash_attention = model_config.get("flash_attention", None)
-    model_max_length = model_config.get("model_max_length", None)
+    model_name = model_config['pretrained_model']
+    checkpoint_path = model_config.get('checkpoint_path', None)
+    load_in_4bit = model_config.get('load_in_4bit', False)
+    gradient_checkpointing = model_config.get('gradient_checkpointing', False)
+    flash_attention = model_config.get('flash_attention', None)
+    model_max_length = model_config.get('model_max_length', None)
 
     logger.info(f"Loading model and tokenizer for {model_name!r}")
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
@@ -105,21 +103,23 @@ def build_model_and_tokenizer(
     assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
 
     model_args = {
-        "pretrained_model_name_or_path": (
+        'pretrained_model_name_or_path': (
             checkpoint_path if checkpoint_path else model_name
         ),
-        "local_files_only": True if checkpoint_path else False,
-        "torch_dtype": torch_dtype,
-        "use_cache": False,
-        "attn_implementation": ("flash_attention_2" if flash_attention else "eager"),
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
+        'local_files_only': True if checkpoint_path else False,
+        'torch_dtype': torch_dtype,
+        'use_cache': False,
+        'attn_implementation': (
+            'flash_attention_2' if flash_attention else 'eager'
+        ),
+        'pad_token_id': tokenizer.pad_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
     }
 
     if load_in_4bit:
-        model_args["quantization_config"] = BitsAndBytesConfig(
+        model_args['quantization_config'] = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
+            bnb_4bit_quant_type='nf4',
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch_dtype,
         )
@@ -127,7 +127,7 @@ def build_model_and_tokenizer(
     model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(**model_args)
     if gradient_checkpointing:
         model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
+            gradient_checkpointing_kwargs={'use_reentrant': False}
         )
 
     return model, tokenizer
@@ -143,10 +143,10 @@ def get_trainable_param_groups(
             if any(
                 nd in name
                 for nd in [
-                    "bias",
-                    "layer_norm.weight",
-                    "layernorm.weight",
-                    "norm.weight",
+                    'bias',
+                    'layer_norm.weight',
+                    'layernorm.weight',
+                    'norm.weight',
                 ]
             ):
                 nodecay_params.append(param)
@@ -155,16 +155,16 @@ def get_trainable_param_groups(
 
     optim_groups = [
         {
-            "params": nodecay_params,
-            "lr": learning_rate,
-            "weight_decay": 0.0,
-            "name": "nodecay",
+            'params': nodecay_params,
+            'lr': learning_rate,
+            'weight_decay': 0.0,
+            'name': 'nodecay',
         },
         {
-            "params": decay_params,
-            "lr": learning_rate,
-            "weight_decay": weight_decay,
-            "name": "decay",
+            'params': decay_params,
+            'lr': learning_rate,
+            'weight_decay': weight_decay,
+            'name': 'decay',
         },
     ]
 
@@ -179,29 +179,29 @@ def create_optimizer_and_scheduler(
 ) -> Tuple[Optimizer, OneCycleLR]:
     """Creates the optimizer and scheduler from the given configuration."""
 
-    optim_type = optimizer_config["type"]
-    opt_params = optimizer_config["params"]
-    lr = float(opt_params["lr"])
-    eps = float(opt_params["eps"])
-    weight_decay = float(opt_params["weight_decay"])
-    betas = opt_params["betas"]
+    optim_type = optimizer_config['type']
+    opt_params = optimizer_config['params']
+    lr = float(opt_params['lr'])
+    eps = float(opt_params['eps'])
+    weight_decay = float(opt_params['weight_decay'])
+    betas = opt_params['betas']
 
     optim_groups = get_trainable_param_groups(policy_model, lr, weight_decay)
 
-    optim_kwargs = {"lr": lr, "eps": eps, "betas": betas}
+    optim_kwargs = {'lr': lr, 'eps': eps, 'betas': betas}
 
-    if optim_type == "AdamW8bit":
+    if optim_type == 'AdamW8bit':
         import bitsandbytes as bnb
 
         optimizer = bnb.optim.AdamW8bit(optim_groups, **optim_kwargs)
-    elif optim_type == "AdamW":
+    elif optim_type == 'AdamW':
         optimizer = torch.optim.AdamW(optim_groups, **optim_kwargs)
     else:
         optimizer = torch.optim.Adam(optim_groups, **optim_kwargs)
 
     if scheduler_config is not None:
-        scheduler_type = scheduler_config["type"]
-        scheduler_params = scheduler_config["params"]
+        scheduler_type = scheduler_config['type']
+        scheduler_params = scheduler_config['params']
         scheduler = create_scheduler(
             optimizer, max_lr=lr, total_steps=total_steps, **scheduler_params
         )
@@ -239,5 +239,5 @@ def create_scheduler(
         pct_start=warmup_fraction,
         div_factor=1 / initial_lr_fraction,
         final_div_factor=1 / (initial_lr_fraction * final_lr_fraction),
-        anneal_strategy="cos",
+        anneal_strategy='cos',
     )

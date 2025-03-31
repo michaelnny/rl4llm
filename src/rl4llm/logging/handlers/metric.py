@@ -2,8 +2,9 @@ import logging
 import re
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Union
-import torch
+
 import numpy as np
+import torch
 
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.logging.handlers.base import BaseHandler
@@ -25,50 +26,60 @@ class MetricHandler(BaseHandler):
     """Handles buffering, aggregation, and distributed gathering of scalar metrics."""
 
     AGGREGATORS: Dict[str, Callable] = {
-        "mean": lambda x: np.mean(x) if is_valid_array(x) else np.nan,
-        "std": lambda x: np.std(x) if is_valid_array(x) else np.nan,
-        "min": lambda x: np.min(x) if is_valid_array(x) else np.nan,
-        "max": lambda x: np.max(x) if is_valid_array(x) else np.nan,
-        "sum": lambda x: np.sum(x) if is_valid_array(x) else 0.0,
-        "last": lambda x: x[-1]
-        if is_valid_array(x)
-        else np.nan,  # Return NaN if empty for consistency
-        "p50": lambda x: calculate_percentile(x.tolist(), 50)
-        if is_valid_array(x)
-        else np.nan,
-        "p90": lambda x: calculate_percentile(x.tolist(), 90)
-        if is_valid_array(x)
-        else np.nan,
-        "p95": lambda x: calculate_percentile(x.tolist(), 95)
-        if is_valid_array(x)
-        else np.nan,
-        "p99": lambda x: calculate_percentile(x.tolist(), 99)
-        if is_valid_array(x)
-        else np.nan,
-        "count": lambda x: len(x) if x is not None and isinstance(x, np.ndarray) else 0,
+        'mean': lambda x: np.mean(x) if is_valid_array(x) else np.nan,
+        'std': lambda x: np.std(x) if is_valid_array(x) else np.nan,
+        'min': lambda x: np.min(x) if is_valid_array(x) else np.nan,
+        'max': lambda x: np.max(x) if is_valid_array(x) else np.nan,
+        'sum': lambda x: np.sum(x) if is_valid_array(x) else 0.0,
+        'last': lambda x: (
+            x[-1] if is_valid_array(x) else np.nan
+        ),  # Return NaN if empty for consistency
+        'p50': lambda x: (
+            calculate_percentile(x.tolist(), 50)
+            if is_valid_array(x)
+            else np.nan
+        ),
+        'p90': lambda x: (
+            calculate_percentile(x.tolist(), 90)
+            if is_valid_array(x)
+            else np.nan
+        ),
+        'p95': lambda x: (
+            calculate_percentile(x.tolist(), 95)
+            if is_valid_array(x)
+            else np.nan
+        ),
+        'p99': lambda x: (
+            calculate_percentile(x.tolist(), 99)
+            if is_valid_array(x)
+            else np.nan
+        ),
+        'count': lambda x: (
+            len(x) if x is not None and isinstance(x, np.ndarray) else 0
+        ),
     }
     BASE_DEFAULT_METRICS_AGGREGATION_CONFIG = {
-        "reward": ["mean", "std", "p50", "p90", "min", "max"],
-        "loss": ["mean"],
-        "learning_rate": ["last"],
-        "lr": ["last"],
-        "grad_norm": ["mean", "max"],
-        "gradient_norm": ["mean", "max"],
-        "entropy": ["mean"],
-        "kl": ["mean", "std"],
-        "kl_divergence": ["mean", "std"],
-        "accuracy": ["mean"],
-        "perplexity": ["mean"],
-        "policy_update": ["last"],
-        "global_step": ["last"],
-        r".*_loss$": ["mean"],
-        r".*_reward$": ["mean", "std"],
-        r".*_count$": ["sum"],
-        r".*_total$": ["sum"],
-        r".*_update$": ["sum"],
-        r".*_episodes$": ["sum"],
-        r"^time/.*_sec$": ["mean", "sum"],
-        "default": ["mean"],
+        'reward': ['mean', 'std', 'p50', 'p90', 'min', 'max'],
+        'loss': ['mean'],
+        'learning_rate': ['last'],
+        'lr': ['last'],
+        'grad_norm': ['mean', 'max'],
+        'gradient_norm': ['mean', 'max'],
+        'entropy': ['mean'],
+        'kl': ['mean', 'std'],
+        'kl_divergence': ['mean', 'std'],
+        'accuracy': ['mean'],
+        'perplexity': ['mean'],
+        'policy_update': ['last'],
+        'global_step': ['last'],
+        r'.*_loss$': ['mean'],
+        r'.*_reward$': ['mean', 'std'],
+        r'.*_count$': ['sum'],
+        r'.*_total$': ['sum'],
+        r'.*_update$': ['sum'],
+        r'.*_episodes$': ['sum'],
+        r'^time/.*_sec$': ['mean', 'sum'],
+        'default': ['mean'],
     }
 
     def __init__(
@@ -87,12 +98,18 @@ class MetricHandler(BaseHandler):
         )
         if user_aggregation_config:
             self.effective_metrics_config.update(user_aggregation_config)
-            self._logger.info("User metrics aggregation config provided. Merged.")
+            self._logger.info(
+                'User metrics aggregation config provided. Merged.'
+            )
         else:
-            self._logger.info("Using base default metrics aggregation config.")
-        self._logger.debug(f"Effective metrics config: {self.effective_metrics_config}")
+            self._logger.info('Using base default metrics aggregation config.')
+        self._logger.debug(
+            f"Effective metrics config: {self.effective_metrics_config}"
+        )
 
-        self._metric_buffer: Dict[str, List[Union[float, int]]] = defaultdict(list)
+        self._metric_buffer: Dict[str, List[Union[float, int]]] = defaultdict(
+            list
+        )
         self._logged_regex_errors: set = set()
 
     def log_scalar(self, key: str, value: Union[float, int, torch.Tensor]):
@@ -120,7 +137,7 @@ class MetricHandler(BaseHandler):
         if metric_name in self.effective_metrics_config:
             return self.effective_metrics_config[metric_name]
         for pattern, methods in self.effective_metrics_config.items():
-            is_regex = any(c in pattern for c in r"^$*+?{}[]\|()")
+            is_regex = any(c in pattern for c in r'^$*+?{}[]\|()')
             if is_regex:
                 try:
                     if re.match(pattern, metric_name):
@@ -131,13 +148,15 @@ class MetricHandler(BaseHandler):
                             f"Invalid regex pattern '{pattern}': {e}. Skipping."
                         )
                         self._logged_regex_errors.add(pattern)
-        return self.effective_metrics_config.get("default", ["mean"])
+        return self.effective_metrics_config.get('default', ['mean'])
 
     def aggregate(self) -> Dict[str, float]:
         """Gathers metrics from all ranks and computes aggregates on rank 0."""
         final_aggregated_metrics = {}
         local_metric_buffer = self._metric_buffer
-        gathered_buffers: Optional[List[Dict[str, List[Union[float, int]]]]] = None
+        gathered_buffers: Optional[List[Dict[str, List[Union[float, int]]]]] = (
+            None
+        )
 
         if self.world_size > 1:
             self.dist_manager.barrier()
@@ -148,7 +167,9 @@ class MetricHandler(BaseHandler):
             gathered_buffers = [local_metric_buffer]
 
         if self.is_master and gathered_buffers:
-            combined_metrics: Dict[str, List[Union[float, int]]] = defaultdict(list)
+            combined_metrics: Dict[str, List[Union[float, int]]] = defaultdict(
+                list
+            )
             all_metric_keys = set()
             for rank_buffer in gathered_buffers:
                 if rank_buffer:
@@ -163,7 +184,9 @@ class MetricHandler(BaseHandler):
 
             for key, all_values in combined_metrics.items():
                 if not all_values:
-                    self._logger.debug(f"Skipping empty/non-finite metric: {key}")
+                    self._logger.debug(
+                        f"Skipping empty/non-finite metric: {key}"
+                    )
                     continue
                 aggregation_methods = self._get_aggregation_methods(key)
                 self._logger.debug(
@@ -173,11 +196,18 @@ class MetricHandler(BaseHandler):
                     aggregator_func = self.AGGREGATORS.get(method_name)
                     if aggregator_func:
                         try:
-                            computed_value = aggregator_func(np.array(all_values))
+                            computed_value = aggregator_func(
+                                np.array(all_values)
+                            )
                             log_key = key
-                            if method_name != "mean" or len(aggregation_methods) > 1:
+                            if (
+                                method_name != 'mean'
+                                or len(aggregation_methods) > 1
+                            ):
                                 log_key = f"{key}_{method_name}"
-                            final_aggregated_metrics[log_key] = float(computed_value)
+                            final_aggregated_metrics[log_key] = float(
+                                computed_value
+                            )
                         except Exception as e:
                             self._logger.error(
                                 f"Error computing '{method_name}' for '{key}': {e}"
@@ -194,10 +224,10 @@ class MetricHandler(BaseHandler):
     def clear_buffer(self) -> None:
         """Clears the local metric buffer."""
         self._metric_buffer.clear()
-        self._logger.debug("Cleared local metric buffer.")
+        self._logger.debug('Cleared local metric buffer.')
 
     def close(self) -> None:
         """Closes the MetricHandler (currently no specific resources to release)."""
-        self._logger.debug("Closing MetricHandler.")
+        self._logger.debug('Closing MetricHandler.')
         # No network or file resources owned directly by this handler
         pass

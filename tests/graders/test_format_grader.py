@@ -22,20 +22,40 @@ def grader():
     'input_text, expected',
     [
         # valid input: both tags present
-        ('<think>What is the capital of France?</think><answer>Paris</answer>', 1.0),
+        (
+            '<think>What is the capital of France?</think><answer>Paris</answer>',
+            1.0,
+        ),
         # missing <think> tag: invalid
         ('<answer>Paris</answer>', -1.0),
         # missing <answer> tag: invalid
         ('<think>What is the capital of France?</think>', -1.0),
-        ('<think>What is the capital of France?</think><answer>Paris</answer><answer>London</answer>', -1.0),
-        ('<think> </think><answer>What is the capital of France? London</answer>', -1.0),
-        ('<think> \n\n </think><answer>What is the capital of France? London</answer>', -1.0),
-        ('<think>What is the capital of France? London</think><answer> </answer>', -1.0),
-        ('<think>What is the capital of France? London</think><answer> \n\n </answer>', -1.0),
+        (
+            '<think>What is the capital of France?</think><answer>Paris</answer><answer>London</answer>',
+            -1.0,
+        ),
+        (
+            '<think> </think><answer>What is the capital of France? London</answer>',
+            -1.0,
+        ),
+        (
+            '<think> \n\n </think><answer>What is the capital of France? London</answer>',
+            -1.0,
+        ),
+        (
+            '<think>What is the capital of France? London</think><answer> </answer>',
+            -1.0,
+        ),
+        (
+            '<think>What is the capital of France? London</think><answer> \n\n </answer>',
+            -1.0,
+        ),
     ],
 )
 def test_xml_format_score(grader, input_text, expected):
-    with patch.object(grader, '_FormatGrader__check_coherent', return_value=[True]):
+    with patch.object(
+        grader, '_FormatGrader__check_coherent', return_value=[True]
+    ):
         assert grader(input_text) == expected
 
 

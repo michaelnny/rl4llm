@@ -11,7 +11,7 @@ from rl4llm.constants import LOGGER_NAME
 logger = logging.getLogger(LOGGER_NAME)
 
 # Generic Type Variable for object methods
-T = TypeVar("T")
+T = TypeVar('T')
 
 
 class DistributedManager:
@@ -26,7 +26,9 @@ class DistributedManager:
 
     _instance = None  # Optional: For Singleton pattern if desired
 
-    def __init__(self, backend: str = "nccl", init_method: Optional[str] = None):
+    def __init__(
+        self, backend: str = 'nccl', init_method: Optional[str] = None
+    ):
         """
         Initializes the distributed environment.
 
@@ -36,52 +38,54 @@ class DistributedManager:
                 the process group (e.g., 'env://'). If None, defaults to 'env://'.
         """
         if not dist.is_available():
-            raise RuntimeError("Distributed training is not available.")
+            raise RuntimeError('Distributed training is not available.')
 
         if not dist.is_initialized():
             # Default to environment variable initialization if not specified
             if init_method is None:
-                init_method = "env://"
+                init_method = 'env://'
                 # Ensure necessary env vars are set for 'env://'
                 required_env = [
-                    "RANK",
-                    "WORLD_SIZE",
-                    "MASTER_ADDR",
-                    "MASTER_PORT",
+                    'RANK',
+                    'WORLD_SIZE',
+                    'MASTER_ADDR',
+                    'MASTER_PORT',
                 ]
                 if not all(env in os.environ for env in required_env):
                     # Fallback for single-node, single-process execution
                     if (
-                        "WORLD_SIZE" not in os.environ
-                        or int(os.environ.get("WORLD_SIZE", 1)) == 1
+                        'WORLD_SIZE' not in os.environ
+                        or int(os.environ.get('WORLD_SIZE', 1)) == 1
                     ):
-                        os.environ["MASTER_ADDR"] = "127.0.0.1"
-                        os.environ["MASTER_PORT"] = (
-                            "29500"  # Default port, can be randomized
+                        os.environ['MASTER_ADDR'] = '127.0.0.1'
+                        os.environ['MASTER_PORT'] = (
+                            '29500'  # Default port, can be randomized
                         )
-                        os.environ["RANK"] = "0"
-                        os.environ["WORLD_SIZE"] = "1"
+                        os.environ['RANK'] = '0'
+                        os.environ['WORLD_SIZE'] = '1'
                         logger.warning(
-                            "Distributed environment variables not fully set. "
-                            "Assuming single-process execution (rank 0, world size 1)."
+                            'Distributed environment variables not fully set. '
+                            'Assuming single-process execution (rank 0, world size 1).'
                         )
                     else:
                         raise ValueError(
-                            "Required environment variables for distributed training "
+                            'Required environment variables for distributed training '
                             f"(RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT) are not set, "
                             f"and WORLD_SIZE ({os.environ.get('WORLD_SIZE')}) > 1."
                         )
 
             # Get rank and world size *before* init_process_group if possible
             # (some init methods might need them set externally)
-            self.world_size = int(os.environ.get("WORLD_SIZE", 1))
-            self.global_rank = int(os.environ.get("RANK", 0))
+            self.world_size = int(os.environ.get('WORLD_SIZE', 1))
+            self.global_rank = int(os.environ.get('RANK', 0))
             self.local_rank = int(
-                os.environ.get("LOCAL_RANK", self.global_rank)
+                os.environ.get('LOCAL_RANK', self.global_rank)
             )  # Default local = global if not set
 
             # Add rank info to logger adapter for context
-            self.logger = logging.LoggerAdapter(logger, {"rank": self.global_rank})
+            self.logger = logging.LoggerAdapter(
+                logger, {'rank': self.global_rank}
+            )
 
             self.logger.info(
                 f"Initializing process group with backend='{backend}', init_method='{init_method}'"
@@ -92,37 +96,43 @@ class DistributedManager:
                 world_size=self.world_size,
                 rank=self.global_rank,
             )
-            self.logger.info("Process group initialized.")
+            self.logger.info('Process group initialized.')
 
         else:
             # Already initialized, just retrieve info
             self.world_size = dist.get_world_size()
             self.global_rank = dist.get_rank()
             self.local_rank = int(
-                os.environ.get("LOCAL_RANK", self.global_rank)
+                os.environ.get('LOCAL_RANK', self.global_rank)
             )  # Assume local = global if not set
-            self.logger = logging.LoggerAdapter(logger, {"rank": self.global_rank})
-            self.logger.info("Process group already initialized. Attaching manager.")
+            self.logger = logging.LoggerAdapter(
+                logger, {'rank': self.global_rank}
+            )
+            self.logger.info(
+                'Process group already initialized. Attaching manager.'
+            )
 
         # Set device based on local rank
         if (
             torch.cuda.is_available()
             and torch.cuda.device_count()
-            >= self.world_size / int(os.environ.get("NODE_COUNT", 1))
+            >= self.world_size / int(os.environ.get('NODE_COUNT', 1))
         ):
             # Check if CUDA is available and there are enough GPUs
             if torch.cuda.device_count() > self.local_rank:
-                self.device = torch.device("cuda", self.local_rank)
+                self.device = torch.device('cuda', self.local_rank)
                 torch.cuda.set_device(self.device)
                 self.logger.info(f"Set device to {self.device}")
             else:
                 self.logger.warning(
                     f"CUDA available but local_rank {self.local_rank} >= device_count {torch.cuda.device_count()}. Using CPU."
                 )
-                self.device = torch.device("cpu")
+                self.device = torch.device('cpu')
         else:
-            self.logger.warning("CUDA not available or not enough GPUs. Using CPU.")
-            self.device = torch.device("cpu")
+            self.logger.warning(
+                'CUDA not available or not enough GPUs. Using CPU.'
+            )
+            self.device = torch.device('cpu')
 
         self.backend = dist.get_backend()
         self.logger.info(
@@ -141,7 +151,7 @@ class DistributedManager:
         """Synchronizes all processes. Blocks until all processes reach this point."""
         if self.world_size > 1:
             dist.barrier()
-            self.logger.debug("Barrier synchronization complete.")
+            self.logger.debug('Barrier synchronization complete.')
 
     # --- Tensor Communication ---
     def gather_tensor(
@@ -172,7 +182,7 @@ class DistributedManager:
             )  # Match return type expectation
 
         tensor = tensor.contiguous().to(
-            self.device if tensor.device.type != "cpu" else "cpu"
+            self.device if tensor.device.type != 'cpu' else 'cpu'
         )  # Ensure contiguous and correct device for comms
 
         gather_list = (
@@ -223,10 +233,12 @@ class DistributedManager:
             )  # Match return type expectation
 
         tensor = tensor.contiguous().to(
-            self.device if tensor.device.type != "cpu" else "cpu"
+            self.device if tensor.device.type != 'cpu' else 'cpu'
         )  # Ensure contiguous and correct device
 
-        gathered_tensors = [torch.zeros_like(tensor) for _ in range(self.world_size)]
+        gathered_tensors = [
+            torch.zeros_like(tensor) for _ in range(self.world_size)
+        ]
         dist.all_gather(gathered_tensors, tensor)
 
         if concat_dim is not None:
@@ -264,7 +276,7 @@ class DistributedManager:
             return tensor
 
         tensor = tensor.contiguous().to(
-            self.device if tensor.device.type != "cpu" else "cpu"
+            self.device if tensor.device.type != 'cpu' else 'cpu'
         )  # Ensure correct device
 
         dist.reduce(tensor, dst=dst, op=op)
@@ -292,14 +304,16 @@ class DistributedManager:
             return tensor
 
         tensor = tensor.contiguous().to(
-            self.device if tensor.device.type != "cpu" else "cpu"
+            self.device if tensor.device.type != 'cpu' else 'cpu'
         )  # Ensure correct device
 
         dist.all_reduce(tensor, op=op)
         self.logger.debug(f"Tensor all-reduced with op {op}.")
         return tensor
 
-    def broadcast_tensor(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
+    def broadcast_tensor(
+        self, tensor: torch.Tensor, src: int = 0
+    ) -> torch.Tensor:
         """
         Broadcasts a tensor from the source rank to all other processes.
 
@@ -321,7 +335,7 @@ class DistributedManager:
         # Ensure tensor is on the correct device, especially for non-src ranks
         # where it acts as a buffer
         tensor = tensor.contiguous().to(
-            self.device if tensor.device.type != "cpu" else "cpu"
+            self.device if tensor.device.type != 'cpu' else 'cpu'
         )
 
         dist.broadcast(tensor, src=src)
@@ -347,7 +361,9 @@ class DistributedManager:
 
         # Use pickle implicitly via dist.gather_object
         output_objects = (
-            [None for _ in range(self.world_size)] if self.global_rank == dst else None
+            [None for _ in range(self.world_size)]
+            if self.global_rank == dst
+            else None
         )
         dist.gather_object(obj, object_gather_list=output_objects, dst=dst)
         self.logger.debug(f"Objects gathered at rank {dst}.")
@@ -369,7 +385,7 @@ class DistributedManager:
 
         output_objects = [None for _ in range(self.world_size)]
         dist.all_gather_object(output_objects, obj)
-        self.logger.debug("Objects all-gathered.")
+        self.logger.debug('Objects all-gathered.')
         return output_objects  # type: ignore # Correctly typed based on runtime check
 
     def broadcast_object(self, obj: T, src: int = 0) -> T:
@@ -399,7 +415,9 @@ class DistributedManager:
         self.logger.debug(f"Object broadcasted from rank {src}.")
         return obj_list[0]  # type: ignore # Correctly typed based on runtime check
 
-    def scatter_object(self, scatter_list: Optional[List[T]], src: int = 0) -> T:
+    def scatter_object(
+        self, scatter_list: Optional[List[T]], src: int = 0
+    ) -> T:
         """
         Scatters a list of picklable Python objects from the source rank to all processes.
         Each process receives one object from the list based on its rank.
@@ -424,16 +442,18 @@ class DistributedManager:
                     return scatter_list[0]
                 else:
                     raise ValueError(
-                        "On rank 0 with world_size=1, scatter_list must be a list with one element."
+                        'On rank 0 with world_size=1, scatter_list must be a list with one element.'
                     )
             else:
                 # This case shouldn't happen in correct setup but handle defensively
                 raise RuntimeError(
-                    "scatter_object called on non-master rank with world_size=1"
+                    'scatter_object called on non-master rank with world_size=1'
                 )
 
         # Prepare arguments for dist.scatter_object_list
-        output_obj_list = [None]  # Placeholder for the received object on this rank
+        output_obj_list = [
+            None
+        ]  # Placeholder for the received object on this rank
         input_list = scatter_list if self.global_rank == src else None
 
         # Validation on source rank
@@ -459,7 +479,7 @@ class DistributedManager:
         return output_obj_list[0]  # type: ignore # Correctly typed based on runtime check
 
     @classmethod
-    def get_instance(cls, **kwargs) -> "DistributedManager":
+    def get_instance(cls, **kwargs) -> 'DistributedManager':
         """Gets the singleton instance of the DistributedManager."""
         if cls._instance is None:
             cls._instance = cls(**kwargs)
@@ -468,13 +488,15 @@ class DistributedManager:
     def teardown(self) -> None:
         """Cleans up the distributed process group."""
         if dist.is_initialized():
-            self.logger.info("Destroying process group.")
+            self.logger.info('Destroying process group.')
             dist.destroy_process_group()
-            DistributedManager._instance = None  # Clear singleton instance if used
+            DistributedManager._instance = (
+                None  # Clear singleton instance if used
+            )
 
 
 # --- Example Usage ---
-if __name__ == "__main__":
+if __name__ == '__main__':
     # This example assumes you run it using torchrun or similar:
     # torchrun --nproc_per_node=2 your_script_name.py
 
@@ -482,23 +504,29 @@ if __name__ == "__main__":
     try:
         # Using default 'env://' init method
         manager = DistributedManager(
-            backend="nccl" if torch.cuda.is_available() else "gloo"
+            backend='nccl' if torch.cuda.is_available() else 'gloo'
         )
 
         # === Tensor Example ===
         # Create a tensor unique to each rank but on the correct device
-        my_tensor = torch.ones(2, 2, device=manager.device) * (manager.global_rank + 1)
+        my_tensor = torch.ones(2, 2, device=manager.device) * (
+            manager.global_rank + 1
+        )
         manager.logger.info(f"Initial tensor: \n{my_tensor}")
         manager.barrier()
 
         # All-gather tensors (concatenate along dim 0)
         all_tensors = manager.all_gather_tensor(my_tensor, concat_dim=0)
-        manager.logger.info(f"All-gathered tensor (concatenated): \n{all_tensors}")
+        manager.logger.info(
+            f"All-gathered tensor (concatenated): \n{all_tensors}"
+        )
         manager.barrier()
 
         # All-gather tensors (as a list)
         all_tensors_list = manager.all_gather_tensor(my_tensor, concat_dim=None)
-        if all_tensors_list:  # Check as it might return tensor directly if concat_dim=0 and exception occurs
+        if (
+            all_tensors_list
+        ):  # Check as it might return tensor directly if concat_dim=0 and exception occurs
             manager.logger.info(
                 f"All-gathered tensor (list): {[t.shape for t in all_tensors_list]}"
             )
@@ -509,19 +537,25 @@ if __name__ == "__main__":
             broadcast_data = torch.tensor([10.0, 20.0], device=manager.device)
         else:
             # Non-src ranks need a buffer tensor with the correct shape/dtype/device
-            broadcast_data = torch.empty(2, dtype=torch.float32, device=manager.device)
+            broadcast_data = torch.empty(
+                2, dtype=torch.float32, device=manager.device
+            )
 
-        received_broadcast_tensor = manager.broadcast_tensor(broadcast_data, src=0)
-        manager.logger.info(f"Received broadcast tensor: {received_broadcast_tensor}")
+        received_broadcast_tensor = manager.broadcast_tensor(
+            broadcast_data, src=0
+        )
+        manager.logger.info(
+            f"Received broadcast tensor: {received_broadcast_tensor}"
+        )
         manager.barrier()
 
         # === Object Example (Model Weights Dictionary) ===
 
         # 1. Create different "weights" on each rank
         my_weights = {
-            "layer1.weight": torch.rand(4, 4) * (manager.global_rank + 1),
-            "layer1.bias": torch.zeros(4) + manager.global_rank,
-            "metadata": f"Data from rank {manager.global_rank}",
+            'layer1.weight': torch.rand(4, 4) * (manager.global_rank + 1),
+            'layer1.bias': torch.zeros(4) + manager.global_rank,
+            'metadata': f"Data from rank {manager.global_rank}",
         }
         manager.logger.info(
             f"Initial weights keys: {list(my_weights.keys())}, metadata: {my_weights['metadata']}"
@@ -534,7 +568,9 @@ if __name__ == "__main__":
         else:
             weights_to_broadcast = None  # Only needed on src rank
 
-        broadcasted_weights = manager.broadcast_object(weights_to_broadcast, src=0)
+        broadcasted_weights = manager.broadcast_object(
+            weights_to_broadcast, src=0
+        )
         # Verify received weights
         manager.logger.info(
             f"Received broadcasted weights. Metadata: '{broadcasted_weights['metadata']}', "
@@ -544,13 +580,15 @@ if __name__ == "__main__":
 
         # 3. Gather objects (e.g., metrics) to rank 0
         my_metric = {
-            "loss": torch.rand(1).item() * (manager.global_rank + 1),
-            "rank": manager.global_rank,
+            'loss': torch.rand(1).item() * (manager.global_rank + 1),
+            'rank': manager.global_rank,
         }
         gathered_metrics = manager.gather_object(my_metric, dst=0)
 
         if manager.is_master:
-            manager.logger.info(f"Gathered metrics on rank 0: {gathered_metrics}")
+            manager.logger.info(
+                f"Gathered metrics on rank 0: {gathered_metrics}"
+            )
         else:
             manager.logger.info(
                 f"Gathered metrics on rank {manager.global_rank}: {gathered_metrics} (should be None)"
@@ -566,13 +604,15 @@ if __name__ == "__main__":
         # 5. Scatter objects (e.g., configurations) from rank 0
         scatter_data = None
         if manager.is_master:
-            scatter_data = [f"Config for rank {r}" for r in range(manager.world_size)]
+            scatter_data = [
+                f"Config for rank {r}" for r in range(manager.world_size)
+            ]
 
         my_config = manager.scatter_object(scatter_data, src=0)
         manager.logger.info(f"Received scattered object: {my_config}")
         manager.barrier()
 
-        manager.logger.info("Example finished successfully.")
+        manager.logger.info('Example finished successfully.')
 
     except Exception as e:
         # Use root logger here as manager logger might not be initialized if __init__ failed
@@ -582,5 +622,5 @@ if __name__ == "__main__":
 
     finally:
         # Ensure cleanup happens even if errors occur
-        if "manager" in locals() and isinstance(manager, DistributedManager):
+        if 'manager' in locals() and isinstance(manager, DistributedManager):
             manager.teardown()

@@ -57,7 +57,11 @@ def extract_math_answer_from_patterned_text(answer_text: str) -> Optional[str]:
     Extracts the answer from a string, handling various cases, including
     text after the answer and removing trailing commas.
     """
-    match = re.search(r'the\s+(final\s+)?answer\s+is:?\s*([\d,\.]+)(?:\.|\s+|$)', answer_text, re.IGNORECASE)
+    match = re.search(
+        r'the\s+(final\s+)?answer\s+is:?\s*([\d,\.]+)(?:\.|\s+|$)',
+        answer_text,
+        re.IGNORECASE,
+    )
     if match:
         answer = match.group(2).strip()
         if answer.endswith(',') or answer.endswith('.'):
@@ -66,7 +70,9 @@ def extract_math_answer_from_patterned_text(answer_text: str) -> Optional[str]:
     return None
 
 
-def extract_last_n_numerical_values(answer_text: str, size: int = 2) -> Optional[List[str]]:
+def extract_last_n_numerical_values(
+    answer_text: str, size: int = 2
+) -> Optional[List[str]]:
     """
     Extract a list of numerical values from the last N positions of a text string.
     """
@@ -164,7 +170,9 @@ def _remove_boxed(s: str) -> str:
     elif s.startswith('\\fbox{') and s.endswith('}'):
         return s[len('\\fbox{') : -1]
     else:
-        raise ValueError('String does not start with a recognized boxing command.')
+        raise ValueError(
+            'String does not start with a recognized boxing command.'
+        )
 
 
 def _last_boxed_only_string(string: str) -> Optional[str]:
@@ -323,7 +331,9 @@ def _normalize_latex_string(input_string: str) -> str:
     string = string.replace('^\\circ', '')
 
     # Remove \text{} wrappers
-    if _has_numbers(original_string):  # Use the original latex to check for numbers
+    if _has_numbers(
+        original_string
+    ):  # Use the original latex to check for numbers
         # Remove \text{} commands and their content
         string = re.sub(r'\\text{.*?}', '', string)
         string = re.sub(r'\text{.*?}', '', string)

@@ -16,7 +16,9 @@ class BaseHandler(abc.ABC):
             logger: Logger instance for internal handler logging.
         """
         self._logger = (
-            logger if logger is not None else logging.getLogger(self.__class__.__name__)
+            logger
+            if logger is not None
+            else logging.getLogger(self.__class__.__name__)
         )
         self._logger.debug(f"Initialized {self.__class__.__name__}")
 

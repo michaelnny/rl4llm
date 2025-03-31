@@ -1,28 +1,8 @@
 {
-    "total_samples": 200000,
-    "coherent_samples": 100000,
-    "incoherent_samples": 100000,
-    "train_samples": 180000,
-    "test_samples": 20000,
-    "max_tokens_per_sample": 4000,
-    "token_stats": {
-        "combined": {
-            "average_tokens": 2622.81526,
-            "min_tokens": 1200,
-            "max_tokens": 4000,
-            "total_tokens": 524563052
-        },
-        "positive": {
-            "average_tokens": 2378.16105,
-            "min_tokens": 1200,
-            "max_tokens": 4000,
-            "total_tokens": 237816105
-        },
-        "negative": {
-            "average_tokens": 2867.46947,
-            "min_tokens": 1261,
-            "max_tokens": 4000,
-            "total_tokens": 286746947
-        }
-    }
+    "train_size": 10530,
+    "test_size": 1170,
+    "positive_train_size": 5265,
+    "positive_test_size": 585,
+    "negative_train_size": 5265,
+    "negative_test_size": 585
 }

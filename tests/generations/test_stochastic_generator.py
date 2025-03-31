@@ -1,22 +1,23 @@
+from unittest.mock import (  # Use MagicMock for flexibility
+    MagicMock,
+    Mock,
+    call,
+    patch,
+)
+
 import pytest
 import torch
 import torch.nn.functional as F
-from unittest.mock import (
-    Mock,
-    MagicMock,
-    patch,
-    call,
-)  # Use MagicMock for flexibility
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 try:
     from rl4llm.generations.stochastic_llm_generator import (
-        StochasticLLMGenerator,
         GenerateDecoderOnlyOutput,
+        StochasticLLMGenerator,
     )
 except ImportError:
     pytest.skip(
-        "Skipping tests because stochastic_llm_generator module not found.",
+        'Skipping tests because stochastic_llm_generator module not found.',
         allow_module_level=True,
     )
 
@@ -38,7 +39,7 @@ def mock_model():
 @pytest.fixture
 def mock_tokenizer():
     tokenizer = Mock(spec=PreTrainedTokenizer)
-    tokenizer.batch_decode.return_value = ["Test text 1", "Test text 2"]
+    tokenizer.batch_decode.return_value = ['Test text 1', 'Test text 2']
     tokenizer.eos_token_id = 50
     tokenizer.pad_token_id = 0
     return tokenizer
@@ -46,7 +47,7 @@ def mock_tokenizer():
 
 @pytest.fixture
 def device():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 @pytest.fixture
@@ -75,9 +76,9 @@ def generator(mock_model, mock_tokenizer, device):
     # Define what the model should return for each forward pass
     vocab_logits = torch.zeros(batch_size, 1, vocab_size, device=device)
     mock_outputs = [
-        MockModelOutput(logits=vocab_logits, past_key_values=("mock_past",)),
-        MockModelOutput(logits=vocab_logits, past_key_values=("mock_past",)),
-        MockModelOutput(logits=vocab_logits, past_key_values=("mock_past",)),
+        MockModelOutput(logits=vocab_logits, past_key_values=('mock_past',)),
+        MockModelOutput(logits=vocab_logits, past_key_values=('mock_past',)),
+        MockModelOutput(logits=vocab_logits, past_key_values=('mock_past',)),
     ]
     mock_model.side_effect = mock_outputs
 
@@ -91,12 +92,14 @@ def sample_input_tensors(device):
     vocab_size = 100
 
     return {
-        "input_ids": torch.randint(0, vocab_size, (batch_size, seq_len), device=device),
-        "attention_mask": torch.ones(
+        'input_ids': torch.randint(
+            0, vocab_size, (batch_size, seq_len), device=device
+        ),
+        'attention_mask': torch.ones(
             batch_size, seq_len, device=device, dtype=torch.long
         ),
-        "logits": torch.randn(batch_size, vocab_size, device=device),
-        "temperature": torch.tensor(
+        'logits': torch.randn(batch_size, vocab_size, device=device),
+        'temperature': torch.tensor(
             [0.7, 0.0], device=device
         ),  # Mix of sampling and greedy
     }
@@ -105,7 +108,7 @@ def sample_input_tensors(device):
 # Helper function for correctness callback tests
 def mock_correctness_callback(text):
     # Example callback that marks text containing "error" as incorrect
-    return 0.0 if "error" in text else 1.0
+    return 0.0 if 'error' in text else 1.0
 
 
 # Core functionality tests
@@ -136,7 +139,9 @@ class TestExploreLLMGeneratorInitialization:
             torch.tensor(source_tokens, device=device),
         )
 
-    def test_initialization_with_defaults(self, mock_model, mock_tokenizer, device):
+    def test_initialization_with_defaults(
+        self, mock_model, mock_tokenizer, device
+    ):
         """Test initialization with default values."""
         generator = StochasticLLMGenerator(
             model=mock_model, tokenizer=mock_tokenizer, device=device
@@ -206,7 +211,9 @@ class TestPatternDetection:
         assert result[1].item() is False
         assert result[2].item() is True
 
-    def test_has_pattern_with_sequence_shorter_than_pattern(self, generator, device):
+    def test_has_pattern_with_sequence_shorter_than_pattern(
+        self, generator, device
+    ):
         """Test pattern detection when sequence is shorter than pattern."""
         pattern = [5, 7, 9]
         # Create input shorter than pattern
@@ -332,9 +339,13 @@ class TestCorrectnessCheck:
         result = generator._check_correctness(generated_ids, can_replace, None)
 
         assert result.shape == (batch_size,)
-        assert not result.any()  # All should be correct (no callback to say otherwise)
+        assert (
+            not result.any()
+        )  # All should be correct (no callback to say otherwise)
 
-    def test_check_correctness_with_callback(self, generator, device, monkeypatch):
+    def test_check_correctness_with_callback(
+        self, generator, device, monkeypatch
+    ):
         """Test correctness checking with callback that marks some as incorrect."""
         batch_size = 3
         generated_ids = torch.randint(0, 100, (batch_size, 10), device=device)
@@ -344,8 +355,8 @@ class TestCorrectnessCheck:
 
         # Mock the tokenizer.batch_decode to return controlled test strings
         generator.tokenizer.batch_decode.return_value = [
-            "This has an error",  # Should be marked incorrect
-            "This is fine",  # Should be marked correct
+            'This has an error',  # Should be marked incorrect
+            'This is fine',  # Should be marked correct
         ]
 
         result = generator._check_correctness(
@@ -364,19 +375,19 @@ class TestCorrectnessCheck:
         can_replace = torch.ones(batch_size, dtype=torch.bool, device=device)
 
         def failing_callback(text):
-            if text == "Test text 1":
-                raise ValueError("Test exception")
+            if text == 'Test text 1':
+                raise ValueError('Test exception')
             return 0.5  # Half correct
 
         # Should handle the exception gracefully and continue
-        with patch("builtins.print") as mock_print:
+        with patch('builtins.print') as mock_print:
             result = generator._check_correctness(
                 generated_ids, can_replace, failing_callback
             )
 
             # Verify the warning was printed
             assert mock_print.call_count == 1
-            assert "Warning" in mock_print.call_args[0][0]
+            assert 'Warning' in mock_print.call_args[0][0]
 
         # The sequence that raised an exception should be marked as correct (false=correct)
         assert result[0].item() is False
@@ -411,10 +422,14 @@ class TestTokenReplacement:
         assert torch.equal(modified_tokens, next_tokens)
         assert not replace_mask.any()
 
-    def test_replace_special_tokens_no_eligible_sequences(self, generator, device):
+    def test_replace_special_tokens_no_eligible_sequences(
+        self, generator, device
+    ):
         """Test token replacement when no sequences are eligible."""
         batch_size = 2
-        next_tokens = torch.tensor([5, 6], device=device)  # Not in source_tokens
+        next_tokens = torch.tensor(
+            [5, 6], device=device
+        )  # Not in source_tokens
         can_replace = torch.zeros(
             batch_size, dtype=torch.bool, device=device
         )  # None eligible
@@ -427,7 +442,9 @@ class TestTokenReplacement:
         assert torch.equal(modified_tokens, next_tokens)
         assert not replace_mask.any()
 
-    def test_replace_special_tokens_with_eligible_sequences(self, generator, device):
+    def test_replace_special_tokens_with_eligible_sequences(
+        self, generator, device
+    ):
         """Test token replacement for eligible sequences with fixed random seed."""
         # Fix the random seed for reproducibility
         torch.manual_seed(42)
@@ -444,9 +461,13 @@ class TestTokenReplacement:
         )
 
         # Only tokens in source_tokens should be replaced
-        assert modified_tokens[0] in generator.target_tokens  # 50 should be replaced
+        assert (
+            modified_tokens[0] in generator.target_tokens
+        )  # 50 should be replaced
         assert modified_tokens[1] == 51  # 51 should stay the same
-        assert modified_tokens[2] in generator.target_tokens  # 51 should be replaced
+        assert (
+            modified_tokens[2] in generator.target_tokens
+        )  # 51 should be replaced
         assert modified_tokens[3] == 6  # 6 should stay the same
 
         # Check the replacement mask
@@ -516,7 +537,9 @@ class TestReplacementEligibility:
         """Test eligibility when tokens are not in source_tokens."""
         batch_size = 2
         generated_ids = torch.randint(0, 100, (batch_size, 10), device=device)
-        next_tokens = torch.tensor([5, 6], device=device)  # Not in source_tokens
+        next_tokens = torch.tensor(
+            [5, 6], device=device
+        )  # Not in source_tokens
         replacement_counts = torch.zeros(batch_size, device=device)
 
         result = generator._determine_replacement_eligibility(
@@ -529,7 +552,9 @@ class TestReplacementEligibility:
         # No eligibility when tokens aren't in source_tokens
         assert not result.any()
 
-    def test_determine_replacement_eligibility_full_conditions(self, generator, device):
+    def test_determine_replacement_eligibility_full_conditions(
+        self, generator, device
+    ):
         """Test full eligibility conditions including pattern check and max replacements."""
         batch_size = 4
         # Create some sequences with and without the prevent pattern
@@ -565,14 +590,16 @@ class TestReplacementEligibility:
         """Test eligibility with correctness callback."""
         batch_size = 3
         generated_ids = torch.randint(0, 100, (batch_size, 10), device=device)
-        next_tokens = torch.tensor([50, 50, 50], device=device)  # All in source_tokens
+        next_tokens = torch.tensor(
+            [50, 50, 50], device=device
+        )  # All in source_tokens
         replacement_counts = torch.zeros(batch_size, device=device)
 
         # Mock the tokenizer.batch_decode to return controlled test strings
         generator.tokenizer.batch_decode.return_value = [
-            "This has an error",  # Should be marked incorrect (eligible)
-            "This is fine",  # Should be marked correct (not eligible)
-            "Another error text",  # Should be marked incorrect (eligible)
+            'This has an error',  # Should be marked incorrect (eligible)
+            'This is fine',  # Should be marked correct (not eligible)
+            'Another error text',  # Should be marked incorrect (eligible)
         ]
 
         result = generator._determine_replacement_eligibility(
@@ -598,13 +625,15 @@ class TestSequenceUpdate:
         next_tokens = torch.tensor([7, 8], device=device)
         unfinished_sequences = torch.ones(batch_size, device=device)
 
-        new_input_ids, new_attention_mask, new_unfinished = generator._update_sequences(
-            input_ids,
-            attention_mask,
-            next_tokens,
-            unfinished_sequences,
-            eos_token_id=None,
-            pad_token_id=0,
+        new_input_ids, new_attention_mask, new_unfinished = (
+            generator._update_sequences(
+                input_ids,
+                attention_mask,
+                next_tokens,
+                unfinished_sequences,
+                eos_token_id=None,
+                pad_token_id=0,
+            )
         )
 
         # Check dimensions
@@ -627,17 +656,21 @@ class TestSequenceUpdate:
         seq_len = 5
         input_ids = torch.randint(0, 100, (batch_size, seq_len), device=device)
         attention_mask = torch.ones(batch_size, seq_len, device=device)
-        next_tokens = torch.tensor([7, 50, 8], device=device)  # Second token is EOS
+        next_tokens = torch.tensor(
+            [7, 50, 8], device=device
+        )  # Second token is EOS
         unfinished_sequences = torch.ones(batch_size, device=device)
         eos_token_id = 50
 
-        new_input_ids, new_attention_mask, new_unfinished = generator._update_sequences(
-            input_ids,
-            attention_mask,
-            next_tokens,
-            unfinished_sequences,
-            eos_token_id=eos_token_id,
-            pad_token_id=0,
+        new_input_ids, new_attention_mask, new_unfinished = (
+            generator._update_sequences(
+                input_ids,
+                attention_mask,
+                next_tokens,
+                unfinished_sequences,
+                eos_token_id=eos_token_id,
+                pad_token_id=0,
+            )
         )
 
         # Check updated unfinished sequences
@@ -655,13 +688,15 @@ class TestSequenceUpdate:
         # First sequence already finished
         unfinished_sequences = torch.tensor([0, 1, 1], device=device)
 
-        new_input_ids, new_attention_mask, new_unfinished = generator._update_sequences(
-            input_ids,
-            attention_mask,
-            next_tokens,
-            unfinished_sequences,
-            eos_token_id=50,
-            pad_token_id=0,
+        new_input_ids, new_attention_mask, new_unfinished = (
+            generator._update_sequences(
+                input_ids,
+                attention_mask,
+                next_tokens,
+                unfinished_sequences,
+                eos_token_id=50,
+                pad_token_id=0,
+            )
         )
 
         # Check that padding was applied to finished sequences
@@ -713,7 +748,9 @@ class TestSampling:
 
         # Sample with fixed seed
         torch.manual_seed(42)
-        sampled_tokens = generator._sampling(logits, temperatures, top_p=0.9, top_k=50)
+        sampled_tokens = generator._sampling(
+            logits, temperatures, top_p=0.9, top_k=50
+        )
 
         # Check shape
         assert sampled_tokens.shape == (batch_size,)
@@ -727,7 +764,9 @@ class TestSampling:
 
         # Test with all zero temperatures
         all_zero_temp = torch.zeros(batch_size, device=device)
-        greedy_tokens = generator._sampling(logits, all_zero_temp, top_p=0.9, top_k=50)
+        greedy_tokens = generator._sampling(
+            logits, all_zero_temp, top_p=0.9, top_k=50
+        )
         assert torch.equal(greedy_tokens, logits.argmax(dim=-1))
 
 
@@ -739,7 +778,9 @@ class TestRepetitionPenalty:
         seq_len = 5
 
         logits = torch.randn(batch_size, vocab_size, device=device)
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+        input_ids = torch.randint(
+            0, vocab_size, (batch_size, seq_len), device=device
+        )
 
         # With penalty=1.0, should return unchanged logits
         modified_logits = generator._apply_repetition_penalty(
@@ -818,7 +859,9 @@ class TestTokenReplacementIntegration:
         """Test when no conditions for replacement are met."""
         batch_size = 2
         seq_len = 5
-        next_tokens = torch.tensor([5, 6], device=device)  # Not in source_tokens
+        next_tokens = torch.tensor(
+            [5, 6], device=device
+        )  # Not in source_tokens
         input_ids = torch.randint(0, 100, (batch_size, seq_len), device=device)
         initial_seq_len = 2
         replacement_counts = torch.zeros(batch_size, device=device)
@@ -850,7 +893,7 @@ class TestTokenReplacementIntegration:
 
         # Mock the determine_replacement_eligibility to control output
         with patch.object(
-            generator, "_determine_replacement_eligibility"
+            generator, '_determine_replacement_eligibility'
         ) as mock_determine:
             # First and third sequences are eligible
             mock_determine.return_value = torch.tensor(
@@ -858,20 +901,24 @@ class TestTokenReplacementIntegration:
             )
 
             # Mock replace_special_tokens to control output
-            with patch.object(generator, "_replace_special_tokens") as mock_replace:
+            with patch.object(
+                generator, '_replace_special_tokens'
+            ) as mock_replace:
                 # First token replaced, third not (random outcome)
                 replaced_tokens = torch.tensor([10, 5, 51], device=device)
                 replace_mask = torch.tensor([True, False, False], device=device)
                 mock_replace.return_value = (replaced_tokens, replace_mask)
 
-                modified_tokens, updated_counts = generator._apply_token_replacement(
-                    next_tokens,
-                    input_ids,
-                    initial_seq_len,
-                    replacement_counts,
-                    explore_max_replacements=3,
-                    explore_replace_prob=0.5,
-                    correctness_callback=None,
+                modified_tokens, updated_counts = (
+                    generator._apply_token_replacement(
+                        next_tokens,
+                        input_ids,
+                        initial_seq_len,
+                        replacement_counts,
+                        explore_max_replacements=3,
+                        explore_replace_prob=0.5,
+                        correctness_callback=None,
+                    )
                 )
 
                 # Verify the results
@@ -909,11 +956,13 @@ class TestGenerateMethod:
         input_ids = torch.randint(
             0, self.vocab_size, (self.batch_size, self.seq_len), device=device
         )
-        attention_mask = torch.ones(self.batch_size, self.seq_len, device=device)
+        attention_mask = torch.ones(
+            self.batch_size, self.seq_len, device=device
+        )
         temperature = torch.tensor([0.7, 0.0], device=device)
 
         # Mock sampling to return controlled tokens
-        with patch.object(generator, "_sampling") as mock_sampling:
+        with patch.object(generator, '_sampling') as mock_sampling:
             # First return normal tokens, then EOS for second sequence
             mock_sampling.side_effect = [
                 torch.tensor([10, 20], device=device),
@@ -950,10 +999,10 @@ class TestGenerateMethod:
             assert mock_sampling.call_count == 3
             # Check args for first call
             _, args, kwargs = mock_sampling.mock_calls[0]
-            assert torch.is_tensor(kwargs["token_logits"])  # logits
-            assert torch.equal(kwargs["temperature"], temperature)
-            assert kwargs["top_p"] == 0.9
-            assert kwargs["top_k"] == 50
+            assert torch.is_tensor(kwargs['token_logits'])  # logits
+            assert torch.equal(kwargs['temperature'], temperature)
+            assert kwargs['top_p'] == 0.9
+            assert kwargs['top_k'] == 50
 
     def test_generate_with_exploration(self, generator, device):
         """Test generation with exploration parameters."""
@@ -961,15 +1010,21 @@ class TestGenerateMethod:
         input_ids = torch.randint(
             0, self.vocab_size, (self.batch_size, self.seq_len), device=device
         )
-        attention_mask = torch.ones(self.batch_size, self.seq_len, device=device)
+        attention_mask = torch.ones(
+            self.batch_size, self.seq_len, device=device
+        )
         temperature = 0.7
 
         # Mock _uniform_sampling and _sampling to control exploration behavior
-        with patch.object(generator, "_uniform_sampling") as mock_uniform:
-            with patch.object(generator, "_sampling") as mock_sampling:
+        with patch.object(generator, '_uniform_sampling') as mock_uniform:
+            with patch.object(generator, '_sampling') as mock_sampling:
                 # Return different tokens for exploration vs. normal sampling
-                mock_uniform.return_value = torch.tensor([15, 25], device=device)
-                mock_sampling.return_value = torch.tensor([10, 20], device=device)
+                mock_uniform.return_value = torch.tensor(
+                    [15, 25], device=device
+                )
+                mock_sampling.return_value = torch.tensor(
+                    [10, 20], device=device
+                )
 
                 output = generator.generate(
                     input_ids=input_ids,
@@ -990,11 +1045,11 @@ class TestGenerateMethod:
 
                 # Verify exploration parameters were passed correctly
                 _, args, kwargs = mock_uniform.mock_calls[0]
-                assert kwargs["top_k"] == 20  # explore_top_k for first step
+                assert kwargs['top_k'] == 20  # explore_top_k for first step
 
                 # Second step should use a reduced top_k (0.8 * 20 = 16)
                 _, args, kwargs = mock_uniform.mock_calls[1]
-                assert kwargs["top_k"] == 16  # reduced explore_top_k
+                assert kwargs['top_k'] == 16  # reduced explore_top_k
 
     def test_generate_with_token_replacement(self, generator, device):
         """Test generation with token replacement."""
@@ -1002,15 +1057,21 @@ class TestGenerateMethod:
         seq_len = 5
         vocab_size = 100
 
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+        input_ids = torch.randint(
+            0, vocab_size, (batch_size, seq_len), device=device
+        )
         attention_mask = torch.ones(batch_size, seq_len, device=device)
         temperature = 0.7
 
         # Mock _sampling and _apply_token_replacement
-        with patch.object(generator, "_sampling") as mock_sampling:
-            with patch.object(generator, "_apply_token_replacement") as mock_replace:
+        with patch.object(generator, '_sampling') as mock_sampling:
+            with patch.object(
+                generator, '_apply_token_replacement'
+            ) as mock_replace:
                 # Return regular tokens first, then modified tokens
-                mock_sampling.return_value = torch.tensor([10, 20], device=device)
+                mock_sampling.return_value = torch.tensor(
+                    [10, 20], device=device
+                )
                 # First call: just return same tokens (no replacement)
                 # Second call: return modified tokens
                 # Third call: return same tokens again (no replacement)
@@ -1043,8 +1104,12 @@ class TestGenerateMethod:
                 assert output.sequences[0, seq_len + 1].item() == 10  # Replaced
                 assert output.sequences[1, seq_len + 1].item() == 20  # Replaced
 
-                assert output.sequences[0, seq_len + 2].item() == 15  # Not replaced
-                assert output.sequences[1, seq_len + 2].item() == 25  # Not replaced
+                assert (
+                    output.sequences[0, seq_len + 2].item() == 15
+                )  # Not replaced
+                assert (
+                    output.sequences[1, seq_len + 2].item() == 25
+                )  # Not replaced
 
     def test_generate_early_stopping(self, generator, device):
         """Test generation with early stopping when all sequences are finished."""
@@ -1052,12 +1117,14 @@ class TestGenerateMethod:
         seq_len = 5
         vocab_size = 100
 
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+        input_ids = torch.randint(
+            0, vocab_size, (batch_size, seq_len), device=device
+        )
         attention_mask = torch.ones(batch_size, seq_len, device=device)
         temperature = 0.7
 
         # Mock _sampling to return EOS tokens in the second step
-        with patch.object(generator, "_sampling") as mock_sampling:
+        with patch.object(generator, '_sampling') as mock_sampling:
             mock_sampling.side_effect = [
                 torch.tensor([10, 20], device=device),
                 torch.tensor([50, 50], device=device),  # Both are EOS
@@ -1090,18 +1157,24 @@ class TestGenerateMethod:
         seq_len = 5
         vocab_size = 100
 
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+        input_ids = torch.randint(
+            0, vocab_size, (batch_size, seq_len), device=device
+        )
         attention_mask = torch.ones(batch_size, seq_len, device=device)
         temperature = 0.7
 
         # Mock _apply_repetition_penalty and _sampling
-        with patch.object(generator, "_apply_repetition_penalty") as mock_penalty:
-            with patch.object(generator, "_sampling") as mock_sampling:
+        with patch.object(
+            generator, '_apply_repetition_penalty'
+        ) as mock_penalty:
+            with patch.object(generator, '_sampling') as mock_sampling:
                 # Set up controlled returns
                 mock_penalty.side_effect = (
                     lambda logits, input_ids, penalty: logits * 2
                 )  # Just double logits for testing
-                mock_sampling.return_value = torch.tensor([10, 20], device=device)
+                mock_sampling.return_value = torch.tensor(
+                    [10, 20], device=device
+                )
 
                 generator.generate(
                     input_ids=input_ids,
@@ -1118,7 +1191,7 @@ class TestGenerateMethod:
 
                 # Check repetition_penalty was passed correctly
                 _, _, kwargs = mock_penalty.mock_calls[0]
-                assert kwargs["penalty"] == 1.5
+                assert kwargs['penalty'] == 1.5
 
     def test_generate_with_temperature_variations(self, generator, device):
         """Test generation with various temperature formats."""
@@ -1126,11 +1199,13 @@ class TestGenerateMethod:
         seq_len = 5
         vocab_size = 100
 
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+        input_ids = torch.randint(
+            0, vocab_size, (batch_size, seq_len), device=device
+        )
         attention_mask = torch.ones(batch_size, seq_len, device=device)
 
         # Mock _sampling to isolate temperature handling
-        with patch.object(generator, "_sampling") as mock_sampling:
+        with patch.object(generator, '_sampling') as mock_sampling:
             mock_sampling.return_value = torch.tensor([10, 20], device=device)
 
             # Test with float temperature
@@ -1145,10 +1220,13 @@ class TestGenerateMethod:
 
             # Check temperature was converted to tensor
             _, args, kwargs = mock_sampling.mock_calls[0]
-            assert torch.is_tensor(kwargs["temperature"])
-            assert kwargs["temperature"].shape == (batch_size,)
+            assert torch.is_tensor(kwargs['temperature'])
+            assert kwargs['temperature'].shape == (batch_size,)
             assert torch.allclose(
-                kwargs["temperature"][0], torch.tensor(0.8), rtol=1e-5, atol=1e-8
+                kwargs['temperature'][0],
+                torch.tensor(0.8),
+                rtol=1e-5,
+                atol=1e-8,
             )
 
             mock_sampling.reset_mock()
@@ -1165,13 +1243,19 @@ class TestGenerateMethod:
 
             # Check list was converted to tensor
             _, args, kwargs = mock_sampling.mock_calls[0]
-            assert torch.is_tensor(kwargs["temperature"])
-            assert kwargs["temperature"].shape == (batch_size,)
+            assert torch.is_tensor(kwargs['temperature'])
+            assert kwargs['temperature'].shape == (batch_size,)
             assert torch.allclose(
-                kwargs["temperature"][0], torch.tensor(0.7), rtol=1e-5, atol=1e-8
+                kwargs['temperature'][0],
+                torch.tensor(0.7),
+                rtol=1e-5,
+                atol=1e-8,
             )
             assert torch.allclose(
-                kwargs["temperature"][1], torch.tensor(0.9), rtol=1e-5, atol=1e-8
+                kwargs['temperature'][1],
+                torch.tensor(0.9),
+                rtol=1e-5,
+                atol=1e-8,
             )
 
 
@@ -1231,20 +1315,24 @@ class TestIntegration:
         seq_len = 5
         vocab_size = 100
 
-        input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+        input_ids = torch.randint(
+            0, vocab_size, (batch_size, seq_len), device=device
+        )
         attention_mask = torch.ones(batch_size, seq_len, device=device)
 
         # Setup controlled mocks
-        with patch.object(generator, "_uniform_sampling") as mock_uniform:
-            with patch.object(generator, "_sampling") as mock_sampling:
+        with patch.object(generator, '_uniform_sampling') as mock_uniform:
+            with patch.object(generator, '_sampling') as mock_sampling:
                 with patch.object(
-                    generator, "_apply_token_replacement"
+                    generator, '_apply_token_replacement'
                 ) as mock_replace:
                     # Return source tokens during exploration
                     mock_uniform.return_value = torch.tensor(
                         [50, 51], device=device
                     )  # Source tokens
-                    mock_sampling.return_value = torch.tensor([10, 20], device=device)
+                    mock_sampling.return_value = torch.tensor(
+                        [10, 20], device=device
+                    )
                     # Replace only during exploration
                     mock_replace.side_effect = lambda *args, **kwargs: (
                         (
@@ -1322,18 +1410,20 @@ class TestIsolatedFunctionality:
 
         # Create input where some are eligible for replacement
         input_ids = torch.randint(0, 100, (batch_size, seq_len), device=device)
-        next_tokens = torch.tensor([50, 50, 50], device=device)  # All in source_tokens
+        next_tokens = torch.tensor(
+            [50, 50, 50], device=device
+        )  # All in source_tokens
         replacement_counts = torch.zeros(batch_size, device=device)
 
         # Mock tokenizer to return controlled texts
         generator.tokenizer.batch_decode.return_value = [
-            "This has an error",  # incorrect
-            "This is fine",  # correct
-            "Another error text",  # incorrect
+            'This has an error',  # incorrect
+            'This is fine',  # correct
+            'Another error text',  # incorrect
         ]
 
         # Mock _replace_special_tokens to verify input
-        with patch.object(generator, "_replace_special_tokens") as mock_replace:
+        with patch.object(generator, '_replace_special_tokens') as mock_replace:
             mock_replace.return_value = (
                 next_tokens,
                 torch.zeros(batch_size, device=device),
@@ -1357,7 +1447,7 @@ class TestIsolatedFunctionality:
 
 # Parameterized tests for exploring combinations
 @pytest.mark.parametrize(
-    "top_k,top_p,temp",
+    'top_k,top_p,temp',
     [
         (0, 1.0, 1.0),  # No top-k, no top-p, standard temp
         (50, 0.9, 0.7),  # Standard values
@@ -1374,7 +1464,9 @@ def test_sampling_combinations(generator, device, top_k, top_p, temp):
     # Set temperature as tensor
     temperature = torch.full((batch_size,), temp, device=device)
 
-    sampled_tokens = generator._sampling(logits, temperature, top_p=top_p, top_k=top_k)
+    sampled_tokens = generator._sampling(
+        logits, temperature, top_p=top_p, top_k=top_k
+    )
 
     # Basic shape check
     assert sampled_tokens.shape == (batch_size,)

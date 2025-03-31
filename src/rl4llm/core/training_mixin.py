@@ -1,5 +1,4 @@
 import gc
-import random
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -311,3 +310,40 @@ class TrainingMixin:
             entropy = entropy * loss_masks.float()
 
         return entropy
+
+    @staticmethod
+    def compute_masked_monte_carlo_returns(
+        rewards: torch.Tensor, mask: torch.Tensor, gamma: float
+    ) -> torch.FloatTensor:
+        """
+        Computes monte carlo returns considering only assistant turns.
+
+        Args:
+            rewards (torch.Tensor): Float tensor with rewards (0 for user), shape [seq_len]
+            mask (torch.Tensor): Binary mask (0 for user, 1 for assistant), shape [seq_len]
+            gamma (float): Discount factor
+
+        Returns:
+            torch.Tensor: Tensor of the original shape, with discounted returns
+                for assistant turns and zeros for user turns
+        """
+        # Input validation
+        assert rewards.dim() == mask.dim() == 1, 'Inputs must be 1-dimensional'
+        assert rewards.size(0) == mask.size(
+            0
+        ), 'Rewards and mask must have same length'
+        assert gamma > 0.0 and gamma <= 1.0, 'Discount factor must be in (0, 1]'
+
+        # Initialize returns tensor
+        returns = torch.zeros_like(mask, dtype=rewards.dtype)
+        seq_len = len(rewards)
+
+        g = 0.0
+        # Calculate returns from t=T-1, T-2, ..., 1, 0
+        for t in reversed(range(0, seq_len)):
+            delta = gamma * g if mask[t] and t < seq_len - 1 else 0.0
+            g = rewards[t] + delta
+            returns[t] = g
+
+        returns *= mask.float()
+        return returns
