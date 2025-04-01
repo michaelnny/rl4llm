@@ -11,9 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import deepspeed
 import numpy as np
-from datasets import Dataset
 import torch
 import torch.distributed as dist
+from datasets import Dataset
 from deepspeed import DeepSpeedEngine
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
@@ -22,8 +22,8 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from rl4llm.core.data_types import RLConfig
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.training_mixin import TrainingMixin
-from rl4llm.logging import LoggingManager
 from rl4llm.envs import LLMEnv
+from rl4llm.logging import LoggingManager
 from rl4llm.utils.dataset_utils import shard_dataset
 
 
@@ -62,14 +62,16 @@ class RLTrainer(ABC, TrainingMixin):
         self.torch_dtype = self.policy_model.dtype  # Infer from model
 
         # Setup directories
-        self.checkpoint_dir = os.path.join(self.artifacts_path, "checkpoints")
+        self.checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
         if self.dist_manager.is_master:
             os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.dist_manager.barrier()  # Ensure dirs exist before proceeding
 
         # Reference model (optional, common in PPO-like methods)
         self.reference_model: Optional[PreTrainedModel] = (
-            self._create_reference_model() if self.config.kl_loss_coef > 0 else None
+            self._create_reference_model()
+            if self.config.kl_loss_coef > 0
+            else None
         )
 
         # Internal state
@@ -77,7 +79,6 @@ class RLTrainer(ABC, TrainingMixin):
         self.global_step = 0
         self.policy_update_count = 0  # Tracks optimizer steps
         self.ref_update_count = 0
-        self._metrics_buffer = {}  # Buffer for accumulating metrics across ranks/steps
 
         # # Shard datasets across ranks, so each rank only works on a small subset of the data
         # self.shared_train_dataset = shard_dataset(
@@ -117,33 +118,17 @@ class RLTrainer(ABC, TrainingMixin):
         #     self.logger.info("Evaluation dataset not provided")
 
         self._initialize_trainer()
-        self.logger.info("RL Trainer initialized.")
+        self.logger.info('RL Trainer initialized.')
 
     def _initialize_trainer(self):
         pass
 
-    def get_next_train_data(self) -> Dict[str, Any]:
-        """Fetches the next sample for generation, handles epoch reset.
-
-        Returns:
-            Dict: A single item containing question and ground truth
-        """
-        try:
-            item = next(self.train_iter)
-            return item
-        except StopIteration:
-            # Epoch finished! Reshuffle and recreate the iterator
-            random.shuffle(self.shared_train_dataset)
-            self.train_iter = iter(self.shared_train_dataset)
-            item = next(self.train_iter)  # Get the first item of the new epoch
-            return item
-
     def _create_reference_model(self) -> Optional[PreTrainedModel]:
         """Creates a non-trainable copy of the policy model."""
-        self.logger.info("Creating reference model...")
+        self.logger.info('Creating reference model...')
         if self.is_zero3_enabled():
             # TODO maybe create reference model with deepspeed??
-            raise RuntimeError("Not supported for Zero-3")
+            raise RuntimeError('Not supported for Zero-3')
 
             # # Ensure model is fully available if using Zero-3
             # with deepspeed.zero.GatheredParameters(self.policy_model.parameters()):
@@ -157,7 +142,7 @@ class RLTrainer(ABC, TrainingMixin):
         ref_model = ref_model.to(self.device).eval()
         for param in ref_model.parameters():
             param.requires_grad = False
-        self.logger.info("Reference model created.")
+        self.logger.info('Reference model created.')
         return ref_model
 
     def is_zero3_enabled(self) -> bool:
@@ -185,7 +170,9 @@ class RLTrainer(ABC, TrainingMixin):
             and len(completion_length) == num_samples
             and len(completion_text) == num_samples
         ):
-            raise ValueError("All required input lists must have the same length.")
+            raise ValueError(
+                'All required input lists must have the same length.'
+            )
 
         # Check kwargs: if any value is a list, it must match num_samples.
         for extra_key, extra_val in kwargs.items():
@@ -198,15 +185,15 @@ class RLTrainer(ABC, TrainingMixin):
         for i in range(num_samples):
             # Build the sample dictionary.
             utc_ts = datetime.datetime.now(datetime.timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
+                '%Y-%m-%dT%H:%M:%SZ'
             )
             sample = {
-                "utc_timestamp": utc_ts,
-                "question": question[i],
-                "ground_truth": ground_truth[i],
-                "prompt_length": prompt_length[i],
-                "completion_length": completion_length[i],
-                "completion_text": completion_text[i],
+                'utc_timestamp': utc_ts,
+                'question': question[i],
+                'ground_truth': ground_truth[i],
+                'prompt_length': prompt_length[i],
+                'completion_length': completion_length[i],
+                'completion_text': completion_text[i],
             }
 
             # Process any additional keyword arguments, like rewards etc
@@ -226,15 +213,19 @@ class RLTrainer(ABC, TrainingMixin):
     ) -> None:
         """Log batch samples to Tensorboard and external files"""
 
-        metrics_keys = ["prompt_length", "completion_length"]
-        phase = "training" if is_training else "evaluation"
+        metrics_keys = ['prompt_length', 'completion_length']
+        phase = 'training' if is_training else 'evaluation'
         for data in samples:
             # save to external files
             self.logger.log_sample(phase, data, step)
 
             # log metrics to tensorboard
             for k, v in data.items():
-                if k in metrics_keys or "reward" in k and isinstance(v, (float, int)):
+                if (
+                    k in metrics_keys
+                    or 'reward' in k
+                    and isinstance(v, (float, int))
+                ):
                     self.logger.log_scalar(k, v)
 
     @abstractmethod
@@ -338,7 +329,7 @@ class RLTrainer(ABC, TrainingMixin):
         self.policy_engine.train()
         # Move reference model back to GPU if moved earlier and needed
         if self.reference_model and self.reference_model.device != self.device:
-            self.reference_model = self.reference_model.to("cpu")
+            self.reference_model = self.reference_model.to('cpu')
         torch.cuda.empty_cache()
 
     def save_checkpoint(self, step: int):
@@ -349,18 +340,18 @@ class RLTrainer(ABC, TrainingMixin):
         # DeepSpeed handles distributed saving internally
         self.policy_engine.save_checkpoint(save_path)
         self.dist_manager.barrier()
-        self.logger.info("Checkpoint saved.")
+        self.logger.info('Checkpoint saved.')
 
     def sync_reference_model(self):
         """Updates the reference model weights with the current policy model weights."""
         if not self.reference_model:
             return
 
-        self.logger.info("Syncing reference model...")
+        self.logger.info('Syncing reference model...')
         # Ensure parameters are gathered if using Zero-3 before state_dict access
         if self.is_zero3_enabled():
             # TODO recreate the reference model engine
-            raise RuntimeError("Not supported for Zero-3")
+            raise RuntimeError('Not supported for Zero-3')
             # with deepspeed.zero.GatheredParameters(self.policy_model.parameters(), modifier_rank=0):
             #    if self.dist_manager.is_master:
             #        state_dict = self.policy_model.state_dict()
@@ -373,21 +364,21 @@ class RLTrainer(ABC, TrainingMixin):
             # Load state dict into reference model (all ranks have the state_dict now)
             self.reference_model.load_state_dict(state_dict)
             self.ref_update_count += 1
-            self.logger.info("Reference model synced.")
+            self.logger.info('Reference model synced.')
 
         torch.cuda.empty_cache()  # Clean up memory
         self.dist_manager.barrier()
 
     def train(self):
         """Main training loop."""
-        self.logger.info("Starting training...")
+        self.logger.info('Starting training...')
         if self.dist_manager.is_master:
             self.logger.log_hyperparams(self.config.model_dump())  # Log config
 
         # Initial evaluation before training starts
-        if self.config.eval_interval > 0 and self.eval_loader:
-            self.logger.info("Running initial evaluation...")
-            with self.logger.timer("evaluate"):
+        if self.config.eval_interval > 0 and self.eval_env:
+            self.logger.info('Running initial evaluation...')
+            with self.logger.timer('evaluate'):
                 self.evaluate_step()
             self.dist_manager.barrier()
 
@@ -395,7 +386,7 @@ class RLTrainer(ABC, TrainingMixin):
             self.global_step = t
 
             # 1. Generation Phase
-            with self.logger.timer("generation"):
+            with self.logger.timer('generation'):
                 self._prepare_for_generation()
                 # generate_experience returns rank-local experience
                 local_experience = self.generate_experience()
@@ -403,7 +394,7 @@ class RLTrainer(ABC, TrainingMixin):
             self.dist_manager.barrier()
 
             # 2. Learning Phase
-            with self.logger.timer("train"):
+            with self.logger.timer('train'):
                 # build_train_batch processes local_experience and returns a DataLoader
                 train_dataloader = self.build_train_batch(local_experience)
                 self.train_step(train_dataloader)
@@ -416,7 +407,7 @@ class RLTrainer(ABC, TrainingMixin):
                 and self.config.sync_reference_interval > 0
                 and (t + 1) % self.config.sync_reference_interval == 0
             ):
-                with self.logger.timer("sync_reference_model"):
+                with self.logger.timer('sync_reference_model'):
                     self.sync_reference_model()
 
             # Checkpointing
@@ -424,16 +415,16 @@ class RLTrainer(ABC, TrainingMixin):
                 self.config.checkpoint_interval > 0
                 and (t + 1) % self.config.checkpoint_interval == 0
             ):
-                with self.logger.timer("checkpoint"):
+                with self.logger.timer('checkpoint'):
                     self.save_checkpoint(t + 1)
 
             # Evaluation
             if (
                 self.config.eval_interval > 0
-                and self.eval_loader
+                and self.eval_env
                 and (t + 1) % self.config.eval_interval == 0
             ):
-                with self.logger.timer("evaluate"):
+                with self.logger.timer('evaluate'):
                     self.evaluate_step()
 
             self.logger.aggregate_and_log(self.global_step)
@@ -443,7 +434,7 @@ class RLTrainer(ABC, TrainingMixin):
             del train_dataloader
             torch.cuda.empty_cache()
 
-        self.logger.info("Training finished.")
+        self.logger.info('Training finished.')
         # Final checkpoint save
         self.save_checkpoint(self.config.max_steps)
         self.logger.close()

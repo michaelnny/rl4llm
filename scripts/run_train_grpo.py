@@ -6,7 +6,7 @@ import os
 import pstats
 import sys
 from traceback import format_exc
-from typing import Dict, List
+from typing import Any, Dict, List, Union
 
 import deepspeed
 import torch
@@ -14,38 +14,38 @@ import torch.distributed as dist
 from datasets import Dataset
 from transformers import PreTrainedTokenizer
 
-from rl4llm.utils.model_utils import (
-    build_model_and_tokenizer,
-    create_optimizer_and_scheduler,
-)
 from rl4llm.data import load_multiple_datasets
+from rl4llm.envs import BaseRewardFunction, LLMEnv
+from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.logging import LoggingManager
 from rl4llm.trainers.grpo_trainer import (
     DistributedManager,
     GRPOConfig,
     GRPOTrainer,
 )
-from rl4llm.envs import LLMEnv, BaseRewardFunction
-from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.utils import load_yaml_config_file, set_seed
 from rl4llm.utils.dataset_utils import shard_dataset
+from rl4llm.utils.model_utils import (
+    build_model_and_tokenizer,
+    create_optimizer_and_scheduler,
+)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="RL GRPO fine-tuning")
+    parser = argparse.ArgumentParser(description='RL GRPO fine-tuning')
     parser.add_argument(
-        "--config-file",
+        '--config-file',
         type=str,
-        default="./configs/grpo_config.yaml",
+        default='./configs/grpo_config.yaml',
         # required=True,
-        help="Path to the yaml file contains all the essential configuration",
+        help='Path to the yaml file contains all the essential configuration',
     )
     # Include DeepSpeed configuration arguments
     parser.add_argument(
-        "--local_rank",
+        '--local_rank',
         type=int,
         default=-1,
-        help="Required by deepspeed for local rank passed from distributed launcher, not used by our script",
+        help='Required by deepspeed for local rank passed from distributed launcher, not used by our script',
     )
     return parser.parse_args()
 
@@ -71,27 +71,42 @@ Question:
 def preprocess_dataset(dataset: List[Dict], model_name: str) -> List[Dict]:
     """Pre-tokenize the entire dataset and return a list of tokenized inputs."""
 
-    if any([k in model_name for k in ["0.5B", "1B", "1.5B"]]):
+    if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
         template = PROMPT_TEMPLATE_EASY
     else:
         template = PROMPT_TEMPLATE
 
     processed_data = []
     for item in dataset:
-        question = item["question"]
+        question = item['question']
         prompt = template.format(query=question)
 
-        processed_data.append({"prompt": prompt, **item})
+        processed_data.append({'prompt': prompt, **item})
 
     return processed_data
 
 
 class AccuracyRewardFunction(BaseRewardFunction):
-    name = "reward_function"
+    name: str = 'reward_function'
 
-    def __call__(self, completions, ground_truths, **kwargs) -> List[float]:
+    def __call__(
+        self,
+        completions: List[str],
+        ground_truths: List[Union[str | float | int]],
+        **kwargs: Dict[str, Any],
+    ) -> List[float]:
+        """Implements the reward function.
+
+        Args:
+            completions (List[str]): LLM generated completion texts.
+            ground_truths (List[Union[str | float | int]]): Ground truth for the problem.
+            **kwargs (Dict[str, Any]): Any additional data.
+
+        Returns:
+            List[float]: A list of scalar rewards.
+        """
         return [
-            math_problem_grader(full_answer=answer, ground_truth=truth, **kwargs)
+            math_problem_grader(full_answer=answer, ground_truth=truth)
             for answer, truth in zip(completions, ground_truths)
         ]
 
@@ -136,21 +151,23 @@ class AccuracyRewardFunction(BaseRewardFunction):
 def main():
     """Starts RL GRPO training loop."""
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
-        raise RuntimeError("This script only supports run on GPU with BF16 mode.")
+        raise RuntimeError(
+            'This script only supports run on GPU with BF16 mode.'
+        )
 
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
     args = parse_args()
 
     config = load_yaml_config_file(args.config_file)
 
-    seed = int(config.get("job").get("seed", 142))
-    artifacts_path = config.get("job").get("artifacts_path")
-    datasets = config.get("job").get("datasets")
-    max_train_samples = config.get("job").get("max_train_samples", None)
-    max_test_samples = config.get("job").get("max_test_samples", None)
-    model_name = config["model"]["pretrained_model"]
-    deepspeed_config = config["deepspeed_config"]
+    seed = int(config.get('job').get('seed', 142))
+    artifacts_path = config.get('job').get('artifacts_path')
+    datasets = config.get('job').get('datasets')
+    max_train_samples = config.get('job').get('max_train_samples', None)
+    max_test_samples = config.get('job').get('max_test_samples', None)
+    model_name = config['model']['pretrained_model']
+    deepspeed_config = config['deepspeed_config']
 
     set_seed(seed)
 
@@ -159,14 +176,14 @@ def main():
 
     dist_manager = DistributedManager()
     logger_manager = LoggingManager(
-        config, dist_manager, log_dir=artifacts_path, sample_file_format="jsonl"
+        config, dist_manager, log_dir=artifacts_path, sample_file_format='jsonl'
     )
 
     torch_dtype = torch.bfloat16
 
     grpo_config = GRPOConfig(
-        **config["grpo_config"],
-        mini_batch_size=deepspeed_config["train_micro_batch_size_per_gpu"],
+        **config['grpo_config'],
+        mini_batch_size=deepspeed_config['train_micro_batch_size_per_gpu'],
     )
 
     train_dataset, eval_dataset = load_multiple_datasets(datasets)
@@ -188,9 +205,9 @@ def main():
         dist_manager.global_rank,
     )
 
-
-
-    policy_model, tokenizer = build_model_and_tokenizer(config["model"], torch_dtype)
+    policy_model, tokenizer = build_model_and_tokenizer(
+        config['model'], torch_dtype
+    )
 
     shared_train_dataset = preprocess_dataset(shared_train_dataset, model_name)
     shared_eval_dataset = preprocess_dataset(shared_eval_dataset, model_name)
@@ -201,12 +218,11 @@ def main():
         config_params=deepspeed_config,
     )
 
-
     train_env = LLMEnv(
         dataset=shared_train_dataset,
         batch_size=1,
         tokenizer=tokenizer,
-        reward_functions=[AccuracyRewardFunction()]
+        reward_functions=[AccuracyRewardFunction()],
     )
 
     trainer = GRPOTrainer(
@@ -228,5 +244,5 @@ def main():
     trainer.on_exit()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
