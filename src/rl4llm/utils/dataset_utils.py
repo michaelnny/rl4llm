@@ -2,7 +2,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from torch.utils.data import Dataset
+# from datasets import Dataset
 
 from rl4llm.constants import LOGGER_NAME
 
@@ -10,22 +10,21 @@ logger = logging.getLogger(LOGGER_NAME)
 
 
 def shard_dataset(
-    dataset: Dataset, num_shards: int, shard_index: int
-) -> Dataset:
+    dataset: List[Dict], num_shards: int, shard_index: int
+) -> List[Dict]:
     """
     Shard a dataset across multiple ranks.
 
     This function supports both Hugging Face Datasets and PyTorch Datasets.
 
     Args:
-        dataset (Dataset): The dataset to shard.
+        dataset (List[Dict]): The dataset to shard.
         num_shards (int): Total number of shards.
         shard_index (int): The current rank (shard index).
 
     Returns:
-        Dataset: The sharded dataset.
+        List[Dict]: The sharded dataset.
     """
-
     # Manually create a subset.
     total_length = len(dataset)
     shard_size = total_length // num_shards

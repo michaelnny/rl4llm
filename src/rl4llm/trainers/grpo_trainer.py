@@ -4,15 +4,17 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import deepspeed
 import torch
 from deepspeed import DeepSpeedEngine
+from datasets import Dataset
 from pydantic import BaseModel, Field, field_validator, model_validator
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_trainer import RLConfig, RLTrainer
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.logging import LoggingManager
+from rl4llm.envs import LLMEnv
 
 
 class GRPOConfig(RLConfig):
@@ -26,30 +28,30 @@ class TransitionData(BaseModel):
 
     states: torch.Tensor = Field(
         ...,
-        description='A long tensor for token sequences from t=0, 1, ..., T-1',
+        description="A long tensor for token sequences from t=0, 1, ..., T-1",
     )
     actions: torch.Tensor = Field(
         ...,
-        description='A long tensor for token sequences from t=1, 2, ..., T-1, T',
+        description="A long tensor for token sequences from t=1, 2, ..., T-1, T",
     )
     loss_mask: torch.Tensor = Field(
         ...,
-        description='A boolean tensor (0s user tokens, 1s assistant tokens) corresponding to token sequences from t=1, 2, ..., T-1, T',
+        description="A boolean tensor (0s user tokens, 1s assistant tokens) corresponding to token sequences from t=1, 2, ..., T-1, T",
     )
     pi_logprobs: torch.Tensor = Field(
         ...,
-        description='A float tensor for action logprobs corresponding to token sequences from t=1, 2, ..., T-1, T',
+        description="A float tensor for action logprobs corresponding to token sequences from t=1, 2, ..., T-1, T",
     )
     ref_logprobs: torch.Tensor = Field(
         ...,
-        description='A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T',
+        description="A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T",
     )
     advantages: torch.Tensor = Field(
         ...,
-        description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
+        description="A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T",
     )
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def check_tensor_shapes(cls, values):
         tensors = [
             values.states,
@@ -86,8 +88,10 @@ class GRPOTrainer(RLTrainer):
         dist_manager: DistributedManager,
         logger: LoggingManager,
         artifacts_path: str,
-        train_dataset: Dataset,
-        eval_dataset: Optional[Dataset] = None,
+        train_env: LLMEnv,
+        eval_env: Optional[LLMEnv] = None,
+        # train_dataset: Union[List[Dict] | Dataset],
+        # eval_dataset: Optional[Union[List[Dict] | Dataset]] = None,
         seed: Optional[int] = 175,
     ):
         super().__init__(
@@ -97,8 +101,10 @@ class GRPOTrainer(RLTrainer):
             dist_manager=dist_manager,
             logger=logger,
             artifacts_path=artifacts_path,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
+            train_env=train_env,
+            eval_env=eval_env,
+            # train_dataset=train_dataset,
+            # eval_dataset=eval_dataset,
             seed=seed,
         )
 
@@ -108,19 +114,13 @@ class GRPOTrainer(RLTrainer):
         """Initialize GRPO specific settings"""
 
         # avoid adding group of samples with almost identical outcomes
-        _dummy_rewards = torch.tensor(
-            [0] * self.config.group_size, dtype=torch.float32
-        )
+        _dummy_rewards = torch.tensor([0] * self.config.group_size, dtype=torch.float32)
         _idx = math.ceil(self.config.group_size * 0.05)
         _dummy_rewards[:_idx] = 1.0
-        self.group_reward_std_threshold = torch.std(
-            _dummy_rewards, unbiased=False
-        )
+        self.group_reward_std_threshold = torch.std(_dummy_rewards, unbiased=False)
 
     @torch.inference_mode()
-    def _generate_group_samples(
-        self, item: Dict[str, str]
-    ) -> List[TransitionData]:
+    def _generate_group_samples(self, item: Dict[str, str]) -> List[TransitionData]:
         """Generate responses for a batch of questions and ground truth answers
 
         Args:
@@ -130,102 +130,64 @@ class GRPOTrainer(RLTrainer):
             List[Dict]: List of samples for all groups in the batch
         """
 
-        # Prepare messages for the entire batch
-        task_type = item['task_type'].upper()
-        question = item['question']
-        ground_truth = item['ground_truth']
-        assert isinstance(question, str)
-        if task_type not in ['MATH', 'GSM']:
-            raise ValueError(
-                f"Invalid task type: {task_type}, only support 'MATH' or 'GSM'"
-            )
+        # # Prepare messages for the entire batch
+        # task_type = item['task_type'].upper()
+        # question = item['question']
+        # ground_truth = item['ground_truth']
+        # assert isinstance(question, str)
+        # if task_type not in ['MATH', 'GSM']:
+        #     raise ValueError(
+        #         f"Invalid task type: {task_type}, only support 'MATH' or 'GSM'"
+        #     )
 
-        input_ids = item['input_ids']
-        attention_mask = item['attention_mask']
+        # input_ids = item['input_ids']
+        # attention_mask = item['attention_mask']
 
-        if (
-            self.config.max_prompt_tokens >= 512
-            and input_ids.size(0) > self.config.max_prompt_tokens
-        ):
-            self.logger.warning(
-                f"Skip sample with prompt size grater than {self.config.max_prompt_tokens}"
-            )
-            return []
+        # if (
+        #     self.config.max_prompt_tokens >= 512
+        #     and input_ids.size(0) > self.config.max_prompt_tokens
+        # ):
+        #     self.logger.warning(
+        #         f"Skip sample with prompt size grater than {self.config.max_prompt_tokens}"
+        #     )
+        #     return []
 
-        # Expand to have a "group" batch dimension
-        input_ids = input_ids.to(self.device).repeat(self.config.group_size, 1)
-        attention_mask = attention_mask.to(self.device).repeat(
-            self.config.group_size, 1
-        )
-
-        # use_custom_generator = (
-        #     generator is not None
-        #     and hasattr(generator, 'generate')
-        #     and (self.config.group_temperature or self.config.explore_init_epsilon > 0)
+        # # Expand to have a "group" batch dimension
+        # input_ids = input_ids.to(self.device).repeat(self.config.group_size, 1)
+        # attention_mask = attention_mask.to(self.device).repeat(
+        #     self.config.group_size, 1
         # )
-        # if not use_custom_generator:
-        #     generator = policy_model
 
         gen_kwargs = {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'eos_token_id': self.tokenizer.eos_token_id,
-            'pad_token_id': self.tokenizer.pad_token_id,
-            'max_new_tokens': self.config.max_completion_tokens,
-            'temperature': self.config.temperature,
-            'top_p': self.config.top_p,
-            'top_k': self.config.top_k,
-            'repetition_penalty': self.config.repetition_penalty,
-            'do_sample': True,
-            'use_cache': True,
-            'output_scores': False,
-            'output_logits': False,
-            'return_dict_in_generate': True,
-            'return_legacy_cache': False,
+            # 'input_ids': input_ids,
+            # 'attention_mask': attention_mask,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "max_new_tokens": self.config.max_completion_tokens,
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "top_k": self.config.top_k,
+            "repetition_penalty": self.config.repetition_penalty,
+            "do_sample": True,
+            "use_cache": True,
+            "output_scores": False,
+            "output_logits": False,
+            "return_dict_in_generate": True,
+            "return_legacy_cache": False,
         }
 
-        # if use_custom_generator:
-        #     if self.config.group_temperature:
-        #         # Spread temperature values according to self.config.group_size, where 0.0 means greedy sampling
-        #         # this idea is similar how we do it in distributed RL training in classical RL
-        #         # where we have multiple agents running in parallel, some agents are more exploratory than others
-        #         temperature = torch.linspace(
-        #             self.config.min_temperature,
-        #             self.config.max_temperature,
-        #             steps=self.config.group_size,
-        #             dtype=self.torch_dtype,
-        #             device=self.device,
-        #         )
-        #         # Round to 2 decimal places
-        #         gen_kwargs['temperature'] = torch.round(temperature, decimals=2)
-
-        #     check_correctness = partial(self.math_grader.__call__, ground_truth=ground_truth)
-        #     explore_prob = self._get_exploration_epsilon()
-
-        #     enable_exploring = (self.config.explore_start_steps > 0) and (explore_prob > 0) and (random.random() < explore_prob)
-
-        #     # exploring start
-        #     if enable_exploring:
-        #         gen_kwargs['explore_start_steps'] = self.config.explore_start_steps
-        #         gen_kwargs['explore_skip_n'] = self.think_token_len
-        #         gen_kwargs['explore_top_k'] = self.config.explore_top_k
-
-        #         # swaps special tokens like "</think>" with "Wait"
-        #         if self.config.explore_max_replacements > 0:
-        #             gen_kwargs['correctness_callback'] = check_correctness
-        #             gen_kwargs['explore_replace_prob'] = explore_prob
-        #             gen_kwargs['explore_max_replacements'] = self.config.explore_max_replacements
-
         generator = self.policy_model
-        outputs = generator.generate(**gen_kwargs)
+        outputs = self.train_env.rollout(self.policy_model, gen_kwargs)
 
-        return self._process_training_samples(
-            question,
-            ground_truth,
-            task_type,
-            input_ids,
-            outputs.sequences,
-        )
+        return outputs
+
+        # return self._process_training_samples(
+        #     question,
+        #     ground_truth,
+        #     task_type,
+        #     input_ids,
+        #     outputs.sequences,
+        # )
 
     def _process_training_samples(
         self,
@@ -263,44 +225,21 @@ class GRPOTrainer(RLTrainer):
             full_sequences=full_sequences,
         )
 
-        rewards = reward_dict['accuracy_reward']
+        rewards = reward_dict["accuracy_reward"]
 
-        # # log samples to external file
-        # samples_to_log = self.convert_llm_output_to_samples(
-        #     question=questions,
-        #     ground_truth=ground_truths,
-        #     task_type=task_types,
-        #     prompt_length=outputs['prompt_lengths'].tolist(),
-        #     completion_length=outputs['completion_lengths'].tolist(),
-        #     completion_text=outputs['completion_texts'],
-        #     **{k: v.tolist() for k, v in reward_dict.items()},
-        # )
+        # # discard samples as they leads to zero advantages -> zero gradients
+        # if (
+        #     torch.std(rewards, unbiased=False)
+        #     <= self.group_reward_std_threshold
+        # ):
+        #     self.logger.warning(
+        #         f'Skipping samples with identical rewards, \
+        #             minimum group reward std: {self.group_reward_std_threshold}'
+        #     )
+        #     self.logger.log_scalar('generation/skipped_sample', len(rewards))
+        #     return []
 
-        # self.log_batch_samples(
-        #     samples_to_log, self.global_step, is_training=True
-        # )
-
-        # discard samples as they leads to zero advantages -> zero gradients
-        if (
-            torch.std(rewards, unbiased=False)
-            <= self.group_reward_std_threshold
-        ):
-            self.logger.warning(
-                f'Skipping samples with identical rewards, \
-                    minimum group reward std: {self.group_reward_std_threshold}'
-            )
-            self.logger.log_scalar('generation/skipped_sample', len(rewards))
-            return []
-
-        # self._log_group_samples(
-
-        #     task_types=task_types,
-        #     questions=questions,
-        #     ground_truths=ground_truths,
-        #     **outputs,
-        # )
-
-        completion_lengths = outputs['completion_lengths']
+        completion_lengths = outputs["completion_lengths"]
 
         # Training specific processing
         rewards = (
@@ -316,9 +255,7 @@ class GRPOTrainer(RLTrainer):
         pi_logits = self.policy_engine.forward(
             input_ids=states, attention_mask=attention_mask
         ).logits
-        pi_logprobs = self.compute_logprobs_from_logits(
-            pi_logits, actions
-        ).cpu()
+        pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions).cpu()
         self.clean_up()
         if self.config.kl_loss_coef > 0 and self.reference_model:
             ref_pi_logits = self.reference_model.forward(
@@ -360,10 +297,7 @@ class GRPOTrainer(RLTrainer):
         for i, cut_position in enumerate(cut_positions):
             assert completion_lengths[i] > 0
             assert loss_mask[i, ...].sum().item() == completion_lengths[i]
-            assert (
-                loss_mask[i, :cut_position].sum().item()
-                == completion_lengths[i]
-            )
+            assert loss_mask[i, :cut_position].sum().item() == completion_lengths[i]
 
             # Compute discounted return
             # seq_rewards = torch.zeros_like(actions[i, :cut_position], dtype=self.torch_dtype).cpu()
@@ -415,16 +349,9 @@ class GRPOTrainer(RLTrainer):
         """
         # Validate inputs
         batch_size = full_sequences.size(0)
-        assert (
-            len(questions)
-            == len(ground_truths)
-            == len(task_types)
-            == batch_size
-        )
+        assert len(questions) == len(ground_truths) == len(task_types) == batch_size
 
-        prompt_lengths = (
-            (input_ids != self.tokenizer.pad_token_id).sum(dim=1).cpu()
-        )
+        prompt_lengths = (input_ids != self.tokenizer.pad_token_id).sum(dim=1).cpu()
         completion_ids = full_sequences[:, input_ids.size(1) :]
         completion_lengths = (
             (completion_ids != self.tokenizer.pad_token_id).sum(dim=1).cpu()
@@ -437,40 +364,12 @@ class GRPOTrainer(RLTrainer):
         reward_dict = self.compute_rewards(completion_texts, ground_truths)
 
         return {
-            'questions': questions,
-            'prompt_lengths': prompt_lengths,
-            'completion_ids': completion_ids,
-            'completion_lengths': completion_lengths,
-            'completion_texts': completion_texts,
+            "questions": questions,
+            "prompt_lengths": prompt_lengths,
+            "completion_ids": completion_ids,
+            "completion_lengths": completion_lengths,
+            "completion_texts": completion_texts,
         }, reward_dict
-
-    def normalize_group_rewards(
-        self,
-        rewards: torch.Tensor,
-        zero_mean_only: bool = True,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
-        """
-        Normalize group rewards by subtracting the mean and dividing by the standard deviation.
-
-        Args:
-            rewards (torch.Tensor): List of rewards for the group.
-            eps (float): Small value to prevent division by zero.
-
-        Returns:
-            torch.Tensor: Normalized rewards.
-        """
-        assert eps > 0.0, 'Epsilon must be positive'
-        assert rewards.dim() == 1, 'Rewards must be 1-dimensional'
-        if len(rewards) <= 1:
-            return rewards
-
-        mean_reward = rewards.mean()
-        std_reward = rewards.std(unbiased=False)
-        if zero_mean_only:
-            return rewards - mean_reward
-
-        return (rewards - mean_reward) / (std_reward + eps)
 
     def compute_rewards(
         self, completion_texts: List[str], ground_truths: List[str]
@@ -488,12 +387,10 @@ class GRPOTrainer(RLTrainer):
         assert len(completion_texts) == len(ground_truths)
 
         accuracy_rewards = [
-            self.math_grader(full_answer=answer, **{'ground_truth': truth})
+            self.math_grader(full_answer=answer, **{"ground_truth": truth})
             for answer, truth in zip(completion_texts, ground_truths)
         ]  # 0 or 1
-        accuracy_rewards = torch.tensor(
-            accuracy_rewards, dtype=self.torch_dtype
-        )
+        accuracy_rewards = torch.tensor(accuracy_rewards, dtype=self.torch_dtype)
 
         # format_rewards = [0] * len(completion_texts) if not self.config.xml_format else self.format_grader(completion_texts, ground_truths)  # 0 or 1
         # format_rewards = torch.tensor(format_rewards, dtype=self.torch_dtype)
@@ -502,9 +399,37 @@ class GRPOTrainer(RLTrainer):
         # total_rewards = accuracy_rewards + beta * format_rewards
 
         return {
-            'accuracy_reward': accuracy_rewards,
+            "accuracy_reward": accuracy_rewards,
             # 'format_reward': format_rewards,
         }
+
+    def normalize_group_rewards(
+        self,
+        rewards: torch.Tensor,
+        zero_mean_only: bool = True,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        """
+        Normalize group rewards by subtracting the mean and dividing by the standard deviation.
+
+        Args:
+            rewards (torch.Tensor): List of rewards for the group.
+            eps (float): Small value to prevent division by zero.
+
+        Returns:
+            torch.Tensor: Normalized rewards.
+        """
+        assert eps > 0.0, "Epsilon must be positive"
+        assert rewards.dim() == 1, "Rewards must be 1-dimensional"
+        if len(rewards) <= 1:
+            return rewards
+
+        mean_reward = rewards.mean()
+        std_reward = rewards.std(unbiased=False)
+        if zero_mean_only:
+            return rewards - mean_reward
+
+        return (rewards - mean_reward) / (std_reward + eps)
 
     def generate_experience(self) -> List[TransitionData]:
         """Generates samples using the current policy."""
@@ -513,15 +438,11 @@ class GRPOTrainer(RLTrainer):
         # assert not self.reference_model.training
         collected_samples: List[TransitionData] = []
 
-        local_rollout_size = (
-            self.config.rollout_size // self.dist_manager.world_size
-        )
+        local_rollout_size = self.config.rollout_size // self.dist_manager.world_size
 
-        with self.logger.timer('generation'):
+        with self.logger.timer("generation"):
             while len(collected_samples) < local_rollout_size:
-                data = (
-                    self.get_next_train_data()
-                )  # this is the prompt-only loader
+                data = self.get_next_train_data()  # this is the prompt-only loader
                 samples = self._generate_group_samples(data)
                 if samples:
                     collected_samples.extend(samples)
@@ -541,7 +462,7 @@ class GRPOTrainer(RLTrainer):
             experience,
             batch_size=self.config.mini_batch_size,
             shuffle=True,
-            pin_memory=self.device.type == 'cuda',
+            pin_memory=self.device.type == "cuda",
             collate_fn=self._train_collate_fn,
             drop_last=True,
         )
@@ -576,9 +497,7 @@ class GRPOTrainer(RLTrainer):
         # PPO clipped surrogate PG loss
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clipped_ratio = ratio.clamp(
-            1 - self.config.clip_eps, 1 + self.config.clip_eps
-        )
+        clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
         pg_losses1 = ratio * advantages.detach()
         pg_losses2 = clipped_ratio * advantages.detach()
         pg_losses = -torch.min(pg_losses1, pg_losses2)
@@ -600,20 +519,18 @@ class GRPOTrainer(RLTrainer):
 
         # Initialize metrics with common values
         metrics = {
-            'train/pg_loss': pg_loss.detach().item(),
-            'train/entropy_loss': entropy_loss.detach().item(),
-            'policy/entropy': entropy.detach().item(),
-            'policy/approxkl': approxkl.detach().item(),
-            'policy/clipfrac': clipfrac.detach().item(),
+            "train/pg_loss": pg_loss.detach().item(),
+            "train/entropy_loss": entropy_loss.detach().item(),
+            "policy/entropy": entropy.detach().item(),
+            "policy/approxkl": approxkl.detach().item(),
+            "policy/clipfrac": clipfrac.detach().item(),
         }
 
         # Compute KL divergence if coefficient is positive
         if self.config.kl_loss_coef > 0:
             # Compute the KL divergence between the model and the reference model
             per_token_kl = (
-                torch.exp(ref_logprobs - pi_logprobs)
-                - (ref_logprobs - pi_logprobs)
-                - 1
+                torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
             )
 
             # # Clamp for stability
@@ -626,8 +543,8 @@ class GRPOTrainer(RLTrainer):
             loss = pg_loss + kl_loss + entropy_loss
             metrics.update(
                 {
-                    'train/kl_loss': kl_loss.detach().item(),
-                    'objective/kl': kl.detach().item(),
+                    "train/kl_loss": kl_loss.detach().item(),
+                    "objective/kl": kl.detach().item(),
                 }
             )
         else:
@@ -643,9 +560,7 @@ class GRPOTrainer(RLTrainer):
         for _ in range(self.config.num_updates):
             for i, micro_batch in enumerate(train_dataloader):
                 input_ids = micro_batch.states
-                attention_mask = (
-                    input_ids != self.tokenizer.pad_token_id
-                ).bool()
+                attention_mask = (input_ids != self.tokenizer.pad_token_id).bool()
                 pi_logits = self.policy_engine.forward(
                     input_ids=input_ids, attention_mask=attention_mask
                 ).logits
@@ -663,10 +578,10 @@ class GRPOTrainer(RLTrainer):
                 if self.policy_engine.is_gradient_accumulation_boundary():
                     self.policy_update_count += 1
                     self.logger.log_scalar(
-                        'train/policy_update', self.policy_update_count
+                        "train/policy_update", self.policy_update_count
                     )
                     self.logger.log_scalar(
-                        'train/learning_rate',
+                        "train/learning_rate",
                         self.policy_engine.get_lr()[0],
                     )
 
@@ -678,36 +593,36 @@ class GRPOTrainer(RLTrainer):
         pad_token_id = self.tokenizer.pad_token_id
 
         # Extract input_ids and attention_mask as lists of tensors
-        input_ids_list = [sample['input_ids'] for sample in batch]
-        attention_mask_list = [sample['attention_mask'] for sample in batch]
+        input_ids_list = [sample["input_ids"] for sample in batch]
+        attention_mask_list = [sample["attention_mask"] for sample in batch]
 
         # Dynamically pad to the longest sequence in the batch
         input_ids = pad_sequence(
             input_ids_list,
             batch_first=True,
             padding_value=pad_token_id,
-            padding_side='left',
+            padding_side="left",
         )
         attention_mask = pad_sequence(
             attention_mask_list,
             batch_first=True,
             padding_value=0,
-            padding_side='left',
+            padding_side="left",
         )
 
         # Collect other fields
-        questions = [sample['question'] for sample in batch]
-        ground_truths = [sample['ground_truth'] for sample in batch]
-        task_types = [sample['task_type'] for sample in batch]
+        questions = [sample["question"] for sample in batch]
+        ground_truths = [sample["ground_truth"] for sample in batch]
+        task_types = [sample["task_type"] for sample in batch]
 
         return {
-            'input_ids': input_ids.to(
+            "input_ids": input_ids.to(
                 self.device
             ),  # Shape: [batch_size, max_seq_len_in_batch]
-            'attention_mask': attention_mask.to(self.device),
-            'questions': questions,
-            'ground_truths': ground_truths,
-            'task_types': task_types,
+            "attention_mask": attention_mask.to(self.device),
+            "questions": questions,
+            "ground_truths": ground_truths,
+            "task_types": task_types,
         }
 
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
