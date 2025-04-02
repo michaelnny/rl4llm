@@ -1,6 +1,6 @@
 import logging
-import re
 import random
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -10,9 +10,10 @@ from pydantic import BaseModel, Field, constr, field_validator, model_validator
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
+from rl4llm.constants import LOGGER_NAME
+
 # from rl4llm.logging import LoggingManager
 from rl4llm.utils.dataset_utils import shard_dataset
-from rl4llm.constants import LOGGER_NAME
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -23,16 +24,20 @@ logger = logging.getLogger(LOGGER_NAME)
 class EpisodeData(BaseModel):
     """LLM ENV rollout episode"""
 
-    prompt_tokens: torch.Tensor = Field(..., description="Prompt token ids")
-    prompt_text: str = Field(..., description="Prompt full text")
-    prompt_length: int = Field(..., description="Prompt token size")
-    completion_tokens: torch.Tensor = Field(..., description="Completion token ids")
-    completion_text: str = Field(..., description="Completion full text")
-    completion_length: int = Field(..., description="Completion token size")
-    reward_dict: Dict[str, float] = Field(..., description="Rewards for the episode")
-    raw_data: Optional[Dict] = Field(None, description="Raw sample data")
+    prompt_tokens: torch.Tensor = Field(..., description='Prompt token ids')
+    prompt_text: str = Field(..., description='Prompt full text')
+    prompt_length: int = Field(..., description='Prompt token size')
+    completion_tokens: torch.Tensor = Field(
+        ..., description='Completion token ids'
+    )
+    completion_text: str = Field(..., description='Completion full text')
+    completion_length: int = Field(..., description='Completion token size')
+    reward_dict: Dict[str, float] = Field(
+        ..., description='Rewards for the episode'
+    )
+    raw_data: Optional[Dict] = Field(None, description='Raw sample data')
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def check_tensor_shapes(cls, values):
         if values.prompt_tokens.dim() != 1:
             raise ValueError(
@@ -52,15 +57,15 @@ class EpisodeData(BaseModel):
 class EnvState(BaseModel):
     """Environment state for LLM generation"""
 
-    prompt: List[str] = Field(..., description="Prompt full text")
-    input_ids: torch.Tensor = Field(..., description="Prompt token ids")
+    prompt: List[str] = Field(..., description='Prompt full text')
+    input_ids: torch.Tensor = Field(..., description='Prompt token ids')
     attention_mask: torch.Tensor = Field(
-        ..., description="Attention mask for the prompt token ids"
+        ..., description='Attention mask for the prompt token ids'
     )
     ground_truth: List[str | float | int] = Field(
-        ..., description="Ground truth to the problem"
+        ..., description='Ground truth to the problem'
     )
-    raw_data: Optional[List[Dict]] = Field(None, description="Raw sample data")
+    raw_data: Optional[List[Dict]] = Field(None, description='Raw sample data')
 
     class Config:
         arbitrary_types_allowed = True
@@ -72,7 +77,7 @@ class BaseRewardFunction:
     """
 
     # Define the validation pattern as a constant for clarity
-    _VALID_NAME_PATTERN = r"^[a-zA-Z0-9_\-]+$"
+    _VALID_NAME_PATTERN = r'^[a-zA-Z0-9_\-]+$'
 
     def __init__(self, name: str):
         """
@@ -88,9 +93,11 @@ class BaseRewardFunction:
             ValueError: If the name is empty or does not match the required pattern.
         """
         if not isinstance(name, str):
-            raise TypeError(f"Reward function name must be a string, got {type(name)}.")
+            raise TypeError(
+                f"Reward function name must be a string, got {type(name)}."
+            )
         if not name:
-            raise ValueError("Reward function name cannot be empty.")
+            raise ValueError('Reward function name cannot be empty.')
 
         if not re.match(self._VALID_NAME_PATTERN, name):
             raise ValueError(
@@ -117,7 +124,7 @@ class BaseRewardFunction:
             List[float]: A list of scalar rewards.
         """
         raise NotImplementedError(
-            "Reward functions must implement the __call__ method."
+            'Reward functions must implement the __call__ method.'
         )
 
 
@@ -156,12 +163,12 @@ class LLMEnv:
             max_prompt_length: Optional maximum length for tokenized prompts. Defaults to tokenizer's model_max_length.
         """
         if batch_size < 1:
-            raise ValueError("Batch size must be at least 1")
+            raise ValueError('Batch size must be at least 1')
         if not reward_functions or not all(
             isinstance(fn, BaseRewardFunction) for fn in reward_functions
         ):
             raise ValueError(
-                "reward_functions must be a non-empty list of BaseRewardFunction instances"
+                'reward_functions must be a non-empty list of BaseRewardFunction instances'
             )
 
         self._seed = seed
@@ -176,11 +183,13 @@ class LLMEnv:
         self._tokenizer = tokenizer
         # Ensure pad token is set for batching
         if self._tokenizer.pad_token is None:
-            logger.warning("Tokenizer does not have a pad token. Setting to eos_token.")
+            logger.warning(
+                'Tokenizer does not have a pad token. Setting to eos_token.'
+            )
             self._tokenizer.pad_token = self._tokenizer.eos_token
             if self._tokenizer.pad_token is None:
                 raise ValueError(
-                    "Tokenizer needs a pad_token or eos_token for padding."
+                    'Tokenizer needs a pad_token or eos_token for padding.'
                 )
 
         self._batch_size = batch_size
@@ -201,7 +210,9 @@ class LLMEnv:
             collate_fn=self._collate_fn,
         )
         self._dataset_iterator = iter(self._loader)
-        self._max_prompt_length = max_prompt_length or self._tokenizer.model_max_length
+        self._max_prompt_length = (
+            max_prompt_length or self._tokenizer.model_max_length
+        )
 
     def _collate_fn(self, batch: List[Dict]) -> Dict[str, List]:
         """Collates list of dicts into a dict of lists."""
@@ -219,7 +230,7 @@ class LLMEnv:
             item_batch = next(self._dataset_iterator)
             return self._prepare_initial_state(item_batch)
         except StopIteration:
-            logger.info("Dataset iterator exhausted. Resetting DataLoader.")
+            logger.info('Dataset iterator exhausted. Resetting DataLoader.')
             self._dataset_iterator = iter(self._loader)
             item_batch = next(self._dataset_iterator)
             return self._prepare_initial_state(item_batch)
@@ -240,31 +251,33 @@ class LLMEnv:
         """
         if (
             not isinstance(item_batch, dict)
-            or "prompt" not in item_batch
-            or "ground_truth" not in item_batch
+            or 'prompt' not in item_batch
+            or 'ground_truth' not in item_batch
         ):
             raise ValueError(
                 f"Invalid batch data format. Expected dict with 'prompt' and 'ground_truth' lists, got {type(item_batch)}"
             )
-        if not isinstance(item_batch["prompt"], list) or not isinstance(
-            item_batch["ground_truth"], list
+        if not isinstance(item_batch['prompt'], list) or not isinstance(
+            item_batch['ground_truth'], list
         ):
             raise ValueError(
                 "'prompt' and 'ground_truth' values in the batch must be lists."
             )
-        if len(item_batch["prompt"]) != len(item_batch["ground_truth"]):
-            raise ValueError("Batch size mismatch between 'prompt' and 'ground_truth'.")
+        if len(item_batch['prompt']) != len(item_batch['ground_truth']):
+            raise ValueError(
+                "Batch size mismatch between 'prompt' and 'ground_truth'."
+            )
 
         # Ensure prompts are strings
-        prompts = [str(p) for p in item_batch["prompt"]]
+        prompts = [str(p) for p in item_batch['prompt']]
 
         # Tokenize the batch of prompts with padding and truncation
         inputs = self._tokenizer(
             prompts,
-            return_tensors="pt",
+            return_tensors='pt',
             # Pad to the longest sequence in the batch
-            padding="longest" if self._batch_size > 1 else False,
-            padding_side="left" if self._batch_size > 1 else None,
+            padding='longest' if self._batch_size > 1 else False,
+            padding_side='left' if self._batch_size > 1 else None,
             truncation=True,
             max_length=self._max_prompt_length,
             return_attention_mask=True,
@@ -276,24 +289,33 @@ class LLMEnv:
         # Store raw data per sample, not just the whole batch dict
         raw_data_list = []
         batch_keys = list(item_batch.keys())
-        num_samples = len(item_batch["prompt"])
+        num_samples = len(item_batch['prompt'])
         for i in range(num_samples):
-            raw_data_list.append({key: item_batch[key][i] for key in batch_keys})
+            raw_data_list.append(
+                {key: item_batch[key][i] for key in batch_keys}
+            )
 
         state = EnvState(
             prompt=prompts,  # List of prompt strings
-            input_ids=inputs["input_ids"],  # Tensor (batch_size, prompt_seq_len)
-            attention_mask=inputs[
-                "attention_mask"
+            input_ids=inputs[
+                'input_ids'
             ],  # Tensor (batch_size, prompt_seq_len)
-            ground_truth=item_batch["ground_truth"],  # List of ground truth strings
+            attention_mask=inputs[
+                'attention_mask'
+            ],  # Tensor (batch_size, prompt_seq_len)
+            ground_truth=item_batch[
+                'ground_truth'
+            ],  # List of ground truth strings
             raw_data=raw_data_list,  # List of raw data dicts
             # prompt_length=prompt_length,
         )
 
         return state
 
-    def rollout(self, llm: PreTrainedModel, gen_args: Dict) -> List[EpisodeData]:
+    @torch.inference_mode()
+    def rollout(
+        self, llm: PreTrainedModel, gen_args: Dict
+    ) -> List[EpisodeData]:
         """
         Performs a rollout step: generates completions for a batch of prompts
         and calculates rewards.
@@ -308,9 +330,9 @@ class LLMEnv:
                                (prompt-completion pair with rewards). The total
                                number of episodes is batch_size * num_return_sequences.
         """
-        group_size = gen_args.get("num_return_sequences", 1)
+        group_size = gen_args.get('num_return_sequences', 1)
         if group_size < 1:
-            raise ValueError("num_return_sequences must be at least 1")
+            raise ValueError('num_return_sequences must be at least 1')
 
         # 1. Get the initial state (batched prompts)
         s_t = self.reset()
@@ -324,19 +346,17 @@ class LLMEnv:
 
         # Ensure generation args don't conflict with required args
         gen_args_copy = gen_args.copy()
-        gen_args_copy.pop("input_ids", None)
-        gen_args_copy.pop("attention_mask", None)
+        gen_args_copy.pop('input_ids', None)
+        gen_args_copy.pop('attention_mask', None)
 
-        with torch.no_grad():  # Important for inference
-            output = llm.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                pad_token_id=self._tokenizer.pad_token_id,  # Ensure pad token is used if needed during generation
-                **gen_args_copy,
-            )
+        output = llm.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **gen_args_copy,
+        )
 
         # Shape: (input_batch_size * group_size, full_sequence_length)
-        full_sequences = output.sequences.cpu()  # Move to CPU for decoding/processing
+        full_sequences = output.sequences.cpu()
         output_batch_size = full_sequences.shape[0]
 
         # Verification check
@@ -350,7 +370,9 @@ class LLMEnv:
             # Adjust group_size if necessary, though this might indicate an issue
             if output_batch_size % input_batch_size == 0:
                 group_size = output_batch_size // input_batch_size
-                logger.warning(f"Adjusting group_size to {group_size} based on output.")
+                logger.warning(
+                    f"Adjusting group_size to {group_size} based on output."
+                )
             else:
                 # This case is problematic, maybe raise error or handle differently
                 raise RuntimeError(
@@ -358,22 +380,48 @@ class LLMEnv:
                 )
 
         # 3. Process outputs
-        prompt_length = s_t.input_ids.shape[1]  # Use the stored padded prompt length
+        prompt_length = s_t.input_ids.shape[1]
+        completion_ids = full_sequences[:, prompt_length:]
+        preliminary_lengths = (
+            completion_ids != self._tokenizer.pad_token_id
+        ).sum(dim=1)
 
-        # Shape: (output_batch_size, completion_length)
-        # Ensure slicing doesn't go out of bounds if generation is shorter than prompt
-        completion_ids = full_sequences[
-            :, min(prompt_length, full_sequences.shape[1]) :
-        ]
+        # We will determine the final slice length for each sample individually later.
+        # The EOS truncation loop below is primarily for cleaning up the text decoding
+        # by ensuring text generation stops after the first EOS.
+        # The token sequence should retain the EOS.
+        completion_ids_for_decode = (
+            completion_ids.clone()
+        )  # Clone for decoding modifications
+        for i in range(completion_ids_for_decode.size(0)):
+            # Find positions where we have EOS
+            eos_positions = (
+                completion_ids_for_decode[i] == self._tokenizer.eos_token_id
+            ).nonzero(as_tuple=True)[0]
+            if len(eos_positions) > 0:
+                first_eos = eos_positions[0].item()
+                # Truncate everything *after* (but not including) the first EOS for *decoding*
+                completion_ids_for_decode[i, first_eos + 1 :] = (
+                    self._tokenizer.pad_token_id
+                )
 
-        # Calculate actual completion lengths (excluding padding)
-        # Assuming pad_token_id is used for padding *after* generation ends
-        completion_lengths = (completion_ids != self._tokenizer.pad_token_id).sum(dim=1)
+        # Calculate the lengths for *decoding* by ignoring padding.
+        decode_lengths = (
+            completion_ids_for_decode != self._tokenizer.pad_token_id
+        ).sum(dim=1)
 
-        # Decode completions
-        completion_texts = self._tokenizer.batch_decode(
-            completion_ids, skip_special_tokens=True
-        )
+        # Decode completions using the cleaned sequences
+        # Use the lengths derived from the cleaned sequences for batch_decode
+        decoded_texts = []
+        for i in range(output_batch_size):
+            decoded_texts.append(
+                self._tokenizer.decode(
+                    completion_ids_for_decode[i, : decode_lengths[i]],
+                    skip_special_tokens=True,
+                )
+            )
+        completion_texts = decoded_texts  # Assign to the variable used later
+        # --- End of section processing completion tokens ---
 
         # 4. Prepare data for reward calculation and EpisodeData construction
         # Expand original batch data to match the output batch size
@@ -391,7 +439,9 @@ class LLMEnv:
                 # We use the input_ids before padding/truncation if available,
                 # otherwise, use the padded ones and slice based on attention mask?
                 # Simplest: just store the padded input_ids for the corresponding prompt.
-                expanded_prompt_tokens.append(s_t.input_ids[i].cpu())  # Store on CPU
+                expanded_prompt_tokens.append(
+                    s_t.input_ids[i].cpu()
+                )  # Store on CPU
 
         # Verify expanded list lengths
         assert len(expanded_prompts) == output_batch_size
@@ -408,13 +458,18 @@ class LLMEnv:
                     completion_texts,  # List[str] (output_batch_size)
                     expanded_ground_truths,  # List[str] (output_batch_size)
                 )
-                if not isinstance(rewards, list) or len(rewards) != output_batch_size:
+                if (
+                    not isinstance(rewards, list)
+                    or len(rewards) != output_batch_size
+                ):
                     raise ValueError(
                         f"Reward function '{reward_fn.name}' did not return a list of size {output_batch_size}"
                     )
                 reward_dict_batch[reward_fn.name] = rewards
             except Exception as e:
-                logger.error(f"Error calculating reward with {reward_fn.name}: {e}")
+                logger.error(
+                    f"Error calculating reward with {reward_fn.name}: {e}"
+                )
                 # Handle error, e.g., assign default reward or re-raise
                 reward_dict_batch[reward_fn.name] = [
                     0.0
@@ -423,25 +478,42 @@ class LLMEnv:
         # 6. Construct EpisodeData for each generated sequence
         results: List[EpisodeData] = []
         for i in range(output_batch_size):
-            # Get the original prompt tokens corresponding to this output
-            # original_batch_idx = i // group_size # Index into the original s_t batch
-            # prompt_tokens_for_sample = s_t.input_ids[original_batch_idx].cpu()
+            # --- Start Modification ---
+            # Use the original completion_ids (before modification for decoding)
+            current_completion_ids_original = completion_ids[i]
 
-            # Ensure completion tokens don't include padding beyond the actual length
-            actual_completion_len = completion_lengths[i].item()
-            completion_tokens_for_sample = completion_ids[i, :actual_completion_len]
+            # Find the first EOS token in the *original* completion tokens for this sample
+            eos_positions = (
+                current_completion_ids_original == self._tokenizer.eos_token_id
+            ).nonzero(as_tuple=True)[0]
+
+            if len(eos_positions) > 0:
+                # If an EOS token is present, slice up to and *including* it
+                first_eos_idx = eos_positions[0].item()
+                # The length includes the EOS token at index first_eos_idx
+                actual_len_incl_eos = first_eos_idx + 1
+                # Slice the original completion tokens to include EOS
+                completion_tokens_for_sample = current_completion_ids_original[
+                    :actual_len_incl_eos
+                ]
+            else:
+                # If no EOS token, the sequence likely finished due to max_length.
+                # Use the preliminary length calculated before any modifications.
+                # This captures all non-pad tokens generated.
+                actual_len_no_eos = preliminary_lengths[i].item()
+                completion_tokens_for_sample = current_completion_ids_original[
+                    :actual_len_no_eos
+                ]
 
             sample = EpisodeData(
                 prompt_text=expanded_prompts[i],
-                prompt_tokens=expanded_prompt_tokens[
-                    i
-                ],  # Padded prompt tokens from input
-                prompt_length=prompt_length,  # Padded length
+                prompt_tokens=expanded_prompt_tokens[i],
+                prompt_length=len(expanded_prompt_tokens[i]),
                 completion_text=completion_texts[i],
-                completion_tokens=completion_tokens_for_sample,  # Tokens up to actual length
-                completion_length=actual_completion_len,
+                completion_tokens=completion_tokens_for_sample,
+                completion_length=len(completion_tokens_for_sample),
                 reward_dict={k: v[i] for k, v in reward_dict_batch.items()},
-                raw_data=expanded_raw_data[i],  # Raw data for the original prompt
+                raw_data=expanded_raw_data[i],
             )
             results.append(sample)
 

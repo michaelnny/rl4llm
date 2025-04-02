@@ -6,7 +6,7 @@ job:
     - "gsm"
     # - "math"
   # max_train_samples: 4096         # for a quick run
-  max_test_samples: 128        
+  max_test_samples: 1024        
 
 model:
   pretrained_model: "Qwen/Qwen2.5-0.5B"
@@ -25,7 +25,7 @@ model:
 
 grpo_config:
   max_steps: 2000
-  rollout_size: 256
+  rollout_size: 512
   num_updates: 1
   # mini_batch_size: 16
   gamma: 1.0                          # fixed discount
@@ -39,7 +39,7 @@ grpo_config:
 
   # for sample generation
   max_prompt_tokens: 512              # skip sample question that's too long
-  group_size: 32                      # for each sample we generate a group of answers
+  group_size: 16                      # for each sample we generate a group of answers
   max_completion_tokens: 1024
   temperature: 1.0                    # not used if using group_temperature
   repetition_penalty: 1.0

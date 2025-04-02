@@ -3,14 +3,15 @@ import os
 import random
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
-import pyarrow as pa
-import pyarrow.parquet as pq
+
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
+from rl4llm.constants import LOGGING_PHASES
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.logging.handlers.base import BaseHandler
-from rl4llm.constants import LOGGING_PHASES
 
 
 class SampleFileLogger:
@@ -30,9 +31,9 @@ class SampleFileLogger:
     """
 
     SUPPORTED_FORMATS = {
-        "parquet": {"extension": "parquet", "default_compression": "snappy"},
-        "jsonl": {"extension": "jsonl", "default_compression": None},
-        "jsonl.gz": {"extension": "jsonl.gz", "default_compression": "gzip"},
+        'parquet': {'extension': 'parquet', 'default_compression': 'snappy'},
+        'jsonl': {'extension': 'jsonl', 'default_compression': None},
+        'jsonl.gz': {'extension': 'jsonl.gz', 'default_compression': 'gzip'},
     }
 
     def __init__(
@@ -40,7 +41,7 @@ class SampleFileLogger:
         # Changed save_dir to phase_dir for clarity
         phase_dir: str,
         rank: int,
-        file_format: str = "parquet",
+        file_format: str = 'parquet',
         compression: str = None,
         buffer_size: int = 100,
         logger: Optional[logging.Logger] = None,
@@ -69,16 +70,19 @@ class SampleFileLogger:
             )
 
         # Directory where the actual sample file will live
-        self.samples_dir = os.path.join(phase_dir, "samples")
+        self.samples_dir = os.path.join(phase_dir, 'samples')
         self.rank = rank
         self.file_format = file_format
         self.compression = (
-            compression or self.SUPPORTED_FORMATS[file_format]["default_compression"]
+            compression
+            or self.SUPPORTED_FORMATS[file_format]['default_compression']
         )
         self.buffer_size = buffer_size
         self._buffer: List[Dict[str, Any]] = []  # Single buffer per instance
 
-        self._logger = logger if logger is not None else logging.getLogger("RL4LLM")
+        self._logger = (
+            logger if logger is not None else logging.getLogger('RL4LLM')
+        )
 
         try:
             os.makedirs(self.samples_dir, exist_ok=True)
@@ -102,7 +106,7 @@ class SampleFileLogger:
             str: The full filepath where samples for this phase/rank will be saved.
         """
         # No tag needed here, filename is determined by rank only within the phase dir
-        extension = self.SUPPORTED_FORMATS[self.file_format]["extension"]
+        extension = self.SUPPORTED_FORMATS[self.file_format]['extension']
         # Filename could be simpler, e.g., "samples_rankX.ext" or just "rankX.ext"
         # Let's use "rankX.ext" for simplicity within the specific samples dir.
         return os.path.join(self.samples_dir, f"rank{self.rank}.{extension}")
@@ -117,7 +121,7 @@ class SampleFileLogger:
             step (int): The current step or iteration number.
         """
         # Add step information to the data
-        log_entry = {"step": step, **data}
+        log_entry = {'step': step, **data}
 
         # Add entry to the single buffer
         self._buffer.append(log_entry)
@@ -151,17 +155,21 @@ class SampleFileLogger:
         try:
             file_exists = os.path.exists(self.save_path)
 
-            if self.file_format == "parquet":
+            if self.file_format == 'parquet':
                 if file_exists:
                     # --- PARQUET APPEND FIX ---
                     # Read the existing Parquet file into an Arrow Table
                     try:
                         existing_table = pq.read_table(self.save_path)
                         # Concatenate the existing table and the new table
-                        combined_table = pa.concat_tables([existing_table, new_table])
+                        combined_table = pa.concat_tables(
+                            [existing_table, new_table]
+                        )
                         # Write the combined table, overwriting the old file
                         pq.write_table(
-                            combined_table, self.save_path, compression=self.compression
+                            combined_table,
+                            self.save_path,
+                            compression=self.compression,
                         )
                         self._logger.debug(
                             f"Rank {self.rank}: Appended {len(new_table)} rows to existing Parquet: {self.save_path}"
@@ -186,11 +194,11 @@ class SampleFileLogger:
                     )
 
             else:  # jsonl or jsonl.gz (This logic should be correct)
-                mode = "a" if file_exists else "w"
+                mode = 'a' if file_exists else 'w'
                 # Use the DataFrame directly for to_json
                 new_df.to_json(
                     self.save_path,
-                    orient="records",
+                    orient='records',
                     lines=True,
                     compression=self.compression,
                     mode=mode,
@@ -199,7 +207,7 @@ class SampleFileLogger:
                     f"Rank {self.rank}: {'Appended' if mode == 'a' else 'Wrote'} {len(new_df)} rows to JSONL: {self.save_path}"
                 )
 
-            self._logger.info(
+            self._logger.debug(
                 f"Rank {self.rank}: Flushed {len(self._buffer)} rows to {self.file_format} file: {self.save_path}"
             )
             # Clear buffer only on success
@@ -208,13 +216,15 @@ class SampleFileLogger:
         except Exception as e:
             # Catch any exception during write/append and log before raising
             # Avoid logging the specific read_concat_error again if it was already caught above
-            if "read_concat_error" not in locals() or e is not read_concat_error:
+            if 'read_concat_error' not in locals():
                 self._logger.error(
                     f"Rank {self.rank}: Failed to write data to {self.save_path}: {e}",
                     exc_info=True,
                 )
             # Do not clear buffer on failure
-            raise IOError(f"Failed to write to {self.file_format} file: {e}") from e
+            raise IOError(
+                f"Failed to write to {self.file_format} file: {e}"
+            ) from e
 
     def flush(self) -> None:
         """
@@ -224,7 +234,9 @@ class SampleFileLogger:
             self._flush()
         except Exception as e:
             # Log warning but don't crash the whole flush process if one fails
-            self._logger.warning(f"Failed to flush buffer to {self.save_path}: {e}")
+            self._logger.warning(
+                f"Failed to flush buffer to {self.save_path}: {e}"
+            )
 
     def close(self) -> None:
         """
@@ -244,13 +256,13 @@ class SampleHandler(BaseHandler):
     a sample is included as part of the data written to the file.
     """
 
-    GENERAL_PHASE: str = "general"
+    GENERAL_PHASE: str = 'general'
 
     def __init__(
         self,
         dist_manager: DistributedManager,
         log_dir: str,
-        sample_file_format: str = "parquet",
+        sample_file_format: str = 'parquet',
         sample_buffer_size: int = 100,
         logger: Optional[logging.Logger] = None,
     ):
@@ -309,11 +321,15 @@ class SampleHandler(BaseHandler):
 
         """
 
-        current_phase = phase if phase in self._log_phases else self.GENERAL_PHASE
+        current_phase = (
+            phase if phase in self._log_phases else self.GENERAL_PHASE
+        )
 
         if current_phase not in self._file_loggers:
             # This might happen if phase wasn't in the initial list or GENERAL_PHASE failed init
-            self._logger.warning(f"No logger configured for phase '{current_phase}'. ")
+            self._logger.warning(
+                f"No logger configured for phase '{current_phase}'. "
+            )
             return  # Skip logging if no logger exists for the phase
 
         try:
@@ -333,7 +349,9 @@ class SampleHandler(BaseHandler):
 
     def flush(self) -> None:
         """Flushes all underlying phase-specific file loggers."""
-        self._logger.debug(f"Flushing sample file loggers for rank {self.rank}...")
+        self._logger.debug(
+            f"Flushing sample file loggers for rank {self.rank}..."
+        )
         for phase, file_logger in self._file_loggers.items():
             try:
                 # self._logger.debug(f"Flushing logger for phase '{phase}'...") # Optional: more verbose logging
@@ -346,7 +364,9 @@ class SampleHandler(BaseHandler):
 
     def close(self) -> None:
         """Flushes and closes all underlying phase-specific file loggers."""
-        self._logger.info(f"Closing sample file loggers for rank {self.rank}...")
+        self._logger.info(
+            f"Closing sample file loggers for rank {self.rank}..."
+        )
         self.flush()  # Ensure all data is written before closing
         for phase, file_logger in self._file_loggers.items():
             try:

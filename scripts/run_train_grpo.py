@@ -87,7 +87,9 @@ def preprocess_dataset(dataset: List[Dict], model_name: str) -> List[Dict]:
 
 
 class AccuracyRewardFunction(BaseRewardFunction):
-    name: str = 'reward_function'
+
+    def __init__(self, name='accuracy_reward'):
+        super().__init__(name)
 
     def __call__(
         self,
