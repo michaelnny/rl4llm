@@ -1,9 +1,5 @@
 import datetime
-import gc
-import logging
 import os
-import random
-import time
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from copy import deepcopy
@@ -12,8 +8,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import deepspeed
 import numpy as np
 import torch
-import torch.distributed as dist
-from datasets import Dataset
 from deepspeed import DeepSpeedEngine
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
@@ -22,9 +16,9 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from rl4llm.core.data_types import RLConfig
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.training_mixin import TrainingMixin
-from rl4llm.envs import LLMEnv
+from rl4llm.envs import LLMEnv, EpisodeData
 from rl4llm.logging import LoggingManager
-from rl4llm.utils.dataset_utils import shard_dataset
+from rl4llm.constants import TRAIN_PHASE, EVAL_PHASE, LOGGING_PHASES
 
 
 class RLTrainer(ABC, TrainingMixin):
@@ -32,6 +26,10 @@ class RLTrainer(ABC, TrainingMixin):
     Abstract base class for RL training with LLM in a distributed environment.
     Provides the core infrastructure and defines the interface for algorithm-specific components.
     """
+
+    _train_phase: str = TRAIN_PHASE
+    _eval_phase: str = EVAL_PHASE
+    _log_phases: List[str] = LOGGING_PHASES
 
     def __init__(
         self,
@@ -43,10 +41,11 @@ class RLTrainer(ABC, TrainingMixin):
         artifacts_path: str,
         train_env: LLMEnv,
         eval_env: Optional[LLMEnv] = None,
-        # train_dataset: Union[List[Dict] | Dataset],
-        # eval_dataset: Optional[Union[List[Dict] | Dataset]] = None,
         seed: Optional[int] = 175,
     ):
+        if policy_engine.zero_optimization_stage() == 3:
+            raise RuntimeError("Zero-3 not supported")
+
         self.config = config
         self.tokenizer = tokenizer
         self.policy_engine = policy_engine
@@ -62,16 +61,14 @@ class RLTrainer(ABC, TrainingMixin):
         self.torch_dtype = self.policy_model.dtype  # Infer from model
 
         # Setup directories
-        self.checkpoint_dir = os.path.join(self.artifacts_path, 'checkpoints')
+        self.checkpoint_dir = os.path.join(self.artifacts_path, "checkpoints")
         if self.dist_manager.is_master:
             os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.dist_manager.barrier()  # Ensure dirs exist before proceeding
 
         # Reference model (optional, common in PPO-like methods)
         self.reference_model: Optional[PreTrainedModel] = (
-            self._create_reference_model()
-            if self.config.kl_loss_coef > 0
-            else None
+            self._create_reference_model() if self.config.kl_loss_coef > 0 else None
         )
 
         # Internal state
@@ -80,55 +77,18 @@ class RLTrainer(ABC, TrainingMixin):
         self.policy_update_count = 0  # Tracks optimizer steps
         self.ref_update_count = 0
 
-        # # Shard datasets across ranks, so each rank only works on a small subset of the data
-        # self.shared_train_dataset = shard_dataset(
-        #     train_dataset,
-        #     self.dist_manager.world_size,
-        #     self.dist_manager.global_rank,
-        # )
-        # self.shared_eval_dataset = shard_dataset(
-        #     eval_dataset,
-        #     self.dist_manager.world_size,
-        #     self.dist_manager.global_rank,
-        # )
-        # self.logger.info(
-        #     f"Rank {self.dist_manager.global_rank} has {len(self.shared_train_dataset)} training and {len(self.shared_eval_dataset)} testing samples after sharding"
-        # )
-
-        # self.train_loader = DataLoader(
-        #     self.shared_train_dataset,
-        #     batch_size=1,
-        #     collate_fn=self._train_collate_fn,
-        #     shuffle=True,
-        # )
-
-        # # we only sample one item at a time for training, so no need loader
-        # self.train_iter = iter(self.shared_train_dataset)
-
-        # if self.eval_dataset:
-        #     self.eval_loader = DataLoader(
-        #         self.shared_eval_dataset,
-        #         batch_size=self.config.eval_batch_size,
-        #         collate_fn=self._eval_collate_fn,
-        #         shuffle=False,  # Typically no shuffle for eval
-        #         drop_last=True,
-        #     )
-        # else:
-        #     self.eval_loader = None
-        #     self.logger.info("Evaluation dataset not provided")
-
         self._initialize_trainer()
-        self.logger.info('RL Trainer initialized.')
+        self.logger.info("RL Trainer initialized.")
 
     def _initialize_trainer(self):
         pass
 
     def _create_reference_model(self) -> Optional[PreTrainedModel]:
         """Creates a non-trainable copy of the policy model."""
-        self.logger.info('Creating reference model...')
+        self.logger.info("Creating reference model...")
         if self.is_zero3_enabled():
             # TODO maybe create reference model with deepspeed??
-            raise RuntimeError('Not supported for Zero-3')
+            raise RuntimeError("Not supported for Zero-3")
 
             # # Ensure model is fully available if using Zero-3
             # with deepspeed.zero.GatheredParameters(self.policy_model.parameters()):
@@ -142,91 +102,41 @@ class RLTrainer(ABC, TrainingMixin):
         ref_model = ref_model.to(self.device).eval()
         for param in ref_model.parameters():
             param.requires_grad = False
-        self.logger.info('Reference model created.')
+        self.logger.info("Reference model created.")
         return ref_model
 
     def is_zero3_enabled(self) -> bool:
         """Returns true if Zero-3 is enabled"""
         return self.policy_engine.zero_optimization_stage() == 3
 
-    # TODO improve the way to log samples and metrics
-    def convert_llm_output_to_samples(
+    def log_batch_episodes(
         self,
-        question: List[str],
-        ground_truth: List[str],
-        prompt_length: List[int],
-        completion_length: List[int],
-        completion_text: List[str],
-        **kwargs,
-    ) -> List[Dict[str, Any]]:
-        """Converts the LLM output to a list of samples for logging"""
-        # Determine the number of samples.
-        num_samples = len(question)
-
-        # Check that all required list inputs have the same length.
-        if not (
-            len(ground_truth) == num_samples
-            and len(prompt_length) == num_samples
-            and len(completion_length) == num_samples
-            and len(completion_text) == num_samples
-        ):
-            raise ValueError(
-                'All required input lists must have the same length.'
-            )
-
-        # Check kwargs: if any value is a list, it must match num_samples.
-        for extra_key, extra_val in kwargs.items():
-            if not isinstance(extra_val, list) or len(extra_val) != num_samples:
-                raise ValueError(
-                    f"Extra input list for key '{extra_key}' must have length {num_samples}."
-                )
-
-        samples = []
-        for i in range(num_samples):
-            # Build the sample dictionary.
-            utc_ts = datetime.datetime.now(datetime.timezone.utc).strftime(
-                '%Y-%m-%dT%H:%M:%SZ'
-            )
-            sample = {
-                'utc_timestamp': utc_ts,
-                'question': question[i],
-                'ground_truth': ground_truth[i],
-                'prompt_length': prompt_length[i],
-                'completion_length': completion_length[i],
-                'completion_text': completion_text[i],
-            }
-
-            # Process any additional keyword arguments, like rewards etc
-            for extra_key, extra_val in kwargs.items():
-                if isinstance(extra_val, list):
-                    sample[extra_key] = extra_val[i]
-
-            samples.append(sample)
-
-        return samples
-
-    def log_batch_samples(
-        self,
-        samples: List[Dict[str, Any]],
+        phase: str,
+        samples: List[EpisodeData],
         step: int,
-        is_training: bool,
     ) -> None:
         """Log batch samples to Tensorboard and external files"""
 
-        metrics_keys = ['prompt_length', 'completion_length']
-        phase = 'training' if is_training else 'evaluation'
-        for data in samples:
-            # save to external files
-            self.logger.log_sample(phase, data, step)
+        if phase not in self._log_phases:
+            raise ValueError(
+                f"Invalid phase {phase}, expect to be [{self._log_phases}]"
+            )
 
-            # log metrics to tensorboard
-            for k, v in data.items():
-                if (
-                    k in metrics_keys
-                    or 'reward' in k
-                    and isinstance(v, (float, int))
-                ):
-                    self.logger.log_scalar(k, v)
+        metric_key = f"objective/{phase}"
+        for ep in samples:
+            data_to_log = {
+                "prompt_text": ep.prompt_text,
+                "prompt_length": ep.prompt_length,
+                "completion_length": ep.completion_length,
+                "completion_text": ep.completion_text,
+            }
+            self.logger.log_sample(phase, data_to_log, step)
+            self.logger.log_scalar(
+                f"{metric_key}/completion_length", ep.completion_length
+            )
+            self.logger.log_scalar(f"{metric_key}/prompt_length", ep.prompt_length)
+            for k, v in ep.reward_dict.items():
+                self.logger.log_scalar(f"{metric_key}/{k}", v)
 
     @abstractmethod
     def generate_experience(self) -> List[Any]:
@@ -329,7 +239,7 @@ class RLTrainer(ABC, TrainingMixin):
         self.policy_engine.train()
         # Move reference model back to GPU if moved earlier and needed
         if self.reference_model and self.reference_model.device != self.device:
-            self.reference_model = self.reference_model.to('cpu')
+            self.reference_model = self.reference_model.to("cpu")
         torch.cuda.empty_cache()
 
     def save_checkpoint(self, step: int):
@@ -340,18 +250,18 @@ class RLTrainer(ABC, TrainingMixin):
         # DeepSpeed handles distributed saving internally
         self.policy_engine.save_checkpoint(save_path)
         self.dist_manager.barrier()
-        self.logger.info('Checkpoint saved.')
+        self.logger.info("Checkpoint saved.")
 
     def sync_reference_model(self):
         """Updates the reference model weights with the current policy model weights."""
         if not self.reference_model:
             return
 
-        self.logger.info('Syncing reference model...')
+        self.logger.info("Syncing reference model...")
         # Ensure parameters are gathered if using Zero-3 before state_dict access
         if self.is_zero3_enabled():
             # TODO recreate the reference model engine
-            raise RuntimeError('Not supported for Zero-3')
+            raise RuntimeError("Not supported for Zero-3")
             # with deepspeed.zero.GatheredParameters(self.policy_model.parameters(), modifier_rank=0):
             #    if self.dist_manager.is_master:
             #        state_dict = self.policy_model.state_dict()
@@ -364,21 +274,21 @@ class RLTrainer(ABC, TrainingMixin):
             # Load state dict into reference model (all ranks have the state_dict now)
             self.reference_model.load_state_dict(state_dict)
             self.ref_update_count += 1
-            self.logger.info('Reference model synced.')
+            self.logger.info("Reference model synced.")
 
         torch.cuda.empty_cache()  # Clean up memory
         self.dist_manager.barrier()
 
     def train(self):
         """Main training loop."""
-        self.logger.info('Starting training...')
+        self.logger.info("Starting training...")
         if self.dist_manager.is_master:
             self.logger.log_hyperparams(self.config.model_dump())  # Log config
 
         # Initial evaluation before training starts
         if self.config.eval_interval > 0 and self.eval_env:
-            self.logger.info('Running initial evaluation...')
-            with self.logger.timer('evaluate'):
+            self.logger.info("Running initial evaluation...")
+            with self.logger.timer("evaluate"):
                 self.evaluate_step()
             self.dist_manager.barrier()
 
@@ -386,7 +296,7 @@ class RLTrainer(ABC, TrainingMixin):
             self.global_step = t
 
             # 1. Generation Phase
-            with self.logger.timer('generation'):
+            with self.logger.timer("generation"):
                 self._prepare_for_generation()
                 # generate_experience returns rank-local experience
                 local_experience = self.generate_experience()
@@ -394,7 +304,7 @@ class RLTrainer(ABC, TrainingMixin):
             self.dist_manager.barrier()
 
             # 2. Learning Phase
-            with self.logger.timer('train'):
+            with self.logger.timer("train"):
                 # build_train_batch processes local_experience and returns a DataLoader
                 train_dataloader = self.build_train_batch(local_experience)
                 self.train_step(train_dataloader)
@@ -407,7 +317,7 @@ class RLTrainer(ABC, TrainingMixin):
                 and self.config.sync_reference_interval > 0
                 and (t + 1) % self.config.sync_reference_interval == 0
             ):
-                with self.logger.timer('sync_reference_model'):
+                with self.logger.timer("sync_reference_model"):
                     self.sync_reference_model()
 
             # Checkpointing
@@ -415,7 +325,7 @@ class RLTrainer(ABC, TrainingMixin):
                 self.config.checkpoint_interval > 0
                 and (t + 1) % self.config.checkpoint_interval == 0
             ):
-                with self.logger.timer('checkpoint'):
+                with self.logger.timer("checkpoint"):
                     self.save_checkpoint(t + 1)
 
             # Evaluation
@@ -424,7 +334,7 @@ class RLTrainer(ABC, TrainingMixin):
                 and self.eval_env
                 and (t + 1) % self.config.eval_interval == 0
             ):
-                with self.logger.timer('evaluate'):
+                with self.logger.timer("evaluate"):
                     self.evaluate_step()
 
             self.logger.aggregate_and_log(self.global_step)
@@ -434,7 +344,7 @@ class RLTrainer(ABC, TrainingMixin):
             del train_dataloader
             torch.cuda.empty_cache()
 
-        self.logger.info('Training finished.')
+        self.logger.info("Training finished.")
         # Final checkpoint save
         self.save_checkpoint(self.config.max_steps)
         self.logger.close()

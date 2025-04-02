@@ -3,58 +3,63 @@ import os
 import random
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
-
+import pyarrow as pa
+import pyarrow.parquet as pq
 import numpy as np
 import pandas as pd
 
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.logging.handlers.base import BaseHandler
+from rl4llm.constants import LOGGING_PHASES
 
 
 class SampleFileLogger:
     """
-    Handles writing structured samples to JSONL or Parquet files, with optional compression.
+    Handles writing structured samples to a single file (JSONL or Parquet) per instance.
 
-    This class provides a unified interface to log structured data samples to disk in either
-    JSONL (optionally gzipped) or Parquet format. It uses pandas DataFrames for all file formats
-    to ensure consistency in data handling.
+    This class manages buffering and writing data samples for a specific phase and rank
+    to a dedicated file on disk. It supports JSONL (optionally gzipped) or Parquet format.
+    The distinction between different types of samples (previously 'tags') should be
+    handled by including a 'tag' field within the logged data itself.
 
     Attributes:
-        save_dir (str): Directory path where sample files will be saved
-        rank (int): Process rank identifier (for distributed environments)
-        file_format (str): Output format ('parquet', 'jsonl.gz', or 'jsonl')
-        compression (str): Compression algorithm for files
-        buffer_size (int): Number of samples to buffer before writing to files
+        save_path (str): Full path to the output file.
+        file_format (str): Output format ('parquet', 'jsonl.gz', or 'jsonl').
+        compression (str): Compression algorithm for files.
+        buffer_size (int): Number of samples to buffer before writing.
     """
 
     SUPPORTED_FORMATS = {
-        'parquet': {'extension': 'parquet', 'default_compression': 'snappy'},
-        'jsonl': {'extension': 'jsonl', 'default_compression': None},
-        'jsonl.gz': {'extension': 'jsonl.gz', 'default_compression': 'gzip'},
+        "parquet": {"extension": "parquet", "default_compression": "snappy"},
+        "jsonl": {"extension": "jsonl", "default_compression": None},
+        "jsonl.gz": {"extension": "jsonl.gz", "default_compression": "gzip"},
     }
 
     def __init__(
         self,
-        save_dir: str,
+        # Changed save_dir to phase_dir for clarity
+        phase_dir: str,
         rank: int,
-        file_format: str = 'parquet',
+        file_format: str = "parquet",
         compression: str = None,
         buffer_size: int = 100,
         logger: Optional[logging.Logger] = None,
     ):
         """
-        Initialize the SampleFileLogger.
+        Initialize the SampleFileLogger for a specific phase and rank.
 
         Args:
-            save_dir (str): Base directory where samples will be saved (a 'samples' subdirectory will be created)
-            rank (int): Process rank identifier for distributed logging
-            file_format (str): File format to use ('parquet', 'jsonl.gz', or 'jsonl')
-            compression (str, optional): Compression algorithm. If None, will use format-specific default
-            buffer_size (int): Number of samples to buffer before writing to disk
-            logger (Optional[logging.Logger]): Logger instance
+            phase_dir (str): Directory specific to the phase where samples will be saved
+                             (a 'samples' subdirectory will be created within this).
+            rank (int): Process rank identifier for distributed logging.
+            file_format (str): File format ('parquet', 'jsonl.gz', or 'jsonl').
+            compression (str, optional): Compression algorithm. Uses format default if None.
+            buffer_size (int): Number of samples to buffer before writing.
+            logger (Optional[logging.Logger]): Logger instance.
 
         Raises:
-            ValueError: If file_format is not one of the supported formats
+            ValueError: If file_format is not supported.
+            OSError: If the directory cannot be created.
         """
         file_format = file_format.lower()
         if file_format not in self.SUPPORTED_FORMATS:
@@ -63,269 +68,292 @@ class SampleFileLogger:
                 f"Must be one of: {', '.join(self.SUPPORTED_FORMATS.keys())}"
             )
 
-        self.save_dir = os.path.join(save_dir, 'samples')
+        # Directory where the actual sample file will live
+        self.samples_dir = os.path.join(phase_dir, "samples")
         self.rank = rank
         self.file_format = file_format
-
-        # Use format-specific default compression if not specified
         self.compression = (
-            compression
-            or self.SUPPORTED_FORMATS[file_format]['default_compression']
+            compression or self.SUPPORTED_FORMATS[file_format]["default_compression"]
         )
         self.buffer_size = buffer_size
+        self._buffer: List[Dict[str, Any]] = []  # Single buffer per instance
 
-        # Define buffers for all tags
-        self._buffers: Dict[str, List[Dict[str, Any]]] = {}
-
-        # Initialize logger
-        self._logger = (
-            logger if logger is not None else logging.getLogger('RL4LLM')
-        )
+        self._logger = logger if logger is not None else logging.getLogger("RL4LLM")
 
         try:
-            os.makedirs(self.save_dir, exist_ok=True)
+            os.makedirs(self.samples_dir, exist_ok=True)
         except OSError as e:
             self._logger.error(
-                f"Failed to create sample directory {self.save_dir}: {e}"
+                f"Failed to create sample directory {self.samples_dir}: {e}"
             )
             raise
 
-    def _get_filepath(self, tag: str) -> str:
-        """
-        Generate the filepath for a given tag.
-
-        Args:
-            tag (str): The tag identifying the sample category
-
-        Returns:
-            str: The full filepath where samples will be saved
-        """
-        safe_tag = tag.replace('/', '_')
-        extension = self.SUPPORTED_FORMATS[self.file_format]['extension']
-        return os.path.join(
-            self.save_dir, f"{safe_tag}_rank{self.rank}.{extension}"
+        # Determine the single file path this instance manages
+        self.save_path = self._get_filepath()
+        self._logger.info(
+            f"Initialized SampleFileLogger for rank {rank}. Output file: {self.save_path}"
         )
 
-    def _get_buffer(self, tag: str) -> List[Dict[str, Any]]:
+    def _get_filepath(self) -> str:
         """
-        Get or create the buffer for a tag.
-
-        Args:
-            tag (str): The tag identifying the sample category
+        Generate the single filepath managed by this logger instance.
 
         Returns:
-            List[Dict[str, Any]]: The buffer for the specified tag
+            str: The full filepath where samples for this phase/rank will be saved.
         """
-        if tag not in self._buffers:
-            self._buffers[tag] = []
-        return self._buffers[tag]
+        # No tag needed here, filename is determined by rank only within the phase dir
+        extension = self.SUPPORTED_FORMATS[self.file_format]["extension"]
+        # Filename could be simpler, e.g., "samples_rankX.ext" or just "rankX.ext"
+        # Let's use "rankX.ext" for simplicity within the specific samples dir.
+        return os.path.join(self.samples_dir, f"rank{self.rank}.{extension}")
 
-    def log(self, tag: str, data: Dict[str, Any], step: int) -> None:
+    def log(self, data: Dict[str, Any], step: int) -> None:
         """
-        Log a sample with the given tag and data.
+        Log a sample. The sample is added to the buffer and flushed if full.
 
         Args:
-            tag (str): The tag identifying the sample category
-            data (Dict[str, Any]): The sample data to log
-            step (int): The current step or iteration number
+            data (Dict[str, Any]): The sample data to log. Should include any
+                                   distinguishing 'tag' if needed.
+            step (int): The current step or iteration number.
         """
-        log_entry = {'step': step, **data}
+        # Add step information to the data
+        log_entry = {"step": step, **data}
 
-        # Add entry to buffer
-        buffer = self._get_buffer(tag)
-        buffer.append(log_entry)
+        # Add entry to the single buffer
+        self._buffer.append(log_entry)
 
         # Flush if buffer reaches the specified size
-        if len(buffer) >= self.buffer_size:
-            self._flush(tag)
+        if len(self._buffer) >= self.buffer_size:
+            self._flush()
 
-    def _flush(self, tag: str) -> None:
+    def _flush(self) -> None:
         """
-        Flush the buffer for a specific tag to disk.
-
-        Args:
-            tag (str): The tag identifying the sample category
+        Flush the buffer to the designated file on disk. Handles appending correctly
+        for Parquet by reading existing data, concatenating, and overwriting.
 
         Raises:
-            IOError: If unable to write to the file
+            IOError: If unable to write to the file.
         """
-        buffer = self._buffers.get(tag, [])
-        if not buffer:
+        if not self._buffer:
+            self._logger.debug(
+                f"Rank {self.rank}: Flush called with empty buffer for {self.save_path}."
+            )
             return
 
-        filepath = self._get_filepath(tag)
-        df = pd.DataFrame(buffer)
+        self._logger.debug(
+            f"Rank {self.rank}: Flushing {len(self._buffer)} records to {self.save_path} (format: {self.file_format})."
+        )
+        new_df = pd.DataFrame(self._buffer)
+        new_table = pa.Table.from_pandas(
+            new_df, preserve_index=False
+        )  # Convert new data to Arrow Table
 
         try:
-            file_exists = os.path.exists(filepath)
+            file_exists = os.path.exists(self.save_path)
 
-            if self.file_format == 'parquet':
-                # Write to Parquet file
+            if self.file_format == "parquet":
                 if file_exists:
-                    df.to_parquet(
-                        filepath,
-                        engine='pyarrow',
-                        compression=self.compression,
-                        index=False,
-                        append=True,
-                        default_handler=str,
-                    )
+                    # --- PARQUET APPEND FIX ---
+                    # Read the existing Parquet file into an Arrow Table
+                    try:
+                        existing_table = pq.read_table(self.save_path)
+                        # Concatenate the existing table and the new table
+                        combined_table = pa.concat_tables([existing_table, new_table])
+                        # Write the combined table, overwriting the old file
+                        pq.write_table(
+                            combined_table, self.save_path, compression=self.compression
+                        )
+                        self._logger.debug(
+                            f"Rank {self.rank}: Appended {len(new_table)} rows to existing Parquet: {self.save_path}"
+                        )
+                    except Exception as read_concat_error:
+                        self._logger.error(
+                            f"Rank {self.rank}: Failed to read/concatenate Parquet {self.save_path} for append: {read_concat_error}",
+                            exc_info=True,
+                        )
+                        # Decide how to handle: maybe try writing to a new file? For now, re-raise.
+                        raise IOError(
+                            f"Failed during Parquet append operation: {read_concat_error}"
+                        ) from read_concat_error
+
                 else:
-                    df.to_parquet(
-                        filepath,
-                        engine='pyarrow',
-                        compression=self.compression,
-                        index=False,
-                        default_handler=str,
+                    # File doesn't exist, write the new table directly
+                    pq.write_table(
+                        new_table, self.save_path, compression=self.compression
                     )
-            else:  # jsonl or jsonl.gz
-                # For JSON formats
-                mode = 'a' if file_exists else 'w'
-                df.to_json(
-                    filepath,
-                    orient='records',
+                    self._logger.debug(
+                        f"Rank {self.rank}: Created new Parquet file: {self.save_path}"
+                    )
+
+            else:  # jsonl or jsonl.gz (This logic should be correct)
+                mode = "a" if file_exists else "w"
+                # Use the DataFrame directly for to_json
+                new_df.to_json(
+                    self.save_path,
+                    orient="records",
                     lines=True,
                     compression=self.compression,
                     mode=mode,
-                    default_handler=str,
+                )
+                self._logger.debug(
+                    f"Rank {self.rank}: {'Appended' if mode == 'a' else 'Wrote'} {len(new_df)} rows to JSONL: {self.save_path}"
                 )
 
             self._logger.info(
-                f"Flushed {len(buffer)} rows to {self.file_format} file: {filepath}"
+                f"Rank {self.rank}: Flushed {len(self._buffer)} rows to {self.file_format} file: {self.save_path}"
             )
-        except Exception as e:
-            self._logger.error(f"Failed to write data for tag '{tag}': {e}")
-            raise IOError(f"Failed to write to {self.file_format} file: {e}")
+            # Clear buffer only on success
+            self._buffer = []
 
-        # Clear the buffer after successful flush
-        self._buffers[tag] = []
+        except Exception as e:
+            # Catch any exception during write/append and log before raising
+            # Avoid logging the specific read_concat_error again if it was already caught above
+            if "read_concat_error" not in locals() or e is not read_concat_error:
+                self._logger.error(
+                    f"Rank {self.rank}: Failed to write data to {self.save_path}: {e}",
+                    exc_info=True,
+                )
+            # Do not clear buffer on failure
+            raise IOError(f"Failed to write to {self.file_format} file: {e}") from e
 
     def flush(self) -> None:
         """
-        Flush all buffers to disk.
-
-        This ensures that any buffered data is written to the corresponding files.
+        Flush any buffered data to disk.
         """
-        for tag in list(self._buffers.keys()):
-            try:
-                self._flush(tag)
-            except Exception as e:
-                self._logger.warning(
-                    f"Failed to flush data for tag '{tag}': {e}"
-                )
+        try:
+            self._flush()
+        except Exception as e:
+            # Log warning but don't crash the whole flush process if one fails
+            self._logger.warning(f"Failed to flush buffer to {self.save_path}: {e}")
 
     def close(self) -> None:
         """
-        Flush all buffers and clean up resources.
-
-        This method should be called when the logger is no longer needed to ensure
-        all data is properly written and resources are released.
+        Flush buffer and clean up resources.
         """
         self.flush()
-        self._buffers.clear()
-        self._logger.info('Flushed all buffers and closed logger.')
+        # No other resources to explicitly close here (file handles managed by pandas)
+        self._logger.info(f"SampleFileLogger for {self.save_path} closed.")
 
 
 class SampleHandler(BaseHandler):
-    """Handles sample file logging and gathering samples for backend logging."""
+    """
+    Handles sample logging by dispatching to phase-specific file loggers.
 
-    GENERAL_PHASE = 'general'
+    Creates a SampleFileLogger for each specified phase, directing samples
+    to the appropriate logger based on the phase. The 'tag' associated with
+    a sample is included as part of the data written to the file.
+    """
+
+    GENERAL_PHASE: str = "general"
 
     def __init__(
         self,
         dist_manager: DistributedManager,
         log_dir: str,
-        phases: List[str],
-        sample_file_format: str = 'parquet',
+        sample_file_format: str = "parquet",
         sample_buffer_size: int = 100,
         logger: Optional[logging.Logger] = None,
     ):
-        super().__init__(logger)  # Initialize base class
+        super().__init__(logger)
         self.dist_manager = dist_manager
         self.rank = dist_manager.global_rank
         self.world_size = dist_manager.world_size
         self.is_master = dist_manager.is_master
 
-        self._log_phases = phases + [self.GENERAL_PHASE]
+        # Include 'general' phase for samples logged without a specific phase
+        self._log_phases = set(LOGGING_PHASES + [self.GENERAL_PHASE])
 
         self._file_loggers: Dict[str, SampleFileLogger] = {}
-        # Ensure base log_dir exists before creating phase subdirs
-        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)  # Ensure base log directory exists
+
         for phase in self._log_phases:
-            phase_log_dir = os.path.join(
-                log_dir, phase, 'samples'
-            )  # samples subdir within phase dir
+            # Define the directory for this specific phase
+            phase_log_dir = os.path.join(log_dir, phase)
+            # SampleFileLogger will create a 'samples' subdir inside phase_log_dir
             try:
-                # Pass the specific phase_log_dir base to SampleFileLogger
-                # SampleFileLogger creates its own "samples" subdir, so adjust path
-                # Let's modify SampleFileLogger to take the exact dir maybe?
-                # OR: Create the phase dir here, SampleFileLogger uses it.
-                # Let's stick to the previous: pass base dir, it creates 'samples' subdir.
-                # So, we need os.path.join(log_dir, phase) as the base for SampleFileLogger
-                base_phase_dir = os.path.join(log_dir, phase)
-                # SampleFileLogger will create base_phase_dir/samples if needed
                 self._file_loggers[phase] = SampleFileLogger(
-                    save_dir=base_phase_dir,  # Pass the phase base dir
+                    phase_dir=phase_log_dir,  # Pass the phase-specific directory
                     rank=self.rank,
                     buffer_size=sample_buffer_size,
                     file_format=sample_file_format,
                     logger=self._logger,
                 )
                 self._logger.debug(
-                    f"Initialized SampleFileLogger for phase '{phase}' in {os.path.join(base_phase_dir, 'samples')}"
+                    f"Initialized SampleFileLogger for phase '{phase}' in {os.path.join(phase_log_dir, 'samples')}"
                 )
             except Exception as e:
                 self._logger.error(
                     f"Failed to initialize SampleFileLogger for phase '{phase}': {e}"
                 )
+                # Decide if this is fatal or if we can continue without this phase logger
                 raise RuntimeError(f"Failed setup for phase {phase}") from e
 
+        # Buffer for backend logging (if used, seems unrelated to file logging change)
         self._samples_for_backend_buffer: List[Tuple[str, Dict[str, Any]]] = []
 
     def log_sample(
         self,
-        tag: str,
+        phase: str,
         sample_data: Dict[str, Any],
         step: int,
-        phase: Optional[str],
     ):
-        """Logs a sample to file and potentially buffers it for backend."""
-        current_phase = phase or self.GENERAL_PHASE
-        if current_phase not in self._file_loggers:
-            self._logger.warning(
-                f"No logger for phase '{current_phase}'. Skipping file log for '{tag}'."
-            )
-        else:
-            try:
-                self._file_loggers[current_phase].log(tag, sample_data, step)
-                self._logger.debug(
-                    f"Logged sample to file [{current_phase}/{tag}] Step: {step}"
-                )
-            except Exception as e:
-                self._logger.error(
-                    f"Failed log sample file tag='{tag}' phase='{current_phase}': {e}"
-                )
+        """
+        Logs a sample to the file corresponding to its phase.
 
-    def flush(
-        self,
-    ) -> None:  # Renamed from flush_files for consistency potential
-        """Flushes all underlying file loggers."""
-        self._logger.debug('Flushing sample file loggers...')
+        The 'tag' is added as a field within the sample data dictionary before logging.
+
+        Args:
+            phase (Optional[str]): The phase ('train', 'eval', etc.)..
+            sample_data (Dict[str, Any]): The core data of the sample.
+            step (int): The training step or iteration number.
+
+        """
+
+        current_phase = phase if phase in self._log_phases else self.GENERAL_PHASE
+
+        if current_phase not in self._file_loggers:
+            # This might happen if phase wasn't in the initial list or GENERAL_PHASE failed init
+            self._logger.warning(f"No logger configured for phase '{current_phase}'. ")
+            return  # Skip logging if no logger exists for the phase
+
+        try:
+            # Get the logger for the current phase
+            file_logger = self._file_loggers[current_phase]
+            # Call the simplified log method (no tag argument needed here)
+            file_logger.log(sample_data, step)
+            self._logger.debug(
+                f"Logged sample to file [Phase: {current_phase}, Rank: {self.rank}] Step: {step}"
+            )
+        except Exception as e:
+            # Catch potential errors during the log call (e.g., buffer full + flush error)
+            self._logger.error(
+                f"Failed to log sample file [Phase: {current_phase}, Rank: {self.rank}"
+            )
+            # Depending on severity, might re-raise or just log
+
+    def flush(self) -> None:
+        """Flushes all underlying phase-specific file loggers."""
+        self._logger.debug(f"Flushing sample file loggers for rank {self.rank}...")
         for phase, file_logger in self._file_loggers.items():
             try:
+                # self._logger.debug(f"Flushing logger for phase '{phase}'...") # Optional: more verbose logging
                 file_logger.flush()
             except Exception as e:
-                self._logger.warning(f"Failed flush phase '{phase}': {e}")
+                # Log error but continue flushing other loggers
+                self._logger.warning(
+                    f"Failed to flush sample logger for phase '{phase}' on rank {self.rank}: {e}"
+                )
 
-    # Implement the abstract 'close' method
     def close(self) -> None:
-        """Flushes and closes all underlying file loggers."""
-        self._logger.info('Closing sample file loggers...')
-        self.flush()  # Ensure data is written before closing
+        """Flushes and closes all underlying phase-specific file loggers."""
+        self._logger.info(f"Closing sample file loggers for rank {self.rank}...")
+        self.flush()  # Ensure all data is written before closing
         for phase, file_logger in self._file_loggers.items():
             try:
                 file_logger.close()
             except Exception as e:
-                self._logger.warning(f"Error closing phase '{phase}': {e}")
-        self._file_loggers.clear()
-        self._logger.debug('SampleHandler closed.')
+                self._logger.warning(
+                    f"Error closing sample logger for phase '{phase}' on rank {self.rank}: {e}"
+                )
+        self._file_loggers.clear()  # Clear the dictionary
+        self._logger.debug(f"SampleHandler closed for rank {self.rank}.")
