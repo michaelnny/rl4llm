@@ -54,13 +54,18 @@ class RLConfig(BaseModel):
         le=5,
         description='PPO update epochs for a collection of samples',
     )
-    mini_batch_size: int = Field(
+    train_micro_batch_size: int = Field(
         4,
         ge=1,
         le=1024,
-        description='Mini-batch size pre device/rank for training',
+        description='Micro-batch size pre device/rank for training',
     )
-    # gradient_accumulate_steps: int = Field(1, ge=1, description='Gradient accumulation steps')
+    train_batch_size: int = Field(
+        128,
+        ge=16,
+        le=1024,
+        description='Global batch size across devices/ranks for training',
+    )
     clip_eps: float = Field(
         0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon'
     )
@@ -95,15 +100,22 @@ class RLConfig(BaseModel):
         100, ge=0, description='Interval to evaluate policy model'
     )
     eval_batch_size: int = Field(
-        8, ge=0, le=1024, description='Mini-batch size for evaluation'
+        8,
+        ge=0,
+        le=1024,
+        description='Batch size size pre device/rank for evaluation',
     )
 
     @model_validator(mode='after')
     def check_batch_size(cls, values):
-        if values.normalize_advantages and values.mini_batch_size < 8:
+        if values.train_batch_size % values.train_micro_batch_size != 0:
             raise ValueError(
-                'mini_batch_size must be at least 8 when normalize_advantages is True'
+                'Global train batch size must be divisible by mini batch size'
             )
+        # if values.normalize_advantages and values.train_micro_batch_size < 4:
+        #     raise ValueError(
+        #         'Mini batch size must be at least 4 when normalize advantages is True'
+        #     )
         return values
 
     class Config:

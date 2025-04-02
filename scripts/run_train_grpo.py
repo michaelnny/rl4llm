@@ -183,10 +183,12 @@ def main():
 
     torch_dtype = torch.bfloat16
 
-    grpo_config = GRPOConfig(
-        **config['grpo_config'],
-        mini_batch_size=deepspeed_config['train_micro_batch_size_per_gpu'],
+    grpo_config = GRPOConfig(**config['grpo_config'])
+
+    deepspeed_config['train_micro_batch_size_per_gpu'] = (
+        grpo_config.train_micro_batch_size
     )
+    deepspeed_config['train_batch_size'] = grpo_config.train_batch_size
 
     train_dataset, eval_dataset = load_multiple_datasets(datasets)
 
@@ -196,23 +198,12 @@ def main():
     if max_test_samples is not None and max_test_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
-    shared_train_dataset = shard_dataset(
-        train_dataset,
-        dist_manager.world_size,
-        dist_manager.global_rank,
-    )
-    shared_eval_dataset = shard_dataset(
-        eval_dataset,
-        dist_manager.world_size,
-        dist_manager.global_rank,
-    )
-
     policy_model, tokenizer = build_model_and_tokenizer(
         config['model'], torch_dtype
     )
 
-    shared_train_dataset = preprocess_dataset(shared_train_dataset, model_name)
-    shared_eval_dataset = preprocess_dataset(shared_eval_dataset, model_name)
+    train_dataset = preprocess_dataset(train_dataset, model_name)
+    eval_dataset = preprocess_dataset(eval_dataset, model_name)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
@@ -221,10 +212,12 @@ def main():
     )
 
     train_env = LLMEnv(
-        dataset=shared_train_dataset,
+        dataset=train_dataset,
         batch_size=1,
         tokenizer=tokenizer,
         reward_functions=[AccuracyRewardFunction()],
+        rank=dist_manager.local_rank,
+        world_size=dist_manager.world_size,
     )
 
     trainer = GRPOTrainer(
@@ -235,13 +228,11 @@ def main():
         logger=logger_manager,
         train_env=train_env,
         eval_env=None,
-        # train_dataset=train_dataset,
-        # eval_dataset=eval_dataset,
         artifacts_path=artifacts_path,
         seed=seed,
     )
 
-    trainer.train()
+    trainer.train(config)
 
     trainer.on_exit()
 

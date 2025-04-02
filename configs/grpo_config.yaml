@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_grpo_qwen2.5_0.5b_gsm8k"
+  artifacts_path: "./runs/test_grpo_qwen2.5_1.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -9,7 +9,7 @@ job:
   max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-0.5B"
+  pretrained_model: "Qwen/Qwen2.5-1.5B"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
@@ -24,14 +24,15 @@ model:
 #   checkpoint_path: "models/coherent_classification_longformer"
 
 grpo_config:
-  max_steps: 2000
-  rollout_size: 512
+  max_steps: 1
+  rollout_size: 128
   num_updates: 1
-  # mini_batch_size: 16
+  train_micro_batch_size: 2
+  train_batch_size: 128
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       
-  normalize_advantages: true
+  normalize_advantages: false
   kl_loss_coef: 0.0
   entropy_loss_coef: 0.0
   # clip_grad_norm: 0.0
@@ -40,7 +41,7 @@ grpo_config:
   # for sample generation
   max_prompt_tokens: 512              # skip sample question that's too long
   group_size: 16                      # for each sample we generate a group of answers
-  max_completion_tokens: 1024
+  max_completion_tokens: 600
   temperature: 1.0                    # not used if using group_temperature
   repetition_penalty: 1.0
   top_p: 0.95
@@ -57,13 +58,11 @@ grpo_config:
 deepspeed_config:
   # memory_breakdown: true  # for debugging
   steps_per_print: 1000000 # disable default logging
-  train_micro_batch_size_per_gpu: 8
-  train_batch_size: 128
   gradient_clipping: 0.0
   bf16:
     enabled: true
   optimizer:
-    type: AdamW
+    type: Adam
     params:
       lr: 1.0e-6                   
       betas: [0.9, 0.999]
@@ -83,12 +82,12 @@ deepspeed_config:
     overlap_comm: true
     allgather_partitions: true
     reduce_scatter: true
-    offload_param:
-      device: cpu
-      pin_memory: false
-    offload_optimizer:
-      device: cpu
-      pin_memory: false
+    # offload_param:
+    #   device: cpu
+    #   pin_memory: false
+    # offload_optimizer:
+    #   device: cpu
+    #   pin_memory: false
   activation_checkpointing:
     partition_activations: true
     cpu_checkpointing: true

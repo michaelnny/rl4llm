@@ -9,7 +9,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from rl4llm.constants import LOGGING_PHASES
+from rl4llm.constants import EVAL_PHASE, TRAIN_PHASE
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.logging.handlers.base import BaseHandler
 
@@ -256,8 +256,6 @@ class SampleHandler(BaseHandler):
     a sample is included as part of the data written to the file.
     """
 
-    GENERAL_PHASE: str = 'general'
-
     def __init__(
         self,
         dist_manager: DistributedManager,
@@ -273,7 +271,7 @@ class SampleHandler(BaseHandler):
         self.is_master = dist_manager.is_master
 
         # Include 'general' phase for samples logged without a specific phase
-        self._log_phases = set(LOGGING_PHASES + [self.GENERAL_PHASE])
+        self._log_phases = set([TRAIN_PHASE, EVAL_PHASE])
 
         self._file_loggers: Dict[str, SampleFileLogger] = {}
         os.makedirs(log_dir, exist_ok=True)  # Ensure base log directory exists
@@ -321,29 +319,23 @@ class SampleHandler(BaseHandler):
 
         """
 
-        current_phase = (
-            phase if phase in self._log_phases else self.GENERAL_PHASE
-        )
-
-        if current_phase not in self._file_loggers:
-            # This might happen if phase wasn't in the initial list or GENERAL_PHASE failed init
-            self._logger.warning(
-                f"No logger configured for phase '{current_phase}'. "
-            )
+        if phase not in self._file_loggers:
+            # This might happen if phase wasn't in the initial list
+            self._logger.warning(f"No logger configured for phase '{phase}'. ")
             return  # Skip logging if no logger exists for the phase
 
         try:
             # Get the logger for the current phase
-            file_logger = self._file_loggers[current_phase]
+            file_logger = self._file_loggers[phase]
             # Call the simplified log method (no tag argument needed here)
             file_logger.log(sample_data, step)
             self._logger.debug(
-                f"Logged sample to file [Phase: {current_phase}, Rank: {self.rank}] Step: {step}"
+                f"Logged sample to file [Phase: {phase}, Rank: {self.rank}] Step: {step}"
             )
         except Exception as e:
             # Catch potential errors during the log call (e.g., buffer full + flush error)
             self._logger.error(
-                f"Failed to log sample file [Phase: {current_phase}, Rank: {self.rank}"
+                f"Failed to log sample file [Phase: {phase}, Rank: {self.rank}"
             )
             # Depending on severity, might re-raise or just log
 

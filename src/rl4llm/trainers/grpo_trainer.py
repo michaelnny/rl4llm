@@ -13,7 +13,6 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from rl4llm.core.base_trainer import RLConfig, RLTrainer
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.envs import EpisodeData, LLMEnv
-from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.logging import LoggingManager
 
 
@@ -103,8 +102,6 @@ class GRPOTrainer(RLTrainer):
             eval_env=eval_env,
             seed=seed,
         )
-
-        self.math_grader = math_problem_grader
 
     def _initialize_trainer(self):
         """Initialize GRPO specific settings"""
@@ -363,16 +360,12 @@ class GRPOTrainer(RLTrainer):
             if len(collected_samples) > local_rollout_size:
                 collected_samples = collected_samples[:local_rollout_size]
 
-        # TODO log more metrics
-        # self.logger.log_scalar('generation/episodes_total', self.train_episode_count)
-        # self.logger.log_scalar('generation/explore_epsilon', self.explore_epsilon)
-
         return collected_samples
 
     def build_train_batch(self, experience: List[TransitionData]) -> DataLoader:
         data_loader = DataLoader(
             experience,
-            batch_size=self.config.mini_batch_size,
+            batch_size=self.config.train_micro_batch_size,
             shuffle=True,
             pin_memory=self.device.type == 'cuda',
             collate_fn=self._train_collate_fn,
@@ -400,8 +393,6 @@ class GRPOTrainer(RLTrainer):
         actions = experience_batch.actions.to(self.device)
         advantages = experience_batch.advantages.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
-        ref_logprobs = experience_batch.ref_logprobs.to(self.device)
-        loss_mask = experience_batch.loss_mask.to(self.device)
 
         if self.config.normalize_advantages:
             advantages = self.masked_whiten(advantages, loss_mask)
@@ -416,10 +407,13 @@ class GRPOTrainer(RLTrainer):
         pg_losses2 = clipped_ratio * advantages.detach()
         pg_losses = -torch.min(pg_losses1, pg_losses2)
 
-        approxkl = 0.5 * self.masked_mean(
-            torch.square(pi_logprobs - behavior_logprobs), loss_mask
-        )
-        clipfrac = self.masked_mean(torch.lt(pg_losses2, pg_losses1), loss_mask)
+        with torch.no_grad():
+            approxkl = 0.5 * self.masked_mean(
+                torch.square(pi_logprobs - behavior_logprobs), loss_mask
+            )
+            clipfrac = self.masked_mean(
+                torch.lt(pg_losses2, pg_losses1), loss_mask
+            )
 
         # First average over the sequence length, then average over the batch
         pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
@@ -442,6 +436,7 @@ class GRPOTrainer(RLTrainer):
 
         # Compute KL divergence if coefficient is positive
         if self.config.kl_loss_coef > 0:
+            ref_logprobs = experience_batch.ref_logprobs.to(self.device)
             # Compute the KL divergence between the model and the reference model
             per_token_kl = (
                 torch.exp(ref_logprobs - pi_logprobs)
@@ -471,11 +466,9 @@ class GRPOTrainer(RLTrainer):
     def train_step(self, train_dataloader: DataLoader):
         """Performs the policy update phase."""
 
-        self._prepare_for_training()
-
         for _ in range(self.config.num_updates):
             for i, micro_batch in enumerate(train_dataloader):
-                input_ids = micro_batch.states
+                input_ids = micro_batch.states.to(self.device)
                 attention_mask = (
                     input_ids != self.tokenizer.pad_token_id
                 ).bool()
@@ -484,11 +477,12 @@ class GRPOTrainer(RLTrainer):
                 ).logits
 
                 loss, metrics = self.compute_loss(pi_logits, micro_batch)
+
+                del micro_batch, input_ids, attention_mask, pi_logits
+                self.clean_up()
+
                 self.policy_engine.backward(loss)
                 self.policy_engine.step()
-
-                del input_ids, attention_mask, pi_logits
-                torch.cuda.empty_cache()
 
                 for k, v in metrics.items():
                     self.logger.log_scalar(k, v)
@@ -537,7 +531,7 @@ class GRPOTrainer(RLTrainer):
             'input_ids': input_ids.to(
                 self.device
             ),  # Shape: [batch_size, max_seq_len_in_batch]
-            'attention_mask': attention_mask.to(self.device),
+            'attention_mask': attention_mask,
             'questions': questions,
             'ground_truths': ground_truths,
             'task_types': task_types,
@@ -597,10 +591,10 @@ class GRPOTrainer(RLTrainer):
         )
 
         return TransitionData(
-            states=batch_states.to(self.device),
-            actions=batch_actions.to(self.device),
-            loss_mask=batch_loss_mask.to(self.device),
-            pi_logprobs=batch_pi_logprobs.to(self.device),
-            ref_logprobs=batch_ref_logprobs.to(self.device),
-            advantages=batch_advantages.to(self.device),
+            states=batch_states,
+            actions=batch_actions,
+            loss_mask=batch_loss_mask,
+            pi_logprobs=batch_pi_logprobs,
+            ref_logprobs=batch_ref_logprobs,
+            advantages=batch_advantages,
         )
