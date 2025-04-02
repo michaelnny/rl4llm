@@ -19,7 +19,6 @@ class BackendHandler(BaseHandler):
     def __init__(
         self,
         log_dir: str,
-        config: Any,  # Pass the main config object
         enable_wandb: bool,
         enable_tensorboard: bool,
         is_master: bool,
@@ -30,7 +29,6 @@ class BackendHandler(BaseHandler):
 
         Args:
             log_dir: Base directory for logs (used for WandB/TB paths).
-            config: The main configuration object (for project name, run name etc.).
             enable_wandb: Flag to enable WandB.
             enable_tensorboard: Flag to enable TensorBoard.
             is_master: Boolean indicating if the current process is the master.
@@ -39,7 +37,6 @@ class BackendHandler(BaseHandler):
         super().__init__(logger)  # Initialize base class
         self.is_master = is_master
         self.log_dir = log_dir
-        self.config = config
         self._writer: Optional[Any] = None
         self._can_log_flag: bool = False
 
@@ -68,23 +65,12 @@ class BackendHandler(BaseHandler):
 
                 wandb_dir = os.path.join(self.log_dir, 'wandb')
                 os.makedirs(wandb_dir, exist_ok=True)
-                run_name = (
-                    getattr(self.config, 'run_name', None)
-                    or f"{getattr(self.config, 'project_name', 'rl_run')}_{time.strftime('%Y%m%d_%H%M%S')}"
-                )
-                run_id = getattr(
-                    self.config, 'run_id', wandb.util.generate_id()
-                )
+                run_name = f"rl4llm_run_{time.strftime('%Y%m%d_%H%M%S')}"
+
+                run_id = wandb.util.generate_id()
 
                 wandb.init(
-                    project=getattr(
-                        self.config, 'project_name', 'rl4llm_project'
-                    ),
-                    config=(
-                        vars(self.config)
-                        if hasattr(self.config, '__dict__')
-                        else dict(self.config)
-                    ),
+                    project='rl4llm_project',
                     dir=self.log_dir,
                     sync_tensorboard=False,
                     name=run_name,

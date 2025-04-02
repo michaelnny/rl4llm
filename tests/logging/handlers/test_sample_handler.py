@@ -1,16 +1,18 @@
-import os
+import gzip
+import json
 import logging
-import pytest
+import os
+from typing import Any, Dict, List, Optional, Tuple  # Added Tuple
+from unittest.mock import MagicMock  # For mocking DistributedManager
+
 import pandas as pd
 import pyarrow as pa  # Required for parquet
 import pyarrow.parquet as pq
-import json
-import gzip
-from typing import List, Dict, Any, Optional, Tuple  # Added Tuple
-from unittest.mock import MagicMock  # For mocking DistributedManager
+import pytest
 
-from rl4llm.logging.handlers.sample import SampleFileLogger, SampleHandler
 from rl4llm.constants import LOGGING_PHASES
+from rl4llm.logging.handlers.sample import SampleFileLogger, SampleHandler
+
 
 # Mock DistributedManager
 class MockDistributedManager:
@@ -29,9 +31,9 @@ class MockDistributedManager:
 def read_jsonl(filepath: str) -> List[Dict[str, Any]]:
     """Reads a JSONL file (gzipped or plain)."""
     data = []
-    open_func = gzip.open if filepath.endswith(".gz") else open
+    open_func = gzip.open if filepath.endswith('.gz') else open
     try:
-        with open_func(filepath, "rt", encoding="utf-8") as f:
+        with open_func(filepath, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     data.append(json.loads(line))
@@ -61,7 +63,7 @@ def mock_logger():
     """Fixture for a mock logger."""
     # Using a real logger captured by caplog is often better for functional tests
     # return MagicMock(spec=logging.Logger)
-    return logging.getLogger("TestLogger")
+    return logging.getLogger('TestLogger')
 
 
 @pytest.fixture(params=[0, 1])  # Test with rank 0 and rank 1
@@ -76,7 +78,7 @@ def mock_dist_manager(rank):
     return MockDistributedManager(rank=rank, world_size=2)
 
 
-@pytest.fixture(params=["parquet", "jsonl", "jsonl.gz"])
+@pytest.fixture(params=['parquet', 'jsonl', 'jsonl.gz'])
 def file_format(request):
     """Fixture for different file formats."""
     return request.param
@@ -86,7 +88,7 @@ def file_format(request):
 def phase_dir(tmp_path):
     """Fixture for a temporary phase directory."""
     # tmp_path is a pytest fixture providing a temporary directory unique to the test
-    p_dir = tmp_path / "test_phase"
+    p_dir = tmp_path / 'test_phase'
     # No need to create it here, SampleFileLogger should do it
     # p_dir.mkdir()
     return str(p_dir)
@@ -95,7 +97,7 @@ def phase_dir(tmp_path):
 @pytest.fixture
 def log_dir(tmp_path):
     """Fixture for a temporary base log directory for SampleHandler."""
-    l_dir = tmp_path / "logs"
+    l_dir = tmp_path / 'logs'
     l_dir.mkdir()
     return str(l_dir)
 
@@ -109,13 +111,16 @@ class TestSampleFileLogger:
     ):
         """Verify directory creation and correct file path."""
         logger = SampleFileLogger(
-            phase_dir=phase_dir, rank=rank, file_format=file_format, logger=mock_logger
+            phase_dir=phase_dir,
+            rank=rank,
+            file_format=file_format,
+            logger=mock_logger,
         )
-        expected_samples_dir = os.path.join(phase_dir, "samples")
+        expected_samples_dir = os.path.join(phase_dir, 'samples')
         assert os.path.isdir(expected_samples_dir)
 
         expected_extension = SampleFileLogger.SUPPORTED_FORMATS[file_format][
-            "extension"
+            'extension'
         ]
         expected_filename = f"rank{rank}.{expected_extension}"
         expected_path = os.path.join(expected_samples_dir, expected_filename)
@@ -125,18 +130,25 @@ class TestSampleFileLogger:
         assert logger._buffer == []
         logger.close()  # Cleanup
 
-    def test_init_invalid_format_raises_value_error(self, phase_dir, rank, mock_logger):
+    def test_init_invalid_format_raises_value_error(
+        self, phase_dir, rank, mock_logger
+    ):
         """Verify ValueError for unsupported file format."""
-        with pytest.raises(ValueError, match="Unsupported file format: csv"):
+        with pytest.raises(ValueError, match='Unsupported file format: csv'):
             SampleFileLogger(
-                phase_dir=phase_dir, rank=rank, file_format="csv", logger=mock_logger
+                phase_dir=phase_dir,
+                rank=rank,
+                file_format='csv',
+                logger=mock_logger,
             )
 
     # Note: Testing OSError on directory creation failure is tricky without
     # more complex mocking (e.g., patching os.makedirs) or filesystem manipulation.
     # We'll assume os.makedirs works as expected for typical functional tests.
 
-    def test_log_adds_to_buffer(self, phase_dir, rank, file_format, mock_logger):
+    def test_log_adds_to_buffer(
+        self, phase_dir, rank, file_format, mock_logger
+    ):
         """Verify logging adds data with step to the buffer."""
         logger = SampleFileLogger(
             phase_dir=phase_dir,
@@ -145,12 +157,12 @@ class TestSampleFileLogger:
             buffer_size=10,
             logger=mock_logger,
         )
-        sample_data = {"col1": "value1", "col2": 10}
+        sample_data = {'col1': 'value1', 'col2': 10}
         step = 5
         logger.log(sample_data, step)
 
         assert len(logger._buffer) == 1
-        expected_entry = {"step": step, **sample_data}
+        expected_entry = {'step': step, **sample_data}
         assert logger._buffer[0] == expected_entry
         assert not os.path.exists(logger.save_path)  # Buffer not full yet
         logger.close()
@@ -169,14 +181,14 @@ class TestSampleFileLogger:
         )
 
         for i in range(buffer_size - 1):
-            logger.log({"id": i, "data": f"sample_{i}"}, step=i * 2)
+            logger.log({'id': i, 'data': f"sample_{i}"}, step=i * 2)
 
         assert len(logger._buffer) == buffer_size - 1
         assert not os.path.exists(logger.save_path)  # File shouldn't exist yet
 
         # This log call should fill the buffer and trigger flush
         logger.log(
-            {"id": buffer_size - 1, "data": f"sample_{buffer_size - 1}"},
+            {'id': buffer_size - 1, 'data': f"sample_{buffer_size - 1}"},
             step=(buffer_size - 1) * 2,
         )
 
@@ -184,16 +196,18 @@ class TestSampleFileLogger:
         assert os.path.exists(logger.save_path)  # File should now exist
 
         # Verify content
-        if file_format == "parquet":
+        if file_format == 'parquet':
             df = read_parquet(logger.save_path)
             assert len(df) == buffer_size
-            assert df["id"].tolist() == list(range(buffer_size))
-            assert df["step"].tolist() == [i * 2 for i in range(buffer_size)]
+            assert df['id'].tolist() == list(range(buffer_size))
+            assert df['step'].tolist() == [i * 2 for i in range(buffer_size)]
         else:  # jsonl or jsonl.gz
             data = read_jsonl(logger.save_path)
             assert len(data) == buffer_size
-            assert [d["id"] for d in data] == list(range(buffer_size))
-            assert [d["step"] for d in data] == [i * 2 for i in range(buffer_size)]
+            assert [d['id'] for d in data] == list(range(buffer_size))
+            assert [d['step'] for d in data] == [
+                i * 2 for i in range(buffer_size)
+            ]
 
         logger.close()
 
@@ -210,7 +224,7 @@ class TestSampleFileLogger:
         )
         samples_to_log = 2
         for i in range(samples_to_log):
-            logger.log({"id": i, "val": f"data_{i}"}, step=i + 1)
+            logger.log({'id': i, 'val': f"data_{i}"}, step=i + 1)
 
         assert len(logger._buffer) == samples_to_log
         assert not os.path.exists(logger.save_path)
@@ -221,20 +235,24 @@ class TestSampleFileLogger:
         assert os.path.exists(logger.save_path)
 
         # Verify content
-        if file_format == "parquet":
+        if file_format == 'parquet':
             df = read_parquet(logger.save_path)
             assert len(df) == samples_to_log
-            assert df["id"].tolist() == list(range(samples_to_log))
-            assert df["step"].tolist() == [i + 1 for i in range(samples_to_log)]
+            assert df['id'].tolist() == list(range(samples_to_log))
+            assert df['step'].tolist() == [i + 1 for i in range(samples_to_log)]
         else:  # jsonl or jsonl.gz
             data = read_jsonl(logger.save_path)
             assert len(data) == samples_to_log
-            assert [d["id"] for d in data] == list(range(samples_to_log))
-            assert [d["step"] for d in data] == [i + 1 for i in range(samples_to_log)]
+            assert [d['id'] for d in data] == list(range(samples_to_log))
+            assert [d['step'] for d in data] == [
+                i + 1 for i in range(samples_to_log)
+            ]
 
         logger.close()
 
-    def test_append_to_existing_file(self, phase_dir, rank, file_format, mock_logger):
+    def test_append_to_existing_file(
+        self, phase_dir, rank, file_format, mock_logger
+    ):
         """Verify data is appended correctly on subsequent flushes."""
         buffer_size = 2
         logger = SampleFileLogger(
@@ -247,32 +265,36 @@ class TestSampleFileLogger:
 
         # First batch (triggers flush)
         for i in range(buffer_size):
-            logger.log({"id": i, "batch": 1}, step=i)
+            logger.log({'id': i, 'batch': 1}, step=i)
 
         assert os.path.exists(logger.save_path)
         assert len(logger._buffer) == 0
 
         # Second batch (triggers another flush)
         for i in range(buffer_size):
-            logger.log({"id": i + buffer_size, "batch": 2}, step=i + buffer_size)
+            logger.log(
+                {'id': i + buffer_size, 'batch': 2}, step=i + buffer_size
+            )
 
         assert os.path.exists(logger.save_path)
         assert len(logger._buffer) == 0
 
         # Verify combined content
         total_samples = buffer_size * 2
-        if file_format == "parquet":
+        if file_format == 'parquet':
             df = read_parquet(logger.save_path)
             assert len(df) == total_samples
-            assert df["id"].tolist() == list(range(total_samples))
-            assert df["step"].tolist() == list(range(total_samples))
-            assert df["batch"].tolist() == [1] * buffer_size + [2] * buffer_size
+            assert df['id'].tolist() == list(range(total_samples))
+            assert df['step'].tolist() == list(range(total_samples))
+            assert df['batch'].tolist() == [1] * buffer_size + [2] * buffer_size
         else:  # jsonl or jsonl.gz
             data = read_jsonl(logger.save_path)
             assert len(data) == total_samples
-            assert [d["id"] for d in data] == list(range(total_samples))
-            assert [d["step"] for d in data] == list(range(total_samples))
-            assert [d["batch"] for d in data] == [1] * buffer_size + [2] * buffer_size
+            assert [d['id'] for d in data] == list(range(total_samples))
+            assert [d['step'] for d in data] == list(range(total_samples))
+            assert [d['batch'] for d in data] == [1] * buffer_size + [
+                2
+            ] * buffer_size
 
         logger.close()
 
@@ -287,7 +309,7 @@ class TestSampleFileLogger:
             buffer_size=5,
             logger=mock_logger,
         )
-        logger.log({"id": 0, "final": True}, step=100)
+        logger.log({'id': 0, 'final': True}, step=100)
         assert len(logger._buffer) == 1
         assert not os.path.exists(
             logger.save_path
@@ -299,23 +321,26 @@ class TestSampleFileLogger:
         assert os.path.exists(logger.save_path)
 
         # Verify content
-        if file_format == "parquet":
+        if file_format == 'parquet':
             df = read_parquet(logger.save_path)
             assert len(df) == 1
-            assert df.iloc[0]["id"] == 0
-            assert df.iloc[0]["step"] == 100
+            assert df.iloc[0]['id'] == 0
+            assert df.iloc[0]['step'] == 100
         else:  # jsonl or jsonl.gz
             data = read_jsonl(logger.save_path)
             assert len(data) == 1
-            assert data[0]["id"] == 0
-            assert data[0]["step"] == 100
+            assert data[0]['id'] == 0
+            assert data[0]['step'] == 100
 
     def test_empty_flush_and_close_no_error(
         self, phase_dir, rank, file_format, mock_logger
     ):
         """Verify flush() and close() don't error when buffer is empty."""
         logger = SampleFileLogger(
-            phase_dir=phase_dir, rank=rank, file_format=file_format, logger=mock_logger
+            phase_dir=phase_dir,
+            rank=rank,
+            file_format=file_format,
+            logger=mock_logger,
         )
         try:
             logger.flush()
@@ -331,35 +356,35 @@ class TestSampleFileLogger:
         logger_gzip = SampleFileLogger(
             phase_dir=phase_dir,
             rank=rank,
-            file_format="parquet",
-            compression="gzip",  # Explicitly gzip
+            file_format='parquet',
+            compression='gzip',  # Explicitly gzip
             buffer_size=1,
             logger=mock_logger,
         )
-        logger_gzip.log({"a": 1}, step=1)
+        logger_gzip.log({'a': 1}, step=1)
         logger_gzip.close()
 
         assert os.path.exists(logger_gzip.save_path)
         # Check parquet metadata for compression type
         meta = pq.read_metadata(logger_gzip.save_path)
         # Compression can be per column chunk, check the first one
-        assert meta.row_group(0).column(0).compression == "GZIP"
+        assert meta.row_group(0).column(0).compression == 'GZIP'
 
         # Test default compression (snappy for parquet)
         logger_default = SampleFileLogger(
             phase_dir=phase_dir,
             rank=rank + 10,  # Use different rank for different file
-            file_format="parquet",
+            file_format='parquet',
             compression=None,  # Use default
             buffer_size=1,
             logger=mock_logger,
         )
-        logger_default.log({"b": 2}, step=1)
+        logger_default.log({'b': 2}, step=1)
         logger_default.close()
 
         assert os.path.exists(logger_default.save_path)
         meta_default = pq.read_metadata(logger_default.save_path)
-        assert meta_default.row_group(0).column(0).compression == "SNAPPY"
+        assert meta_default.row_group(0).column(0).compression == 'SNAPPY'
 
 
 # --- Test Class for SampleHandler ---
@@ -388,12 +413,12 @@ class TestSampleHandler:
             logger=mock_logger,
         )
 
-        expected_phases = set(LOGGING_PHASES + [SampleHandler.GENERAL_PHASE])
-        assert len(handler._file_loggers) == len(expected_phases)
-        assert set(handler._file_loggers.keys()) == set(expected_phases)
+        expected_phases = set(LOGGING_PHASES)
+        assert len(handler._file_loggers) == 2
+        assert set(handler._file_loggers.keys()) == expected_phases
 
         rank = mock_dist_manager.global_rank
-        extension = SampleFileLogger.SUPPORTED_FORMATS[file_format]["extension"]
+        extension = SampleFileLogger.SUPPORTED_FORMATS[file_format]['extension']
 
         for phase in expected_phases:
             assert phase in handler._file_loggers
@@ -405,7 +430,7 @@ class TestSampleHandler:
 
             # Check directory structure
             expected_phase_dir = os.path.join(log_dir, phase)
-            expected_samples_dir = os.path.join(expected_phase_dir, "samples")
+            expected_samples_dir = os.path.join(expected_phase_dir, 'samples')
             expected_filepath = os.path.join(
                 expected_samples_dir, f"rank{rank}.{extension}"
             )
@@ -428,20 +453,20 @@ class TestSampleHandler:
         )
 
         rank = mock_dist_manager.global_rank
-        extension = SampleFileLogger.SUPPORTED_FORMATS[file_format]["extension"]
+        extension = SampleFileLogger.SUPPORTED_FORMATS[file_format]['extension']
 
         # Log to specific phases
         handler.log_sample(
-            phase="train", sample_data={"type": "train_data", "val": 1}, step=1
+            phase='train', sample_data={'type': 'train_data', 'val': 1}, step=1
         )
         handler.log_sample(
-            phase="eval", sample_data={"type": "eval_data", "val": 2}, step=2
+            phase='eval', sample_data={'type': 'eval_data', 'val': 2}, step=2
         )
 
         # Log to general phase (unknown phase)
         handler.log_sample(
-            phase="unknown_phase",
-            sample_data={"type": "general_data", "val": 3},
+            phase='unknown_phase',
+            sample_data={'type': 'general_data', 'val': 3},
             step=3,
         )
 
@@ -454,53 +479,39 @@ class TestSampleHandler:
 
         # Verify train file
         train_path = os.path.join(
-            log_dir, "train", "samples", f"rank{rank}.{extension}"
+            log_dir, 'train', 'samples', f"rank{rank}.{extension}"
         )
         assert os.path.exists(train_path)
-        if file_format == "parquet":
+        if file_format == 'parquet':
             df_train = read_parquet(train_path)
             assert len(df_train) == 1
-            assert df_train.iloc[0]["type"] == "train_data"
-            assert df_train.iloc[0]["step"] == 1
+            assert df_train.iloc[0]['type'] == 'train_data'
+            assert df_train.iloc[0]['step'] == 1
         else:
             data_train = read_jsonl(train_path)
             assert len(data_train) == 1
-            assert data_train[0]["type"] == "train_data"
-            assert data_train[0]["step"] == 1
+            assert data_train[0]['type'] == 'train_data'
+            assert data_train[0]['step'] == 1
 
         # Verify eval file
-        eval_path = os.path.join(log_dir, "eval", "samples", f"rank{rank}.{extension}")
+        eval_path = os.path.join(
+            log_dir, 'eval', 'samples', f"rank{rank}.{extension}"
+        )
         assert os.path.exists(eval_path)
-        if file_format == "parquet":
+        if file_format == 'parquet':
             df_eval = read_parquet(eval_path)
             assert len(df_eval) == 1
-            assert df_eval.iloc[0]["type"] == "eval_data"
-            assert df_eval.iloc[0]["step"] == 2
+            assert df_eval.iloc[0]['type'] == 'eval_data'
+            assert df_eval.iloc[0]['step'] == 2
         else:
             data_eval = read_jsonl(eval_path)
             assert len(data_eval) == 1
-            assert data_eval[0]["type"] == "eval_data"
-            assert data_eval[0]["step"] == 2
-
-        # Verify general file (should contain 'unknown_phase' sample)
-        general_path = os.path.join(
-            log_dir, SampleHandler.GENERAL_PHASE, "samples", f"rank{rank}.{extension}"
-        )
-        assert os.path.exists(general_path)
-        if file_format == "parquet":
-            df_gen = read_parquet(general_path)
-            assert len(df_gen) == 1  # Only the 'unknown_phase' sample
-            assert df_gen.iloc[0]["type"] == "general_data"
-            assert df_gen.iloc[0]["step"] == 3
-        else:
-            data_gen = read_jsonl(general_path)
-            assert len(data_gen) == 1
-            assert data_gen[0]["type"] == "general_data"
-            assert data_gen[0]["step"] == 3
+            assert data_eval[0]['type'] == 'eval_data'
+            assert data_eval[0]['step'] == 2
 
         # Verify predict file is empty (or doesn't exist)
         predict_path = os.path.join(
-            log_dir, "predict", "samples", f"rank{rank}.{extension}"
+            log_dir, 'predict', 'samples', f"rank{rank}.{extension}"
         )
         assert not os.path.exists(predict_path)
 
@@ -516,24 +527,24 @@ class TestSampleHandler:
             logger=mock_logger,
         )
         rank = mock_dist_manager.global_rank
-        extension = SampleFileLogger.SUPPORTED_FORMATS[file_format]["extension"]
+        extension = SampleFileLogger.SUPPORTED_FORMATS[file_format]['extension']
 
         # Log data to multiple phases, but less than buffer size
-        handler.log_sample(phase="train", sample_data={"id": 1}, step=1)
-        handler.log_sample(phase="eval", sample_data={"id": 2}, step=1)
-        handler.log_sample(phase="unknown", sample_data={"id": 3}, step=1)  # -> general
+        handler.log_sample(phase='train', sample_data={'id': 1}, step=1)
+        handler.log_sample(phase='eval', sample_data={'id': 2}, step=1)
+        handler.log_sample(
+            phase='unknown', sample_data={'id': 3}, step=1
+        )  # -> general
 
         # Check files don't exist yet
         train_path = os.path.join(
-            log_dir, "train", "samples", f"rank{rank}.{extension}"
+            log_dir, 'train', 'samples', f"rank{rank}.{extension}"
         )
-        eval_path = os.path.join(log_dir, "eval", "samples", f"rank{rank}.{extension}")
-        general_path = os.path.join(
-            log_dir, SampleHandler.GENERAL_PHASE, "samples", f"rank{rank}.{extension}"
+        eval_path = os.path.join(
+            log_dir, 'eval', 'samples', f"rank{rank}.{extension}"
         )
         assert not os.path.exists(train_path)
         assert not os.path.exists(eval_path)
-        assert not os.path.exists(general_path)
 
         # Call handler's flush
         handler.flush()
@@ -541,17 +552,14 @@ class TestSampleHandler:
         # Check files now exist and have content
         assert os.path.exists(train_path)
         assert os.path.exists(eval_path)
-        assert os.path.exists(general_path)
 
         # Quick content check (just length)
-        if file_format == "parquet":
+        if file_format == 'parquet':
             assert len(read_parquet(train_path)) == 1
             assert len(read_parquet(eval_path)) == 1
-            assert len(read_parquet(general_path)) == 1
         else:
             assert len(read_jsonl(train_path)) == 1
             assert len(read_jsonl(eval_path)) == 1
-            assert len(read_jsonl(general_path)) == 1
 
         handler.close()
 
@@ -567,15 +575,15 @@ class TestSampleHandler:
             logger=mock_logger,
         )
         rank = mock_dist_manager.global_rank
-        extension = SampleFileLogger.SUPPORTED_FORMATS[file_format]["extension"]
+        extension = SampleFileLogger.SUPPORTED_FORMATS[file_format]['extension']
 
         # Log data
-        handler.log_sample(phase="train", sample_data={"id": 10}, step=5)
-        handler.log_sample(phase="eval", sample_data={"id": 20}, step=5)
+        handler.log_sample(phase='train', sample_data={'id': 10}, step=5)
+        handler.log_sample(phase='eval', sample_data={'id': 20}, step=5)
 
         # Spy on the close method of one of the file loggers
         # We mock close to check if it's called, but still want original flush behavior
-        original_close = handler._file_loggers["train"].close
+        original_close = handler._file_loggers['train'].close
         close_called = False
 
         def mock_close():
@@ -583,16 +591,18 @@ class TestSampleHandler:
             close_called = True
             original_close()  # Call the original close to flush data
 
-        handler._file_loggers["train"].close = mock_close
+        handler._file_loggers['train'].close = mock_close
 
         # Call handler's close
         handler.close()
 
         # Check files exist (implicitly checks flush happened)
         train_path = os.path.join(
-            log_dir, "train", "samples", f"rank{rank}.{extension}"
+            log_dir, 'train', 'samples', f"rank{rank}.{extension}"
         )
-        eval_path = os.path.join(log_dir, "eval", "samples", f"rank{rank}.{extension}")
+        eval_path = os.path.join(
+            log_dir, 'eval', 'samples', f"rank{rank}.{extension}"
+        )
         assert os.path.exists(train_path)
         assert os.path.exists(eval_path)
 
@@ -611,13 +621,13 @@ class TestSampleHandler:
         original_init = SampleFileLogger.__init__
 
         def faulty_init(self, phase_dir, *args, **kwargs):
-            if "eval" in phase_dir:  # Fail specifically for eval phase
-                raise OSError("Disk full simulation")
+            if 'eval' in phase_dir:  # Fail specifically for eval phase
+                raise OSError('Disk full simulation')
             original_init(self, phase_dir, *args, **kwargs)
 
-        monkeypatch.setattr(SampleFileLogger, "__init__", faulty_init)
+        monkeypatch.setattr(SampleFileLogger, '__init__', faulty_init)
 
-        with pytest.raises(RuntimeError, match="Failed setup for phase eval"):
+        with pytest.raises(RuntimeError, match='Failed setup for phase eval'):
             SampleHandler(
                 dist_manager=mock_dist_manager,
                 log_dir=log_dir,
@@ -639,20 +649,12 @@ class TestSampleHandler:
         )
 
         # Manually remove a logger after init to simulate a failure or unexpected state
-        if "eval" in handler._file_loggers:
-            del handler._file_loggers["eval"]
+        if 'eval' in handler._file_loggers:
+            del handler._file_loggers['eval']
 
         with caplog.at_level(logging.WARNING):
-            handler.log_sample(phase="eval", sample_data={"id": 1}, step=1)
+            handler.log_sample(phase='eval', sample_data={'id': 1}, step=1)
 
         assert "No logger configured for phase 'eval'" in caplog.text
-        # Also check that the 'general' phase wasn't used instead in this specific case
-        general_path = os.path.join(
-            log_dir,
-            SampleHandler.GENERAL_PHASE,
-            "samples",
-            f"rank{mock_dist_manager.global_rank}.{SampleFileLogger.SUPPORTED_FORMATS[file_format]['extension']}",
-        )
-        assert not os.path.exists(general_path)  # Should not have logged to general
 
         handler.close()

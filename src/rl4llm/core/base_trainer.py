@@ -46,7 +46,7 @@ class RLTrainer(ABC, TrainingMixin):
         if policy_engine.zero_optimization_stage() == 3:
             raise RuntimeError('Zero-3 not supported')
 
-        if config.rollout_size % dist_manager.world_size != 0:
+        if config.train_rollout_size % dist_manager.world_size != 0:
             raise ValueError(
                 f"Rollout size must be divisible by {dist_manager.world_size}"
             )
@@ -136,7 +136,13 @@ class RLTrainer(ABC, TrainingMixin):
                 'prompt_length': ep.prompt_length,
                 'completion_length': ep.completion_length,
                 'completion_text': ep.completion_text,
+                'timestamp': ep.timestamp,
+                **ep.reward_dict,
             }
+
+            if ep.raw_data is not None and 'ground_truth' in ep.raw_data:
+                data_to_log['ground_truth'] = ep.raw_data['ground_truth']
+
             self.logger.log_sample(phase, data_to_log, step)
             self.logger.log_scalar(
                 f"{metric_key}/completion_length", ep.completion_length
@@ -296,6 +302,7 @@ class RLTrainer(ABC, TrainingMixin):
         if self.config.eval_interval > 0 and self.eval_env:
             self.logger.info('Running initial evaluation...')
             with self.logger.timer('evaluate'):
+                self._prepare_for_generation()
                 self.evaluate_step()
                 self.clean_up()
             self.dist_manager.barrier()
@@ -345,9 +352,12 @@ class RLTrainer(ABC, TrainingMixin):
                 and (t + 1) % self.config.eval_interval == 0
             ):
                 with self.logger.timer('evaluate'):
+                    self._prepare_for_generation()
                     self.evaluate_step()
                     self.clean_up()
+                self.dist_manager.barrier()
 
+            # Logging metrics
             self.logger.aggregate_and_log(self.global_step)
 
             # Clean up memory

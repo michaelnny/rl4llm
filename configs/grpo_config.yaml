@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_grpo_qwen2.5_1.5b_gsm8k"
+  artifacts_path: "./runs/test_grpo_qwen2.5_0.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -9,25 +9,17 @@ job:
   max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B"
+  pretrained_model: "Qwen/Qwen2.5-0.5B"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
   model_max_length: 4000
 
-# # for outcome coherent detection
-# coherent_model:
-#   pretrained_model: "allenai/longformer-base-4096"
-#   load_in_4bit: false
-#   gradient_checkpointing: true
-#   model_max_length: 4000
-#   checkpoint_path: "models/coherent_classification_longformer"
-
 grpo_config:
-  max_steps: 1
-  rollout_size: 128
+  max_steps: 10
+  train_rollout_size: 512
   num_updates: 1
-  train_micro_batch_size: 2
+  train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
@@ -41,13 +33,14 @@ grpo_config:
   # for sample generation
   max_prompt_tokens: 512              # skip sample question that's too long
   group_size: 16                      # for each sample we generate a group of answers
-  max_completion_tokens: 600
+  max_completion_tokens: 1000
   temperature: 1.0                    # not used if using group_temperature
   repetition_penalty: 1.0
   top_p: 0.95
   top_k: 0
 
   # evaluation
+  eval_rollout_size: 512    
   eval_batch_size: 64
   eval_interval: 50
 

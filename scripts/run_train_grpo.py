@@ -178,7 +178,7 @@ def main():
 
     dist_manager = DistributedManager()
     logger_manager = LoggingManager(
-        config, dist_manager, log_dir=artifacts_path, sample_file_format='jsonl'
+        dist_manager, log_dir=artifacts_path, sample_file_format='jsonl'
     )
 
     torch_dtype = torch.bfloat16
@@ -219,6 +219,14 @@ def main():
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
     )
+    eval_env = LLMEnv(
+        dataset=eval_dataset,
+        batch_size=grpo_config.eval_batch_size,
+        tokenizer=tokenizer,
+        reward_functions=[AccuracyRewardFunction()],
+        rank=dist_manager.local_rank,
+        world_size=dist_manager.world_size,
+    )
 
     trainer = GRPOTrainer(
         config=grpo_config,
@@ -227,7 +235,7 @@ def main():
         dist_manager=dist_manager,
         logger=logger_manager,
         train_env=train_env,
-        eval_env=None,
+        eval_env=eval_env,
         artifacts_path=artifacts_path,
         seed=seed,
     )

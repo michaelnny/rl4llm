@@ -341,24 +341,25 @@ class GRPOTrainer(RLTrainer):
 
         return (rewards - mean_reward) / (std_reward + eps)
 
+    @torch.inference_mode()
     def generate_experience(self) -> List[TransitionData]:
         """Generates samples using the current policy."""
 
         assert not self.policy_model.training
         collected_samples: List[TransitionData] = []
 
+        # we always use batch size of 1 during training roll out
         local_rollout_size = (
-            self.config.rollout_size // self.dist_manager.world_size
+            self.config.train_rollout_size // self.dist_manager.world_size
         )
 
-        with self.logger.timer('generation'):
-            while len(collected_samples) < local_rollout_size:
-                samples = self._generate_group_samples()
-                if samples:
-                    collected_samples.extend(samples)
+        while len(collected_samples) < local_rollout_size:
+            samples = self._generate_group_samples()
+            if samples:
+                collected_samples.extend(samples)
 
-            if len(collected_samples) > local_rollout_size:
-                collected_samples = collected_samples[:local_rollout_size]
+        if len(collected_samples) > local_rollout_size:
+            collected_samples = collected_samples[:local_rollout_size]
 
         return collected_samples
 
@@ -497,8 +498,42 @@ class GRPOTrainer(RLTrainer):
                         self.policy_engine.get_lr()[0],
                     )
 
+    @torch.inference_mode()
     def evaluate_step(self):
-        pass
+        """Run the policy on evaluation dataset"""
+
+        if self.eval_env is None:
+            return
+
+        assert not self.policy_model.training
+
+        local_rollout_size = (
+            self.config.eval_rollout_size
+            // self.config.eval_batch_size
+            // self.dist_manager.world_size
+        )
+
+        # Use greedy sampling
+        eval_gen_kwargs = {
+            'eos_token_id': self.tokenizer.eos_token_id,
+            'pad_token_id': self.tokenizer.pad_token_id,
+            'max_new_tokens': self.config.max_completion_tokens,
+            'temperature': None,
+            'top_p': None,
+            'top_k': None,
+            'repetition_penalty': None,
+            'num_return_sequences': 1,
+            'do_sample': False,
+            'use_cache': True,
+            'output_scores': False,
+            'output_logits': False,
+            'return_dict_in_generate': True,
+            'return_legacy_cache': False,
+        }
+
+        for _ in range(local_rollout_size):
+            outputs = self.eval_env.rollout(self.policy_model, eval_gen_kwargs)
+            self.log_batch_episodes(self._eval_phase, outputs, self.global_step)
 
     def _eval_collate_fn(self, batch: List[Dict]) -> Dict:
         """Collate function for DataLoader during evaluation"""

@@ -42,7 +42,7 @@ class RLConfig(BaseModel):
     max_steps: int = Field(
         10000, ge=1, description='How long to run the training'
     )
-    rollout_size: int = Field(
+    train_rollout_size: int = Field(
         1024,
         ge=1,
         le=5120,
@@ -105,6 +105,12 @@ class RLConfig(BaseModel):
         le=1024,
         description='Batch size size pre device/rank for evaluation',
     )
+    eval_rollout_size: int = Field(
+        1024,
+        ge=1,
+        le=5120,
+        description='Number of samples to collect for evaluation',
+    )
 
     @model_validator(mode='after')
     def check_batch_size(cls, values):
@@ -156,7 +162,7 @@ class RLConfig(BaseModel):
 
 #     """For RL GRPO training"""
 #     max_steps: int = Field(10000, ge=1, description='How long to run the training')
-#     rollout_size: int = Field(1024, ge=1, le=5120, description='Number of samples to collect before update policy')
+#     train_rollout_size: int = Field(1024, ge=1, le=5120, description='Number of samples to collect before update policy')
 #     num_updates: int = Field(1, ge=1, le=4, description='GRPO update epochs for a collection of samples')
 #     batch_size: int = Field(4, ge=1, le=1024, description='Mini-batch size for training')
 #     gradient_accumulate_steps: int = Field(1, ge=1, description='Gradient accumulation steps')

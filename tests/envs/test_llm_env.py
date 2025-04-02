@@ -1,19 +1,27 @@
 # test_llm_env.py
-import pytest
+import random
+from typing import Any, Dict, List
+
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as TorchDataset
-from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizer, AutoConfig
+from transformers import (
+    AutoConfig,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.generation.utils import GenerateDecoderOnlyOutput
 
-from typing import List, Dict, Any
-from dataclasses import is_dataclass
-import random
-
-from rl4llm.envs.llm_env import LLMEnv, EnvState, EpisodeData, BaseRewardFunction
-
+from rl4llm.envs.llm_env import (
+    BaseRewardFunction,
+    EnvState,
+    EpisodeData,
+    LLMEnv,
+)
 
 # --- Test Fixtures ---
 
@@ -30,41 +38,36 @@ class SimpleDictDataset(TorchDataset):
         return self.data[idx]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def dummy_dataset_data():
     return [
-        {"prompt": "Q: What is 1+1?", "ground_truth": "A: 2", "topic": "math"},
-        {"prompt": "Q: Capital of France?", "ground_truth": "A: Paris", "topic": "geo"},
+        {'prompt': 'Q: What is 1+1?', 'ground_truth': 'A: 2', 'topic': 'math'},
         {
-            "prompt": "Q: Meaning of life?",
-            "ground_truth": "A: 42",
-            "topic": "philosophy",
+            'prompt': 'Q: Capital of France?',
+            'ground_truth': 'A: Paris',
+            'topic': 'geo',
         },
         {
-            "prompt": "Q: Water boiling point?",
-            "ground_truth": "A: 100C",
-            "topic": "science",
+            'prompt': 'Q: Meaning of life?',
+            'ground_truth': 'A: 42',
+            'topic': 'philosophy',
+        },
+        {
+            'prompt': 'Q: Water boiling point?',
+            'ground_truth': 'A: 100C',
+            'topic': 'science',
         },
     ]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def dummy_dataset(dummy_dataset_data):
     return SimpleDictDataset(dummy_dataset_data)
 
 
-# Dummy Tokenizer
-@pytest.fixture(scope="module")
-def dummy_tokenizer():
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
-
-
 # Dummy Reward Function
 class MockRewardFunction(BaseRewardFunction):
-    def __init__(self, name="mock_reward", reward_value=0.5):
+    def __init__(self, name='mock_reward', reward_value=0.5):
         super().__init__(name=name)
         self.reward_value = reward_value
         self.call_args_list = []  # To track calls
@@ -74,14 +77,15 @@ class MockRewardFunction(BaseRewardFunction):
     ) -> List[float]:
         self.call_args_list.append(
             {
-                "completions": completions,
-                "ground_truths": ground_truths,
-                "kwargs": kwargs,
+                'completions': completions,
+                'ground_truths': ground_truths,
+                'kwargs': kwargs,
             }
         )
         # Return a fixed reward for simplicity, length matching completions
         return [
-            float(self.reward_value + random.uniform(-0.1, 0.1)) for _ in completions
+            float(self.reward_value + random.uniform(-0.1, 0.1))
+            for _ in completions
         ]
 
 
@@ -115,12 +119,12 @@ class MockLLM(PreTrainedModel):
         """Mocks the generate function."""
         self.generate_calls.append(
             {
-                "input_ids": input_ids.cpu(),  # Keep recording CPU version for simplicity
-                "attention_mask": attention_mask.cpu(),
-                "num_return_sequences": num_return_sequences,
-                "max_new_tokens": max_new_tokens,
-                "pad_token_id": pad_token_id,
-                "kwargs": kwargs,
+                'input_ids': input_ids.cpu(),  # Keep recording CPU version for simplicity
+                'attention_mask': attention_mask.cpu(),
+                'num_return_sequences': num_return_sequences,
+                'max_new_tokens': max_new_tokens,
+                'pad_token_id': pad_token_id,
+                'kwargs': kwargs,
             }
         )
 
@@ -158,21 +162,24 @@ class MockLLM(PreTrainedModel):
 # --- Fixture using the revised MockLLM ---
 
 
+# Dummy Tokenizer
+@pytest.fixture(scope='module')
+def dummy_tokenizer():
+    tokenizer = AutoTokenizer.from_pretrained('gpt2')
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+
 @pytest.fixture
 def mock_llm(dummy_tokenizer):
-    config = AutoConfig.from_pretrained("gpt2")  # Use config from a real model
+    config = AutoConfig.from_pretrained('gpt2')  # Use config from a real model
     model = MockLLM(config, dummy_tokenizer)
     # The model will be on CPU by default after initialization
     # If you needed to test GPU interaction, you would call:
     # if torch.cuda.is_available():
     #     model.to('cuda')
     return model
-
-
-@pytest.fixture
-def mock_llm(dummy_tokenizer):
-    config = AutoConfig.from_pretrained("gpt2")  # Use config from a real model
-    return MockLLM(config, dummy_tokenizer)
 
 
 # Fixture for the Environment itself
@@ -210,23 +217,27 @@ def test_env_initialization(llm_env, dummy_tokenizer, mock_reward_fn):
     assert llm_env._tokenizer == dummy_tokenizer
     assert llm_env._reward_functions == [mock_reward_fn]
     assert llm_env._seed == 42
-    assert hasattr(llm_env, "_loader")
-    assert hasattr(llm_env, "_dataset_iterator")
+    assert hasattr(llm_env, '_loader')
+    assert hasattr(llm_env, '_dataset_iterator')
 
 
 def test_env_initialization_invalid_batch_size(
     dummy_dataset, dummy_tokenizer, mock_reward_fn
 ):
     """Tests error handling for invalid batch size."""
-    with pytest.raises(ValueError, match="Batch size must be at least 1"):
+    with pytest.raises(ValueError, match='Batch size must be at least 1'):
         LLMEnv(dummy_dataset, 0, dummy_tokenizer, [mock_reward_fn])
 
 
 def test_env_initialization_invalid_rewards(dummy_dataset, dummy_tokenizer):
     """Tests error handling for invalid reward functions."""
-    with pytest.raises(ValueError, match="reward_functions must be a non-empty list"):
+    with pytest.raises(
+        ValueError, match='reward_functions must be a non-empty list'
+    ):
         LLMEnv(dummy_dataset, 1, dummy_tokenizer, [])
-    with pytest.raises(ValueError, match="reward_functions must be a non-empty list"):
+    with pytest.raises(
+        ValueError, match='reward_functions must be a non-empty list'
+    ):
         LLMEnv(
             dummy_dataset, 1, dummy_tokenizer, [lambda x: x]
         )  # Not BaseRewardFunction
@@ -252,9 +263,9 @@ def test_env_reset(llm_env):
     assert isinstance(state.prompt[0], str)
     assert isinstance(state.ground_truth[0], str)
     assert isinstance(state.raw_data[0], dict)
-    assert "prompt" in state.raw_data[0]  # Check raw data structure
-    assert "ground_truth" in state.raw_data[0]
-    assert "topic" in state.raw_data[0]  # Check custom field
+    assert 'prompt' in state.raw_data[0]  # Check raw data structure
+    assert 'ground_truth' in state.raw_data[0]
+    assert 'topic' in state.raw_data[0]  # Check custom field
 
 
 def test_env_reset_exhaustion(dummy_dataset, dummy_tokenizer, mock_reward_fn):
@@ -275,14 +286,16 @@ def test_env_reset_exhaustion(dummy_dataset, dummy_tokenizer, mock_reward_fn):
         # Check if data is potentially different due to shuffling (though seed is fixed)
         # or at least that it didn't crash
     except StopIteration:
-        pytest.fail("DataLoader iterator did not reset correctly after exhaustion.")
+        pytest.fail(
+            'DataLoader iterator did not reset correctly after exhaustion.'
+        )
 
 
 # --- Rollout Tests ---
 
 
 @pytest.mark.parametrize(
-    "batch_size, num_return_sequences",
+    'batch_size, num_return_sequences',
     [
         (1, 1),
         (2, 1),
@@ -306,7 +319,10 @@ def test_rollout_output_structure(
         reward_functions=[mock_reward_fn],
         seed=42,
     )
-    gen_args = {"num_return_sequences": num_return_sequences, "max_new_tokens": 10}
+    gen_args = {
+        'num_return_sequences': num_return_sequences,
+        'max_new_tokens': 10,
+    }
 
     episodes = env.rollout(mock_llm, gen_args)
 
@@ -317,15 +333,15 @@ def test_rollout_output_structure(
     # Check model generate was called once
     assert len(mock_llm.generate_calls) == 1
     call_info = mock_llm.generate_calls[0]
-    assert call_info["input_ids"].shape[0] == batch_size
-    assert call_info["num_return_sequences"] == num_return_sequences
-    assert call_info["max_new_tokens"] == 10
+    assert call_info['input_ids'].shape[0] == batch_size
+    assert call_info['num_return_sequences'] == num_return_sequences
+    assert call_info['max_new_tokens'] == 10
 
     # Check reward function was called once with the correct number of items
     assert len(mock_reward_fn.call_args_list) == 1
     reward_call_info = mock_reward_fn.call_args_list[0]
-    assert len(reward_call_info["completions"]) == expected_episodes
-    assert len(reward_call_info["ground_truths"]) == expected_episodes
+    assert len(reward_call_info['completions']) == expected_episodes
+    assert len(reward_call_info['ground_truths']) == expected_episodes
 
 
 def test_rollout_data_association(
@@ -334,7 +350,10 @@ def test_rollout_data_association(
     """Tests if generated data is correctly associated with the original prompt."""
     batch_size = 1
     num_return_sequences = 3
-    gen_args = {"num_return_sequences": num_return_sequences, "max_new_tokens": 8}
+    gen_args = {
+        'num_return_sequences': num_return_sequences,
+        'max_new_tokens': 8,
+    }
 
     # Manually get the first expected item from the dataset (due to fixed seed)
     # Note: DataLoader with shuffle=True and fixed seed gives predictable order
@@ -347,12 +366,14 @@ def test_rollout_data_association(
     np.random.seed(42)
     torch.manual_seed(42)
     temp_loader = torch.utils.data.DataLoader(
-        llm_env_bs1._loader.dataset, batch_size=llm_env_bs1._batch_size, shuffle=True
+        llm_env_bs1._loader.dataset,
+        batch_size=llm_env_bs1._batch_size,
+        shuffle=True,
     )
     expected_first_item = next(iter(temp_loader))
 
-    original_prompt = expected_first_item["prompt"][0]
-    original_gt = expected_first_item["ground_truth"][0]
+    original_prompt = expected_first_item['prompt'][0]
+    original_gt = expected_first_item['ground_truth'][0]
     original_raw = expected_first_item  # The collated dict for the first item
 
     # Perform rollout
@@ -370,13 +391,15 @@ def test_rollout_data_association(
         # Check raw data association (compare dicts)
         # The raw_data in EpisodeData should be the dict for the *single* item
         # from the original batch it corresponds to.
-        assert episode.raw_data["prompt"] == original_raw["prompt"][0]
-        assert episode.raw_data["ground_truth"] == original_raw["ground_truth"][0]
-        assert episode.raw_data["topic"] == original_raw["topic"][0]
+        assert episode.raw_data['prompt'] == original_raw['prompt'][0]
+        assert (
+            episode.raw_data['ground_truth'] == original_raw['ground_truth'][0]
+        )
+        assert episode.raw_data['topic'] == original_raw['topic'][0]
 
         # Check reward calculation inputs (via mock)
         reward_call_info = mock_reward_fn.call_args_list[0]
-        assert reward_call_info["ground_truths"][i] == original_gt
+        assert reward_call_info['ground_truths'][i] == original_gt
 
         # Check completion details
         assert isinstance(episode.completion_text, str)
@@ -401,7 +424,10 @@ def test_rollout_batch_data_association(
     """Tests data association by mocking the reset method."""
     batch_size = llm_env._batch_size  # Use batch_size from the fixture
     num_return_sequences = 2
-    gen_args = {"num_return_sequences": num_return_sequences, "max_new_tokens": 6}
+    gen_args = {
+        'num_return_sequences': num_return_sequences,
+        'max_new_tokens': 6,
+    }
 
     # 1. Determine the data reset *should* return (based on seed)
     #    We still need to know what the first batch *would* be.
@@ -419,8 +445,8 @@ def test_rollout_batch_data_association(
 
     # 2. Manually prepare the EnvState that reset should return
     #    (Mimicking the logic within _prepare_initial_state)
-    prompts_to_use = expected_batch_dict["prompt"]
-    gts_to_use = expected_batch_dict["ground_truth"]
+    prompts_to_use = expected_batch_dict['prompt']
+    gts_to_use = expected_batch_dict['ground_truth']
     raw_data_list_to_use = [
         {key: expected_batch_dict[key][i] for key in expected_batch_dict}
         for i in range(len(prompts_to_use))
@@ -428,26 +454,26 @@ def test_rollout_batch_data_association(
 
     inputs = llm_env._tokenizer(
         prompts_to_use,
-        return_tensors="pt",
-        padding="longest",
+        return_tensors='pt',
+        padding='longest',
         truncation=True,
         max_length=llm_env._max_prompt_length,
         return_attention_mask=True,
     )
-    prompt_length = inputs["input_ids"].shape[1]
+    prompt_length = inputs['input_ids'].shape[1]
 
     # Create the exact EnvState object we want reset to return
     mock_state = EnvState(
         prompt=prompts_to_use,
-        input_ids=inputs["input_ids"],
-        attention_mask=inputs["attention_mask"],
+        input_ids=inputs['input_ids'],
+        attention_mask=inputs['attention_mask'],
         ground_truth=gts_to_use,
         raw_data=raw_data_list_to_use,
         prompt_length=prompt_length,
     )
 
     # 3. Mock the llm_env.reset method
-    mocker.patch.object(llm_env, "reset", return_value=mock_state)
+    mocker.patch.object(llm_env, 'reset', return_value=mock_state)
 
     # 4. Perform rollout - now it will use mock_state instead of fetching data
     episodes = llm_env.rollout(mock_llm, gen_args)
@@ -457,7 +483,9 @@ def test_rollout_batch_data_association(
 
     for i in range(len(episodes)):
         episode = episodes[i]
-        original_item_index = i // num_return_sequences  # 0, 0, 1, 1 for bs=2, nrs=2
+        original_item_index = (
+            i // num_return_sequences
+        )  # 0, 0, 1, 1 for bs=2, nrs=2
 
         # Check prompt association
         assert episode.prompt_text == prompts_to_use[original_item_index]
@@ -469,7 +497,10 @@ def test_rollout_batch_data_association(
         # Ensure mock_reward_fn was called (it should have been if rollout ran)
         assert len(mock_reward_fn.call_args_list) == 1
         reward_call_info = mock_reward_fn.call_args_list[0]
-        assert reward_call_info["ground_truths"][i] == gts_to_use[original_item_index]
+        assert (
+            reward_call_info['ground_truths'][i]
+            == gts_to_use[original_item_index]
+        )
 
         # Check reward value assignment
         assert mock_reward_fn.name in episode.reward_dict
@@ -488,8 +519,8 @@ def test_rollout_tokenization_details(
     num_return_sequences = 1
     max_new_tokens = 7
     gen_args = {
-        "num_return_sequences": num_return_sequences,
-        "max_new_tokens": max_new_tokens,
+        'num_return_sequences': num_return_sequences,
+        'max_new_tokens': max_new_tokens,
     }
 
     # 1. Call reset ONCE to get the target state we want rollout to use
@@ -499,7 +530,7 @@ def test_rollout_tokenization_details(
     prompt_tokens_from_state = target_state.input_ids[0]  # Batch size is 1
 
     # 2. Mock the env's reset method to return this specific state
-    mocker.patch.object(llm_env_bs1, "reset", return_value=target_state)
+    mocker.patch.object(llm_env_bs1, 'reset', return_value=target_state)
 
     # 3. Perform rollout - it will now use target_state internally
     episodes = llm_env_bs1.rollout(mock_llm, gen_args)
@@ -511,7 +542,9 @@ def test_rollout_tokenization_details(
     assert episode.prompt_length == prompt_len_from_state
 
     # Check prompt tokens stored match target state's tokens
-    assert torch.equal(episode.prompt_tokens.cpu(), prompt_tokens_from_state.cpu())
+    assert torch.equal(
+        episode.prompt_tokens.cpu(), prompt_tokens_from_state.cpu()
+    )
 
     # Check completion length and tokens
     # MockLLM generates exactly max_new_tokens (unless changed)
@@ -528,3 +561,130 @@ def test_rollout_tokenization_details(
 
     # Verify reset was called exactly once by rollout
     llm_env_bs1.reset.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    'batch_size, num_return_sequences, dataset',
+    [
+        # Case 1: Single prompt, single sequence
+        (
+            1,
+            1,
+            [{'prompt': 'Hello', 'ground_truth': 'World'}],
+        ),
+        # Case 2: Multiple prompts of different lengths, single sequence
+        (
+            2,
+            1,
+            [
+                {'prompt': 'Hi', 'ground_truth': 'There'},
+                {'prompt': 'This is a test', 'ground_truth': 'Indeed'},
+            ],
+        ),
+        # Case 3: Single prompt, multiple sequences
+        (
+            1,
+            3,
+            [{'prompt': 'Test', 'ground_truth': 'Case'}],
+        ),
+        # Case 4: Multiple prompts, multiple sequences
+        (
+            2,
+            3,
+            [
+                {'prompt': 'Short', 'ground_truth': 'One'},
+                {'prompt': 'Longer prompt here', 'ground_truth': 'Two'},
+            ],
+        ),
+        # Case 5: Prompt requiring truncation
+        (
+            1,
+            1,
+            [
+                {
+                    'prompt': 'This is a very long prompt to truncate',
+                    'ground_truth': 'Truncated',
+                }
+            ],
+        ),
+    ],
+)
+def test_unpadded_prompt_tokens(
+    batch_size,
+    num_return_sequences,
+    dataset,
+    dummy_tokenizer,
+    mock_reward_fn,
+    mock_llm,
+):
+    """Test that prompt_tokens in EpisodeData are unpadded and match expected tokenization."""
+    # Set a specific max_prompt_length for testing truncation
+    max_prompt_length = 5  # Small value to force truncation in Case 6
+
+    # Create LLMEnv with the parameterized dataset
+    env = LLMEnv(
+        dataset=dataset,
+        batch_size=batch_size,
+        tokenizer=dummy_tokenizer,
+        reward_functions=[mock_reward_fn],
+        max_prompt_length=max_prompt_length,
+        seed=42,
+    )
+
+    gen_args = {
+        'num_return_sequences': num_return_sequences,
+        'max_new_tokens': 10,
+    }
+
+    # Run rollout
+    episodes = env.rollout(mock_llm, gen_args)
+
+    # Verify the number of episodes
+    expected_episodes = batch_size * num_return_sequences
+    assert (
+        len(episodes) == expected_episodes
+    ), f"Expected {expected_episodes} episodes, got {len(episodes)}"
+
+    # Check each episode
+    for idx, episode in enumerate(episodes):
+        prompt_text = episode.prompt_text
+        prompt_tokens = episode.prompt_tokens
+        prompt_length = episode.prompt_length
+
+        # Tokenize the prompt text with the same settings as in _prepare_initial_state
+        expected_inputs = dummy_tokenizer(
+            prompt_text,
+            max_length=max_prompt_length,
+            truncation=True,
+            padding=False,
+            return_tensors='pt',
+        )
+        expected_tokens = expected_inputs['input_ids'][0].tolist()
+
+        # Assertion 1: prompt_tokens match the expected tokenization
+        assert prompt_tokens.tolist() == expected_tokens, (
+            f"Prompt tokens mismatch for prompt '{prompt_text}':\n"
+            f"Expected: {expected_tokens}\n"
+            f"Got: {prompt_tokens.tolist()}"
+        )
+
+        # Assertion 2: prompt_length matches the length of prompt_tokens
+        assert len(prompt_tokens) == prompt_length, (
+            f"Prompt length mismatch for prompt '{prompt_text}':\n"
+            f"Expected length: {len(prompt_tokens)}, Got: {prompt_length}"
+        )
+
+        # Assertion 3: No padding tokens in prompt_tokens (except for empty case)
+        pad_token_id = dummy_tokenizer.pad_token_id
+        if len(prompt_tokens) > 0:
+            assert (
+                pad_token_id not in prompt_tokens
+            ), f"Padding token {pad_token_id} found in prompt_tokens for prompt '{prompt_text}': {prompt_tokens.tolist()}"
+        else:
+            # For empty prompt, ensure prompt_tokens is empty
+            assert (
+                prompt_text == ''
+            ), 'Non-empty prompt text with empty prompt_tokens'
+            assert (
+                len(prompt_tokens) == 0
+            ), f"Expected empty prompt_tokens, got {prompt_tokens.tolist()}"
