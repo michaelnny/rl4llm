@@ -1,17 +1,10 @@
-# rl4llm/logging/manager.py
-
-import html
-import json
 import logging
 import os
-import random
 import time
-from collections import defaultdict
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
-import pandas as pd
 import torch
 import yaml
 
@@ -77,7 +70,7 @@ class LoggingManager:
         self.is_master = dist_manager.is_master
         self.world_size = dist_manager.world_size
 
-        # 1. Setup Console Logger
+        # Setup Console Logger
         log_level_str = (
             log_level
             or os.environ.get(
@@ -89,7 +82,7 @@ class LoggingManager:
             f"LoggingManager initializing on Rank {self.rank}..."
         )
 
-        # 2. Initialize Handlers (pass logger)
+        # Initialize Handlers
         self.metric_handler = MetricHandler(
             dist_manager=self.dist_manager,
             user_aggregation_config=metrics_aggregation_config,
@@ -102,7 +95,6 @@ class LoggingManager:
             sample_buffer_size=sample_buffer_size,
             logger=self.console_logger,
         )
-        # BackendHandler now creates its own writer internally
         self.backend_handler = BackendHandler(
             log_dir=self.log_dir,
             enable_wandb=enable_wandb,
@@ -111,7 +103,6 @@ class LoggingManager:
             logger=self.console_logger,
         )
 
-        # Store handlers for easier management (e.g., closing)
         self._handlers: List[BaseHandler] = [
             self.metric_handler,
             self.sample_handler,
@@ -248,11 +239,9 @@ class LoggingManager:
                 self.error(
                     f"Error closing handler {type(handler).__name__}: {e}"
                 )
-        if self.world_size > 1:
-            self.dist_manager.barrier()  # Final barrier after all cleanup
+        self.dist_manager.barrier()
         self.info(f"LoggingManager closed on Rank {self.rank}.")
 
-    # --- Console Logging Passthrough (Unchanged) ---
     def info(self, message: str) -> None:
         if self.is_master:
             self.console_logger.info(message)
@@ -265,171 +254,3 @@ class LoggingManager:
 
     def debug(self, message: str) -> None:
         self.console_logger.debug(message)
-
-
-# --- Testing Code (Adjust BackendHandler instantiation) ---
-if __name__ == '__main__':
-    # Keep MockConfig and MockDistributedManager as they were in the previous refactor
-
-    class MockConfig:  # Ensure it has needed attrs for BackendHandler
-        project_name = 'test_logging_final'
-        learning_rate = 1e-4
-        batch_size = 8
-        env_type = 'mock'
-        seed = 42
-        run_name = f"test_run_{time.strftime('%H%M%S')}"  # Example run name
-        run_id = None  # Let WandB generate or set manually if needed
-
-        # Make it dict-like
-        def __iter__(self):
-            yield from vars(self).items()
-
-        def items(self):
-            return self.__iter__()
-
-        def keys(self):
-            return vars(self).keys()
-
-        def __getitem__(self, key):
-            return getattr(self, key)
-
-    # MockDistributedManager as before...
-    class MockDistributedManager:  # Simplified mock focusing on core needs
-        def __init__(self, rank=0, world_size=1):
-            self._rank = rank
-            self._world_size = world_size
-            self.logger = setup_logger(self._rank, 'DEBUG')
-            self.logger = logging.LoggerAdapter(
-                self.logger, {'rank': self.global_rank}
-            )
-            self._device = torch.device('cpu')  # Mock device
-            self.logger.info(
-                f"[MockDist] Rank={rank}, WorldSize={world_size}, Device={self._device}"
-            )
-
-        @property
-        def device(self):
-            return self._device
-
-        @property
-        def global_rank(self):
-            return self._rank
-
-        @property
-        def world_size(self):
-            return self._world_size
-
-        @property
-        def is_master(self):
-            return self._rank == 0
-
-        def barrier(self):
-            time.sleep(0.001)
-
-        def gather_object(self, obj: Any, dst: int = 0) -> Optional[List[Any]]:
-            if self.global_rank == dst:
-                return [
-                    obj for _ in range(self.world_size)
-                ]  # Simulate receiving from all
-            return None
-
-        def all_gather_object(self, obj: Any) -> List[Any]:
-            return [obj for _ in range(self.world_size)]
-
-        def teardown(self):
-            self.logger.info('[MockDist] Teardown.')
-
-    print('--- Starting Final Refactored LoggingManager Test ---')
-
-    rank = 0
-    world_size = 1
-    dist_manager_mock = MockDistributedManager(rank=rank, world_size=world_size)
-    config = MockConfig()
-    log_dir = './test_runs/single_process'
-
-    if rank == 0 and os.path.exists(log_dir):
-        import shutil
-
-        shutil.rmtree(log_dir)
-    # No need to create log_dir here, handlers might do it if needed (e.g. BackendHandler)
-
-    logger = LoggingManager(
-        config,
-        dist_manager_mock,
-        log_dir,  # Pass base log dir
-        enable_wandb=False,
-        enable_tensorboard=True,
-        sample_file_format='jsonl',
-        log_sample_interval=2,
-        max_backend_samples=3,
-        log_level='DEBUG',
-    )
-
-    # --- Training Loop Simulation (identical to previous refactor test) ---
-    num_steps = 5
-    global_step_counter = 0
-    for step in range(num_steps):
-        logger.debug(
-            f"--- Start Step {step} (Global: {global_step_counter}) ---"
-        )
-        with logger.train_scope():
-            loss = 1.0 / (global_step_counter + 1) + random.random() * 0.1
-            accuracy = (
-                0.8 + (global_step_counter * 0.01) + random.random() * 0.01
-            )
-            lr = config.learning_rate * (0.9**step)
-            logger.log_scalar('loss', loss)
-            logger.log_metrics_dict({'accuracy': accuracy, 'learning_rate': lr})
-            for i in range(3):
-                logger.log_sample(
-                    'generation',
-                    {
-                        'prompt': f"TrP{global_step_counter}_{i}",
-                        'resp': f"TrR{global_step_counter}_{i}",
-                        'score': accuracy * 10 + i,
-                    },
-                    global_step_counter,
-                )
-            with logger.timer('train_batch_time'):
-                time.sleep(0.01 + random.random() * 0.01)
-
-        if step % 2 == 0:
-            logger.info(f"--- Running Eval at Step {step} ---")
-            with logger.eval_scope():
-                eval_loss = loss * 1.1 + random.random() * 0.05
-                eval_perp = np.exp(eval_loss)
-                eval_rew = random.uniform(5, 10)
-                logger.log_scalar('loss', eval_loss)
-                logger.log_metrics_dict(
-                    {
-                        'perplexity': eval_perp,
-                        'reward': eval_rew,
-                        f"reward_cls_{random.randint(0, 1)}": eval_rew
-                        + random.random(),
-                    }
-                )
-                for i in range(2):
-                    logger.log_sample(
-                        'validation',
-                        {
-                            'prompt': f"EvP{global_step_counter}_{i}",
-                            'resp': f"EvR{global_step_counter}_{i}",
-                        },
-                        global_step_counter,
-                    )
-                with logger.timer('eval_total_time'):
-                    time.sleep(0.02 + random.random() * 0.01)
-
-        logger.log_scalar('buffer_size', random.randint(100, 200))
-        logger.aggregate_and_log(global_step_counter)
-        logger.debug(f"--- End Step {step} (Global: {global_step_counter}) ---")
-        global_step_counter += 1
-
-    logger.close()
-    print(f"[Rank {rank}] Finished final refactored test.")
-    print(f"Logs saved in: {os.path.abspath(log_dir)}")
-    print(
-        "Check subdirectories: 'wandb' or 'tensorboard', 'train/samples', 'eval/samples', 'general/samples'"
-    )
-
-    print('\n--- Final Refactored LoggingManager Test Complete ---')

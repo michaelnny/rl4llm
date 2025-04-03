@@ -34,14 +34,13 @@ class BackendHandler(BaseHandler):
             is_master: Boolean indicating if the current process is the master.
             logger: Logger instance.
         """
-        super().__init__(logger)  # Initialize base class
+        super().__init__(logger)
         self.is_master = is_master
         self.log_dir = log_dir
         self._writer: Optional[Any] = None
         self._can_log_flag: bool = False
 
         if self.is_master:
-            # Move writer setup logic here
             self._writer = self._setup_backend_writer(
                 enable_wandb, enable_tensorboard
             )
@@ -58,7 +57,7 @@ class BackendHandler(BaseHandler):
         backend_writer = None
         backend_name = 'None'
 
-        # WandB Initialization (if enabled)
+        # WandB Initialization
         if enable_wandb:
             try:
                 import wandb
@@ -104,7 +103,7 @@ class BackendHandler(BaseHandler):
                     f"Failed to initialize WandB: {e}. Disabling WandB logging."
                 )
 
-        # TensorBoard Initialization (if enabled and WandB failed or wasn't enabled)
+        # TensorBoard Initialization
         if enable_tensorboard and not backend_writer:
             try:
                 from torch.utils.tensorboard import SummaryWriter
@@ -186,7 +185,7 @@ class BackendHandler(BaseHandler):
         try:
             log_tag = f"samples/{tag}"
             if self._is_wandb_writer():
-                import wandb  # Import locally
+                import wandb
 
                 html_text = formatted_text.replace('\n\n', '<br><br>').replace(
                     '\n', '<br>'
@@ -225,7 +224,6 @@ class BackendHandler(BaseHandler):
                 f"Failed to log hyperparameters to backend: {e}"
             )
 
-    # Implement the abstract 'close' method
     def close(self) -> None:
         """Closes the backend writer if it exists."""
         if not self._can_log_flag or not self._writer:

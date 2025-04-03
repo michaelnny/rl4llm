@@ -1,7 +1,5 @@
 import logging
 import os
-import random
-from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -38,7 +36,6 @@ class SampleFileLogger:
 
     def __init__(
         self,
-        # Changed save_dir to phase_dir for clarity
         phase_dir: str,
         rank: int,
         file_format: str = 'parquet',
@@ -120,13 +117,10 @@ class SampleFileLogger:
                                    distinguishing 'tag' if needed.
             step (int): The current step or iteration number.
         """
-        # Add step information to the data
         log_entry = {'step': step, **data}
 
-        # Add entry to the single buffer
         self._buffer.append(log_entry)
 
-        # Flush if buffer reaches the specified size
         if len(self._buffer) >= self.buffer_size:
             self._flush()
 
@@ -148,16 +142,13 @@ class SampleFileLogger:
             f"Rank {self.rank}: Flushing {len(self._buffer)} records to {self.save_path} (format: {self.file_format})."
         )
         new_df = pd.DataFrame(self._buffer)
-        new_table = pa.Table.from_pandas(
-            new_df, preserve_index=False
-        )  # Convert new data to Arrow Table
+        new_table = pa.Table.from_pandas(new_df, preserve_index=False)
 
         try:
             file_exists = os.path.exists(self.save_path)
 
             if self.file_format == 'parquet':
                 if file_exists:
-                    # --- PARQUET APPEND FIX ---
                     # Read the existing Parquet file into an Arrow Table
                     try:
                         existing_table = pq.read_table(self.save_path)
@@ -322,7 +313,7 @@ class SampleHandler(BaseHandler):
         if phase not in self._file_loggers:
             # This might happen if phase wasn't in the initial list
             self._logger.warning(f"No logger configured for phase '{phase}'. ")
-            return  # Skip logging if no logger exists for the phase
+            return
 
         try:
             # Get the logger for the current phase
@@ -333,11 +324,9 @@ class SampleHandler(BaseHandler):
                 f"Logged sample to file [Phase: {phase}, Rank: {self.rank}] Step: {step}"
             )
         except Exception as e:
-            # Catch potential errors during the log call (e.g., buffer full + flush error)
             self._logger.error(
                 f"Failed to log sample file [Phase: {phase}, Rank: {self.rank}"
             )
-            # Depending on severity, might re-raise or just log
 
     def flush(self) -> None:
         """Flushes all underlying phase-specific file loggers."""
@@ -359,7 +348,7 @@ class SampleHandler(BaseHandler):
         self._logger.info(
             f"Closing sample file loggers for rank {self.rank}..."
         )
-        self.flush()  # Ensure all data is written before closing
+        self.flush()
         for phase, file_logger in self._file_loggers.items():
             try:
                 file_logger.close()
@@ -367,5 +356,5 @@ class SampleHandler(BaseHandler):
                 self._logger.warning(
                     f"Error closing sample logger for phase '{phase}' on rank {self.rank}: {e}"
                 )
-        self._file_loggers.clear()  # Clear the dictionary
+        self._file_loggers.clear()
         self._logger.debug(f"SampleHandler closed for rank {self.rank}.")

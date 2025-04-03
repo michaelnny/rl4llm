@@ -48,7 +48,7 @@ def test_log_scalar_non_finite(handler, caplog):
 
 def test_get_aggregation_methods_direct_match(handler):
     methods = handler._get_aggregation_methods('reward')
-    assert methods == ['mean', 'std', 'p90', 'min', 'max']
+    assert methods == ['mean', 'std', 'p90']
 
 
 def test_get_aggregation_methods_regex_match(handler):
@@ -68,8 +68,6 @@ def test_aggregate_multiple_values(handler):
     result = handler.aggregate()
     assert np.isclose(result['reward_mean'], 2.0)
     assert np.isclose(result['reward_p90'], 2.8)
-    assert np.isclose(result['reward_min'], 1.0)
-    assert np.isclose(result['reward_max'], 3.0)
 
 
 def test_clear_buffer(handler):

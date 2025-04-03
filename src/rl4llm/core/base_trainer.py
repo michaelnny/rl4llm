@@ -133,6 +133,7 @@ class RLTrainer(ABC, TrainingMixin):
         token_metric_key = f"tokens/{phase}"
         for ep in samples:
             data_to_log = {
+                'rank': self.dist_manager.global_rank,
                 'prompt_text': ep.prompt_text,
                 'prompt_length': ep.prompt_length,
                 'completion_length': ep.completion_length,

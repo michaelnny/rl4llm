@@ -48,8 +48,9 @@ class MetricHandler(BaseHandler):
     BASE_DEFAULT_METRICS_AGGREGATION_CONFIG = {
         # Non-regex keywords
         'prompt_length': ['mean', 'std'],
-        'completion_length': ['mean', 'std', 'p90', 'p99'],
-        'reward': ['mean', 'std', 'p90', 'min', 'max'],
+        'completion_length': ['mean', 'std', 'p90'],
+        'reward': ['mean', 'std', 'p90'],
+        'accuracy_reward': ['mean', 'std', 'p90'],
         'loss': ['mean'],
         'learning_rate': ['last'],
         'lr': ['last'],
@@ -65,12 +66,10 @@ class MetricHandler(BaseHandler):
         'policy_update': ['last'],
         'global_step': ['last'],
         # Regex patterns
-        # r'.*_loss$': ['mean'],
-        # r'.*_reward$': ['mean', 'std'],
+        r'.*_reward$': ['mean', 'std'],
         r'.*_count$': ['sum'],
         r'.*_total$': ['sum'],
-        # r'.*_update$': ['sum'],
-        # r'.*_episodes$': ['sum'],
+        r'.*_update$': ['sum'],
         r'^time/.*$': ['sum'],
         # Default
         'default': ['mean'],
@@ -283,7 +282,7 @@ class MetricHandler(BaseHandler):
                     for key, values in rank_buffer.items():
                         combined_metrics[key].extend(
                             v for v in values if np.isfinite(v)
-                        )  # Filter non-finite
+                        )
 
             self._logger.debug(
                 f"Master combined metrics for keys: {sorted(list(all_metric_keys))}"
@@ -310,9 +309,11 @@ class MetricHandler(BaseHandler):
                             computed_value = aggregator_func(values_array)
                             log_key = key
                             if (
-                                method_name != 'mean'
-                                or len(aggregation_methods) > 1
-                            ):
+                                method_name != 'last'
+                                or not key.startswith('time/')
+                                or not key.endswith('count')
+                                or not key.endswith('total')
+                            ) and len(aggregation_methods) > 1:
                                 log_key = f"{key}_{method_name}"
 
                             if np.isfinite(computed_value):
