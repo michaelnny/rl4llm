@@ -154,9 +154,9 @@ class RLConfig(BaseModel):
 #     explore_init_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Initial exploration epsilon')
 #     explore_min_epsilon: Optional[float] = Field(0.0, ge=0.0, le=1.0, description='Minimum exploration epsilon after decay')
 #     explore_decay_steps: Optional[int] = Field(0, ge=0, le=1000000, description='Exploration epsilon decay steps')
-#     explore_start_steps: Optional[int] = Field(0, ge=0, le=30, description='Random start steps to do exploration')
+#     explore_steps: Optional[int] = Field(0, ge=0, le=30, description='Random start steps to do exploration')
 #     explore_top_k: Optional[int] = Field(00, ge=0, le=500, description='Unified top-k for both exploration')
-#     explore_max_replacements: Optional[int] = Field(
+#     replace_max_per_seq: Optional[int] = Field(
 #         0, ge=0, le=10, description='Maximum number of token replacements to the same sequence during exploration'
 #     )
 

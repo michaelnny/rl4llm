@@ -1,1 +1,2 @@
-from .llm_env import LLMEnv, BaseRewardFunction, EpisodeData
+from .explore_env import ExploreLLMEnv
+from .llm_env import BaseRewardFunction, EpisodeData, LLMEnv

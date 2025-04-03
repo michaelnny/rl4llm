@@ -1,4 +1,5 @@
 import math
+import random
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import deepspeed
@@ -13,13 +14,70 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from rl4llm.core.base_trainer import RLConfig, RLTrainer
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.envs import EpisodeData, LLMEnv
+from rl4llm.generations import ExploreLLMGenerator
 from rl4llm.logging import LoggingManager
 
 
 class GRPOConfig(RLConfig):
     """GRPO config instance for RL LLM"""
 
-    ...
+    xml_format: Optional[bool] = Field(
+        False, description='Check R1 style XML format for compute reward'
+    )
+
+    # enhancements to encourage exploration
+    group_temperature: Optional[bool] = Field(
+        False,
+        description='Use group temperatures to sample tokens during generation',
+    )
+    min_temperature: Optional[float] = Field(
+        0.6,
+        ge=0.0,
+        le=1.0,
+        description='Minimum sampling temperature for group temperature',
+    )
+    max_temperature: Optional[float] = Field(
+        1.2,
+        gt=0.0,
+        le=2.0,
+        description='Maximum sampling temperature for group temperature',
+    )
+    explore_init_epsilon: Optional[float] = Field(
+        0.0, ge=0.0, le=1.0, description='Initial exploration epsilon'
+    )
+    explore_min_epsilon: Optional[float] = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description='Minimum exploration epsilon after decay',
+    )
+    explore_decay_steps: Optional[int] = Field(
+        0, ge=0, le=1000000, description='Exploration epsilon decay steps'
+    )
+    explore_steps: Optional[int] = Field(
+        0, ge=0, le=30, description='Random start steps to do exploration'
+    )
+    explore_top_k: Optional[int] = Field(
+        00, ge=0, le=500, description='Unified top-k for both exploration'
+    )
+    replace_max_per_seq: Optional[int] = Field(
+        0,
+        ge=0,
+        le=10,
+        description='Maximum number of token replacements to the same sequence during exploration',
+    )
+    replace_threshold: Optional[float] = Field(
+        0,
+        ge=0,
+        le=1.0,
+        description='Source token probability scores to consider for replacement',
+    )
+    replace_prob: Optional[float] = Field(
+        0,
+        ge=0,
+        le=1.0,
+        description='Probability to replace source token with target token if conditions are meet',
+    )
 
 
 class TransitionData(BaseModel):
@@ -50,27 +108,27 @@ class TransitionData(BaseModel):
         description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
 
-    @model_validator(mode='after')
-    def check_tensor_shapes(cls, values):
-        tensors = [
-            values.states,
-            values.actions,
-            values.loss_mask,
-            values.pi_logprobs,
-            values.ref_logprobs,
-            values.advantages,
-        ]
+    # @model_validator(mode='after')
+    # def check_tensor_shapes(cls, values):
+    #     tensors = [
+    #         values.states,
+    #         values.actions,
+    #         values.loss_mask,
+    #         values.pi_logprobs,
+    #         values.ref_logprobs,
+    #         values.advantages,
+    #     ]
 
-        # Ensure all tensors are of the same shape
-        tensor_shapes = [
-            tensor.shape if isinstance(tensor, torch.Tensor) else None
-            for tensor in tensors
-        ]
+    #     # Ensure all tensors are of the same shape
+    #     tensor_shapes = [
+    #         tensor.shape if isinstance(tensor, torch.Tensor) else None
+    #         for tensor in tensors
+    #     ]
 
-        if len(set(tensor_shapes)) > 1:
-            raise ValueError(f"Tensors have mismatched shapes: {tensor_shapes}")
+    #     if len(set(tensor_shapes)) > 1:
+    #         raise ValueError(f"Tensors have mismatched shapes: {tensor_shapes}")
 
-        return values
+    #     return values
 
     class Config:
         arbitrary_types_allowed = True
@@ -103,6 +161,8 @@ class GRPOTrainer(RLTrainer):
             seed=seed,
         )
 
+        self.config: GRPOConfig = config
+
     def _initialize_trainer(self):
         """Initialize GRPO specific settings"""
 
@@ -115,6 +175,76 @@ class GRPOTrainer(RLTrainer):
         self.group_reward_std_threshold = torch.std(
             _dummy_rewards, unbiased=False
         )
+
+        # For custom exploring start where we skip do exploration for the <think> token
+        self.think_token_len = (
+            len(self.tokenizer.encode('<think>'))
+            if self.config.xml_format
+            else 0
+        )
+
+    #     self.explore_generator = self._create_explore_generator(
+    #         self.policy_model
+    #     )
+
+    # def _create_explore_generator(
+    #     self, policy_model: PreTrainedModel
+    # ) -> ExploreLLMGenerator:
+    #     """Create a custom generator wrapped around the policy model, which supports group temperature and stochastic sampling"""
+    #     # Try replacing the end token with "Wait" for some samples
+    #     source_tokens = []
+    #     # # Determine which tokens should be replaced based on format
+    #     if self.config.xml_format:
+    #         source_tokens.append(self.tokenizer.encode('</think>')[0])
+    #         source_tokens.append(self.tokenizer.encode(' </think>')[0])
+    #         source_tokens.append(self.tokenizer.encode(':</think>')[0])
+    #         source_tokens.append(self.tokenizer.encode('.</think>')[0])
+    #     else:
+    #         source_tokens.append(self.tokenizer.eos_token_id)
+
+    #     self.special_tokens = ['Wait']
+    #     target_tokens = [
+    #         self.tokenizer.encode(f' {kwd}')[0] for kwd in self.special_tokens
+    #     ]
+
+    #     # we should only make the replacement for reasoning tokens
+    #     prevent_patterns = [
+    #         self.tokenizer.encode('</think>'),
+    #         self.tokenizer.encode(' </think>'),
+    #         self.tokenizer.encode('<answer>'),
+    #     ]
+
+    # return ExploreLLMGenerator(
+    #     model=policy_model,
+    #     tokenizer=self.tokenizer,
+    #     device=self.device,
+    #     source_tokens=source_tokens,
+    #     target_tokens=target_tokens,
+    #     prevent_patterns=prevent_patterns,
+    # )
+
+    def _get_exploration_epsilon(self) -> float:
+        """Computes exploration epsilon based on the current iteration step count."""
+        if self.config.explore_decay_steps == 0:
+            self.explore_epsilon = 0.0
+        elif self.iteration_count >= self.config.explore_decay_steps:
+            self.explore_epsilon = self.config.explore_min_epsilon
+        else:
+            # Cosine decay schedule
+            progress = self.iteration_count / self.config.explore_decay_steps
+            cosine_decay = (
+                0.5 * (1 + torch.cos(torch.tensor(progress * torch.pi))).item()
+            )
+            self.explore_epsilon = (
+                self.config.explore_min_epsilon
+                + (
+                    self.config.explore_init_epsilon
+                    - self.config.explore_min_epsilon
+                )
+                * cosine_decay
+            )
+
+        return self.explore_epsilon
 
     @torch.inference_mode()
     def _generate_group_samples(self) -> List[TransitionData]:
@@ -139,7 +269,44 @@ class GRPOTrainer(RLTrainer):
             'output_logits': False,
             'return_dict_in_generate': True,
             'return_legacy_cache': False,
+            'explore_probability': self._get_exploration_epsilon(),  # control explore env custom logit
         }
+
+        # enable_exploring = (
+        #     (self.config.explore_steps > 0)
+        #     and (explore_prob > 0)
+        #     and (random.random() < explore_prob)
+        # )
+
+        # if enable_exploring:
+        #     llm_generator = self.explore_generator
+
+        # # apply group temperature
+        # if self.config.group_temperature:
+        #     # Spread temperature values according to self.config.group_size, where 0.0 means greedy sampling
+        #     # this idea is similar how we do it in distributed RL training in classical RL
+        #     # where we have multiple agents running in parallel, some agents are more exploratory than others
+        #     temperature = torch.linspace(
+        #         self.config.min_temperature,
+        #         self.config.max_temperature,
+        #         steps=self.config.group_size,
+        #         dtype=self.torch_dtype,
+        #         device=self.device,
+        #     )
+        #     # Round to 2 decimal places
+        #     gen_kwargs['temperature'] = torch.round(temperature, decimals=2)
+
+        # # apply exploring start
+        # gen_kwargs['explore_steps'] = self.config.explore_steps
+        # gen_kwargs['explore_skip_n'] = self.think_token_len
+        # gen_kwargs['explore_top_k'] = self.config.explore_top_k
+
+        # # apply token swap: like "</think>" -> "Wait"
+        # if self.config.replace_max_per_seq > 0:
+        #     gen_kwargs['explore_replace_prob'] = explore_prob
+        #     gen_kwargs['replace_max_per_seq'] = (
+        #         self.config.replace_max_per_seq
+        #     )
 
         outputs = self.train_env.rollout(self.policy_model, gen_kwargs)
 
@@ -180,7 +347,7 @@ class GRPOTrainer(RLTrainer):
                 f"Skipping samples with identical rewards, \
                     minimum group reward std: {self.group_reward_std_threshold}"
             )
-            self.logger.log_scalar('generation/skipped_sample', len(rewards))
+            self.logger.log_scalar('others/skipped_sample_count', len(rewards))
             return []
 
         # Training specific processing
@@ -534,43 +701,6 @@ class GRPOTrainer(RLTrainer):
         for _ in range(local_rollout_size):
             outputs = self.eval_env.rollout(self.policy_model, eval_gen_kwargs)
             self.log_batch_episodes(self._eval_phase, outputs, self.global_step)
-
-    def _eval_collate_fn(self, batch: List[Dict]) -> Dict:
-        """Collate function for DataLoader during evaluation"""
-        pad_token_id = self.tokenizer.pad_token_id
-
-        # Extract input_ids and attention_mask as lists of tensors
-        input_ids_list = [sample['input_ids'] for sample in batch]
-        attention_mask_list = [sample['attention_mask'] for sample in batch]
-
-        # Dynamically pad to the longest sequence in the batch
-        input_ids = pad_sequence(
-            input_ids_list,
-            batch_first=True,
-            padding_value=pad_token_id,
-            padding_side='left',
-        )
-        attention_mask = pad_sequence(
-            attention_mask_list,
-            batch_first=True,
-            padding_value=0,
-            padding_side='left',
-        )
-
-        # Collect other fields
-        questions = [sample['question'] for sample in batch]
-        ground_truths = [sample['ground_truth'] for sample in batch]
-        task_types = [sample['task_type'] for sample in batch]
-
-        return {
-            'input_ids': input_ids.to(
-                self.device
-            ),  # Shape: [batch_size, max_seq_len_in_batch]
-            'attention_mask': attention_mask,
-            'questions': questions,
-            'ground_truths': ground_truths,
-            'task_types': task_types,
-        }
 
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""

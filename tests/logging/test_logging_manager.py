@@ -53,16 +53,6 @@ class FakeDistManager:
 
 
 # ------------------------------------------------
-# Fake Configuration Object
-# ------------------------------------------------
-class FakeConfig:
-    def __init__(self):
-        self.project_name = 'fake_project'
-        self.run_name = 'fake_run'
-        self.run_id = 'fake_run_id'
-
-
-# ------------------------------------------------
 # Pytest Fixture for LoggingManager Instance
 # ------------------------------------------------
 @pytest.fixture
@@ -76,12 +66,10 @@ def logging_manager(tmp_path, monkeypatch):
     lm.LoggingManager.TRAIN = 'train'
     lm.LoggingManager.EVAL = 'eval'
 
-    fake_config = FakeConfig()
     fake_dist = FakeDistManager(is_master=True, world_size=1, global_rank=0)
     log_dir = str(tmp_path / 'logs')
     # Create an instance with a small sample buffer and sample interval to ease testing.
     return lm.LoggingManager(
-        config=fake_config,
         dist_manager=fake_dist,
         log_dir=log_dir,
         metrics_aggregation_config=None,

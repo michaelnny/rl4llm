@@ -156,6 +156,10 @@ class LoggingManager:
                     params, sort_keys=False, indent=2, width=120
                 )
                 self.info(f"Hyperparameters:\n---\n{params_str.strip()}\n---")
+
+                config_file_path = os.path.join(self.log_dir, 'job_params.yaml')
+                with open(config_file_path, 'w') as f:
+                    yaml.dump(params, f, sort_keys=False, indent=2, width=120)
             except Exception:
                 self.info(f"Hyperparameters: {params}")
 

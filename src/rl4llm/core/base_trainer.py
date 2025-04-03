@@ -130,6 +130,7 @@ class RLTrainer(ABC, TrainingMixin):
             )
 
         metric_key = f"objective/{phase}"
+        token_metric_key = f"tokens/{phase}"
         for ep in samples:
             data_to_log = {
                 'prompt_text': ep.prompt_text,
@@ -144,14 +145,15 @@ class RLTrainer(ABC, TrainingMixin):
                 data_to_log['ground_truth'] = ep.raw_data['ground_truth']
 
             self.logger.log_sample(phase, data_to_log, step)
-            self.logger.log_scalar(
-                f"{metric_key}/completion_length", ep.completion_length
-            )
-            self.logger.log_scalar(
-                f"{metric_key}/prompt_length", ep.prompt_length
-            )
             for k, v in ep.reward_dict.items():
                 self.logger.log_scalar(f"{metric_key}/{k}", v)
+            # Token usage
+            self.logger.log_scalar(
+                f"{token_metric_key}/completion_length", ep.completion_length
+            )
+            self.logger.log_scalar(
+                f"{token_metric_key}/prompt_length", ep.prompt_length
+            )
 
     @abstractmethod
     def generate_experience(self) -> List[Any]:
@@ -215,21 +217,6 @@ class RLTrainer(ABC, TrainingMixin):
     ) -> Dict[str, Any]:
         """
         Collate function for training loader
-
-        Args:
-            batch (List[Dict[str, Any]]): Current batch samples.
-
-        Returns:
-            Dict[str, Any]: A dictionary containing evaluation data for current batch.
-        """
-        pass
-
-    @abstractmethod
-    def _eval_collate_fn(
-        self, batch: List[Dict[str, Any]], **kwargs: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Collate function for evaluation loader
 
         Args:
             batch (List[Dict[str, Any]]): Current batch samples.
@@ -368,7 +355,7 @@ class RLTrainer(ABC, TrainingMixin):
         self.logger.info('Training finished.')
         # Final checkpoint save
         self.save_checkpoint(self.config.max_steps)
-        self.logger.close()
+        self.on_exit()
 
     def on_exit(self):
         """Handles exits like kill of process"""

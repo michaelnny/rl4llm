@@ -10,7 +10,7 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 logger = logging.getLogger(__name__)
 
 
-class StochasticLLMGenerator:
+class ExploreLLMGenerator:
     """
     A custom class for stochastic text generation using a HF language model (LLM).
     Supports batch-specific temperatures, exploring start, and special token replacement.
@@ -107,7 +107,7 @@ class StochasticLLMGenerator:
             # Pass input_ids directly now assuming _has_pattern handles batching
             pattern_found |= self._has_pattern(generated_ids, pattern)
 
-        return ~pattern_found  # True if NO blocking pattern was found
+        return ~pattern_found
 
     def _check_correctness(
         self,
@@ -132,7 +132,7 @@ class StochasticLLMGenerator:
         )
 
         if correctness_callback is None:
-            return incorrect_mask  # Assume correct if no callback
+            return ~incorrect_mask  # Assume all incorrect if no callback
 
         indices_to_check = torch.where(can_replace)[0]
         if indices_to_check.numel() == 0:
@@ -155,8 +155,7 @@ class StochasticLLMGenerator:
                 print(
                     f"Warning: Correctness callback failed for sequence {original_index}: {e}"
                 )
-                # Decide behavior on error: assume correct or incorrect? Assuming correct here.
-                incorrect_mask[original_index] = False
+                incorrect_mask[original_index] = True
 
         return incorrect_mask
 
@@ -184,9 +183,7 @@ class StochasticLLMGenerator:
             or can_replace.sum() == 0
             or replace_prob <= 0.0
         ):
-            return next_tokens, torch.zeros_like(
-                can_replace
-            )  # Return False mask
+            return next_tokens, torch.zeros_like(can_replace)
 
         batch_size = next_tokens.size(0)
         device = next_tokens.device
@@ -217,14 +214,14 @@ class StochasticLLMGenerator:
         return (
             modified_tokens,
             final_replace_mask,
-        )  # Return the actual mask used
+        )
 
     def _determine_replacement_eligibility(
         self,
         generated_ids: torch.Tensor,  # Use generated_ids (excluding prompt)
         next_tokens: torch.Tensor,
         replacement_counts: torch.Tensor,
-        explore_max_replacements: int,
+        replace_max_per_seq: int,
         correctness_callback: Optional[Callable] = None,
     ) -> torch.Tensor:
         """
@@ -234,7 +231,7 @@ class StochasticLLMGenerator:
             generated_ids (torch.Tensor): Generated token IDs of shape [batch_size, seq_len].
             next_tokens (torch.Tensor): Batch of next token IDs of shape [batch_size].
             replacement_counts (torch.Tensor): Count of replacements already made.
-            explore_max_replacements (int): Maximum number of replacements allowed.
+            replace_max_per_seq (int): Maximum number of replacements allowed.
             correctness_callback (Optional[Callable]): Function to evaluate correctness.
 
         Returns:
@@ -255,7 +252,7 @@ class StochasticLLMGenerator:
             return torch.zeros_like(next_tokens, dtype=torch.bool)
 
         # Base eligibility mask: is a source token AND hasn't reached max replacements
-        below_max_replacements = replacement_counts < explore_max_replacements
+        below_max_replacements = replacement_counts < replace_max_per_seq
         can_replace_base = is_source_token & below_max_replacements
 
         # Get indices where base conditions are met to perform further checks
@@ -313,7 +310,6 @@ class StochasticLLMGenerator:
         Returns:
             Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Updated input_ids, attention_mask, unfinished_sequences.
         """
-        # Assertions remain useful
         assert input_ids.dim() == 2
         assert next_tokens.dim() == 1 and unfinished_sequences.dim() == 1
         assert (
@@ -392,9 +388,7 @@ class StochasticLLMGenerator:
         # Gather the actual token IDs using the sampled relative indices
         next_tokens = torch.gather(
             top_k_indices, dim=1, index=sampled_relative_indices
-        ).squeeze(
-            -1
-        )  # Shape: [batch_size]
+        ).squeeze(-1)
 
         return next_tokens
 
@@ -427,7 +421,6 @@ class StochasticLLMGenerator:
         if zero_temp_mask.all():
             return token_logits.argmax(dim=-1)
 
-        # --- Apply Temperature Scaling ---
         # Use unsqueezed temperature for broadcasting. Clamp to avoid division by zero.
         scaled_logits = torch.where(
             temperature.unsqueeze(1) > 0,
@@ -435,7 +428,6 @@ class StochasticLLMGenerator:
             token_logits,  # Keep original logits if temp is zero (already handled, but safe)
         )
 
-        # --- Apply Top-K Filtering ---
         if top_k > 0:
             k = min(top_k, vocab_size)
             # Get the values and indices of the top-k logits
@@ -447,28 +439,21 @@ class StochasticLLMGenerator:
                 min_vals, dim=-1, index=top_k_indices, src=top_k_values
             )
 
-        # --- Apply Top-P (Nucleus) Filtering ---
         if 0 < top_p < 1.0:
-            # Sort logits in descending order
             sorted_logits, sorted_indices = torch.sort(
                 scaled_logits, descending=True, dim=-1
             )
-            # Calculate cumulative probabilities
             cumulative_probs = torch.cumsum(
                 F.softmax(sorted_logits, dim=-1), dim=-1
             )
 
             # Create a mask for tokens to remove (those exceeding cumulative P)
-            # Keep tokens where cumulative probability is <= top_p
-            # Also important: *always keep at least the top token*
             sorted_indices_to_remove = cumulative_probs > top_p
             # Shift the mask to the right to ensure the first element is always kept
             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
                 ..., :-1
             ].clone()
-            sorted_indices_to_remove[..., 0] = (
-                0  # Keep the highest probability token
-            )
+            sorted_indices_to_remove[..., 0] = 0
 
             # Scatter the removal mask back to the original logit positions
             indices_to_remove = torch.scatter(
@@ -482,13 +467,10 @@ class StochasticLLMGenerator:
                 indices_to_remove, float('-inf')
             )
 
-        # --- Sample from the filtered and scaled logits ---
         # Convert logits to probabilities
         probs = F.softmax(scaled_logits, dim=-1)
-        # Sample next tokens
         next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-        # --- Handle Zero Temperature Cases (Greedy) ---
         # If some sequences had temp=0, override their sampled token with the greedy choice
         if zero_temp_mask.any():
             greedy_tokens = token_logits.argmax(dim=-1)
@@ -507,7 +489,7 @@ class StochasticLLMGenerator:
         input_ids: torch.Tensor,
         initial_seq_len: int,
         replacement_counts: torch.Tensor,
-        explore_max_replacements: int,
+        replace_max_per_seq: int,
         explore_replace_prob: float,
         correctness_callback: Optional[Callable],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -519,7 +501,7 @@ class StochasticLLMGenerator:
             input_ids (torch.Tensor): Current token IDs of the generated sequence.
             initial_seq_len (int): Initial sequence length.
             replacement_counts (torch.Tensor): Count of replacements already made.
-            explore_max_replacements (int): Maximum number of replacements allowed.
+            replace_max_per_seq (int): Maximum number of replacements allowed.
             explore_replace_prob (float): Probability of token replacement.
             correctness_callback (Optional[Callable]): Function to evaluate correctness.
 
@@ -543,7 +525,7 @@ class StochasticLLMGenerator:
             generated_ids,  # Pass only the generated part
             next_tokens,
             replacement_counts,
-            explore_max_replacements,
+            replace_max_per_seq,
             correctness_callback,
         )
 
@@ -630,11 +612,11 @@ class StochasticLLMGenerator:
         top_p: float = 1.0,
         top_k: int = 0,
         max_new_tokens: int = 50,
-        explore_start_steps: int = 0,
+        explore_steps: int = 0,
         explore_skip_n: int = 0,
         explore_top_k: int = 20,
         explore_replace_prob: float = 0.0,
-        explore_max_replacements: int = 0,
+        replace_max_per_seq: int = 0,
         correctness_callback: Optional[Callable] = None,
         **kwargs,  # Keep **kwargs for potential future use or compatibility
     ) -> GenerateDecoderOnlyOutput:
@@ -651,17 +633,20 @@ class StochasticLLMGenerator:
             top_p (float): Nucleus sampling threshold (default: 1.0).
             top_k (int): Top-k sampling parameter (default: 0).
             max_new_tokens (int): Max new tokens to generate (default: 50).
-            explore_start_steps (int): Steps for exploration (default: 0).
+            explore_steps (int): Steps for exploration (default: 0).
             explore_skip_n (int): Steps to skip exploration (default: 0).
             explore_top_k (int): Top-k for exploration (default: 20).
             explore_replace_prob (float): Probability of token replacement (default: 0.0).
-            explore_max_replacements (int): Max replacements per sequence (default: 0).
+            replace_max_per_seq (int): Max replacements per sequence (default: 0).
             correctness_callback (Optional[callable]): Function evaluating correctness (float 0.0-1.0).
             **kwargs: Additional arguments (unused).
 
         Returns:
             GenerateDecoderOnlyOutput: Generated sequences and potentially other info.
         """
+
+        if kwargs.get('num_return_sequences', 1) > 1:
+            raise ValueError('Does not support generate multiple sequences.')
 
         batch_size = input_ids.shape[0]
         initial_seq_len = input_ids.size(1)
@@ -678,7 +663,6 @@ class StochasticLLMGenerator:
 
         past_key_values = None
 
-        # --- Normalize temperature ---
         if isinstance(temperature, (float, int)):
             temperature = torch.full(
                 (batch_size,),
@@ -695,11 +679,10 @@ class StochasticLLMGenerator:
         # Ensure temperature has the correct shape
         if temperature.dim() == 0:
             temperature = temperature.repeat(batch_size)
-        assert temperature.shape == (
-            batch_size,
-        ), 'Temperature must be a float or a tensor of shape [batch_size]'
+        assert (
+            len(temperature) == batch_size
+        ), 'Temperature must be the same size of batch_size'
 
-        # --- Main Generation Loop ---
         while generated_tokens < max_new_tokens:
             # Prepare model inputs
             model_inputs = {
@@ -711,26 +694,23 @@ class StochasticLLMGenerator:
                 'use_cache': True,
             }
 
-            # --- Model Forward Pass ---
             outputs = self.model(**model_inputs)
             next_token_logits = outputs.logits[
                 :, -1, :
             ].float()  # Shape: [batch_size, vocab_size]
             past_key_values = outputs.past_key_values
 
-            # --- Apply Repetition Penalty ---
             next_token_logits = self._apply_repetition_penalty(
                 logits=next_token_logits,
                 input_ids=input_ids,
                 penalty=repetition_penalty,
             )
 
-            # --- Determine Sampling Method (Exploration vs Standard) ---
             explore_now = False
-            if explore_start_steps > 0:
+            if explore_steps > 0:
                 is_after_skip = generated_tokens >= explore_skip_n
                 is_within_explore_window = generated_tokens < (
-                    explore_start_steps + explore_skip_n
+                    explore_steps + explore_skip_n
                 )
                 explore_now = is_after_skip and is_within_explore_window
 
@@ -754,17 +734,16 @@ class StochasticLLMGenerator:
                     top_k=top_k,
                 )
 
-            # --- Apply Token Replacement Logic ---
             # Check if conditions for replacement are met *before* updating sequences
             should_consider_replacement = (
                 explore_replace_prob > 0.0
-                and explore_max_replacements > 0
+                and replace_max_per_seq > 0
                 and replacement_counts.max()
-                < explore_max_replacements  # Optimization: skip if all sequences maxed out
+                < replace_max_per_seq  # Optimization: skip if all sequences maxed out
                 and generated_tokens
                 > explore_skip_n  # Optionally skip replacement during skip phase
                 # and generated_tokens
-                # > (explore_start_steps + explore_skip_n)
+                # > (explore_steps + explore_skip_n)
                 # * 2  # Only replace after exploration
             )
 
@@ -774,7 +753,7 @@ class StochasticLLMGenerator:
                     input_ids,
                     initial_seq_len,
                     replacement_counts,
-                    explore_max_replacements,
+                    replace_max_per_seq,
                     explore_replace_prob,
                     correctness_callback,
                 )
@@ -783,7 +762,6 @@ class StochasticLLMGenerator:
                     next_tokens_candidates  # Use the originally sampled tokens
                 )
 
-            # --- Update Sequences and Check Termination ---
             input_ids, attention_mask, unfinished_sequences = (
                 self._update_sequences(
                     input_ids,
@@ -824,7 +802,7 @@ if __name__ == '__main__':
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    generator = StochasticLLMGenerator(model, tokenizer, device)
+    generator = ExploreLLMGenerator(model, tokenizer, device)
 
     # Example batch input
     message = [
@@ -859,10 +837,10 @@ if __name__ == '__main__':
         max_new_tokens=512,
         top_p=1.0,
         top_k=50,
-        explore_start_steps=2,
+        explore_steps=2,
         explore_top_k=100,
         explore_replace_prob=0.2,
-        explore_max_replacements=2,
+        replace_max_per_seq=2,
     )
 
     # Decode the output tokens back to text

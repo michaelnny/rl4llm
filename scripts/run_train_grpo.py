@@ -15,7 +15,7 @@ from datasets import Dataset
 from transformers import PreTrainedTokenizer
 
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import BaseRewardFunction, LLMEnv
+from rl4llm.envs import BaseRewardFunction, ExploreLLMEnv, LLMEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.logging import LoggingManager
 from rl4llm.trainers.grpo_trainer import (
@@ -177,7 +177,7 @@ def main():
     deepspeed.init_distributed(verbose=False)
 
     dist_manager = DistributedManager()
-    logger_manager = LoggingManager(
+    logger = LoggingManager(
         dist_manager, log_dir=artifacts_path, sample_file_format='jsonl'
     )
 
@@ -211,13 +211,63 @@ def main():
         config_params=deepspeed_config,
     )
 
-    train_env = LLMEnv(
+    # for special LLM Env config
+    replace_source_tokens = []
+    # # Determine which tokens should be replaced based on format
+    if grpo_config.xml_format:
+        replace_source_tokens.append(tokenizer.encode('</think>')[0])
+        replace_source_tokens.append(tokenizer.encode(' </think>')[0])
+        replace_source_tokens.append(tokenizer.encode(':</think>')[0])
+        replace_source_tokens.append(tokenizer.encode('.</think>')[0])
+    else:
+        replace_source_tokens.append(tokenizer.eos_token_id)
+
+    replace_target_tokens = [tokenizer.encode(f' {kwd}')[0] for kwd in ['Wait']]
+
+    replace_prevent_patterns = []
+
+    explore_skip = 0
+
+    if grpo_config.xml_format:
+        replace_prevent_patterns.extend(
+            [
+                tokenizer.encode('</think>'),
+                tokenizer.encode(' </think>'),
+                tokenizer.encode('<answer>'),
+            ]
+        )
+        explore_skip = len(tokenizer.encode('<think>'))
+
+    if grpo_config.group_temperature:
+        temperatures = torch.linspace(
+            grpo_config.min_temperature,
+            grpo_config.max_temperature,
+            steps=grpo_config.group_size,
+            dtype=torch_dtype,
+        )
+        temperatures = torch.round(temperatures, decimals=2)
+
+    explore_env_args = {
+        'temperatures': temperatures,
+        'explore_steps': grpo_config.explore_steps,
+        'explore_top_k': grpo_config.explore_top_k,
+        'replace_source_tokens': replace_source_tokens,
+        'replace_target_tokens': replace_target_tokens,
+        'replace_prevent_patterns': replace_prevent_patterns,
+        'replace_max_per_seq': grpo_config.replace_max_per_seq,
+        'replace_prob': grpo_config.replace_prob,
+        'replace_threshold': grpo_config.replace_threshold,
+        'explore_skip': explore_skip,
+    }
+
+    train_env = ExploreLLMEnv(
         dataset=train_dataset,
         batch_size=1,
         tokenizer=tokenizer,
         reward_functions=[AccuracyRewardFunction()],
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
+        **explore_env_args,
     )
     eval_env = LLMEnv(
         dataset=eval_dataset,
@@ -233,16 +283,47 @@ def main():
         tokenizer=tokenizer,
         policy_engine=policy_engine,
         dist_manager=dist_manager,
-        logger=logger_manager,
+        logger=logger,
         train_env=train_env,
         eval_env=eval_env,
         artifacts_path=artifacts_path,
         seed=seed,
     )
 
+    # Create a profiler instance
+    profiler = None
+
+    # profiler = cProfile.Profile()
+    # profiler.enable()
+
+    def handle_exit():
+
+        trainer.on_exit()
+
+        if profiler is not None:
+            try:
+                profiler.disable()
+                # Save profiling stats
+                stats = pstats.Stats(profiler)
+                stats.sort_stats('cumulative').dump_stats('profile_stats.prof')
+                stats.print_stats()  # Print to console for immediate feedback
+            except Exception as _e:
+                pass
+
     trainer.train(config)
 
-    trainer.on_exit()
+    # try:
+    #     trainer.train(config)
+    # except KeyboardInterrupt:
+    #     logger.info(
+    #         '\nKeyboardInterrupt received in main loop. Shutting down...'
+    #     )
+    # except Exception as e:
+    #     logger.error(f"An unexpected error occurred: {e}")
+    #     logger.error(format_exc())
+    # finally:
+    #     handle_exit()
+    #     logger.info('Exiting main program.')
 
 
 if __name__ == '__main__':

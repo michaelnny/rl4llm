@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_grpo_qwen2.5_0.5b_gsm8k"
+  artifacts_path: "./runs/test_explore_grpo_qwen2.5_0.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -16,11 +16,11 @@ model:
   model_max_length: 4000
 
 grpo_config:
-  max_steps: 10
-  train_rollout_size: 512
+  max_steps: 100
+  train_rollout_size: 256
   num_updates: 1
   train_micro_batch_size: 4
-  train_batch_size: 128
+  train_batch_size: 64
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       
@@ -32,17 +32,36 @@ grpo_config:
 
   # for sample generation
   max_prompt_tokens: 512              # skip sample question that's too long
-  group_size: 16                      # for each sample we generate a group of answers
+  group_size: 8                      # for each sample we generate a group of answers
   max_completion_tokens: 1000
   temperature: 1.0                    # not used if using group_temperature
   repetition_penalty: 1.0
   top_p: 0.95
   top_k: 0
 
+  # exploration generation
+  group_temperature: true             # group temperature where we balance exploration and exploitation
+  min_temperature: 0.0
+  max_temperature: 1.0
+
+  # control rate of explore
+  explore_init_epsilon: 0.7           # exploration epsilon decay
+  explore_min_epsilon: 0.0
+  explore_decay_steps: 50
+
+  # exploring start
+  explore_steps: 3              # initial start steps to do random sampling
+  explore_top_k: 30                   # Top K tokens to random sample during initial start steps
+
+  # exploring by token replacement
+  replace_prob: 1.0
+  replace_threshold: 0.7
+  replace_max_per_seq: 3         # max number of replacements to the same sequence
+
   # evaluation
-  eval_rollout_size: 512    
+  eval_rollout_size: 1024    
   eval_batch_size: 64
-  eval_interval: 50
+  eval_interval: 0
 
   # others
   checkpoint_interval: 100            # every N iteration

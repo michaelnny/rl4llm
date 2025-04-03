@@ -11,9 +11,9 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 try:
-    from rl4llm.generations.stochastic_llm_generator import (
+    from rl4llm.generations.explore_generator import (
+        ExploreLLMGenerator,
         GenerateDecoderOnlyOutput,
-        StochasticLLMGenerator,
     )
 except ImportError:
     pytest.skip(
@@ -56,7 +56,7 @@ def generator(mock_model, mock_tokenizer, device):
     target_tokens = [10, 11]  # Example replacement tokens
     prevent_patterns = [[27, 29, 31]]  # Example pattern to prevent replacement
 
-    llm_generator = StochasticLLMGenerator(
+    llm_generator = ExploreLLMGenerator(
         model=mock_model,
         tokenizer=mock_tokenizer,
         device=device,
@@ -119,7 +119,7 @@ class TestExploreLLMGeneratorInitialization:
         target_tokens = [10, 11]
         prevent_patterns = [[27, 29, 31]]
 
-        generator = StochasticLLMGenerator(
+        generator = ExploreLLMGenerator(
             model=mock_model,
             tokenizer=mock_tokenizer,
             device=device,
@@ -143,7 +143,7 @@ class TestExploreLLMGeneratorInitialization:
         self, mock_model, mock_tokenizer, device
     ):
         """Test initialization with default values."""
-        generator = StochasticLLMGenerator(
+        generator = ExploreLLMGenerator(
             model=mock_model, tokenizer=mock_tokenizer, device=device
         )
 
@@ -237,7 +237,7 @@ class TestReplacementPatterns:
         mock_tokenizer = Mock(spec=PreTrainedTokenizer)
 
         # Create generator with no prevention patterns
-        generator = StochasticLLMGenerator(
+        generator = ExploreLLMGenerator(
             model=mock_model,
             tokenizer=mock_tokenizer,
             device=device,
@@ -297,7 +297,7 @@ class TestReplacementPatterns:
         mock_tokenizer = Mock(spec=PreTrainedTokenizer)
 
         # Create generator with multiple prevention patterns
-        generator = StochasticLLMGenerator(
+        generator = ExploreLLMGenerator(
             model=mock_model,
             tokenizer=mock_tokenizer,
             device=device,
@@ -339,9 +339,7 @@ class TestCorrectnessCheck:
         result = generator._check_correctness(generated_ids, can_replace, None)
 
         assert result.shape == (batch_size,)
-        assert (
-            not result.any()
-        )  # All should be correct (no callback to say otherwise)
+        assert result.all()
 
     def test_check_correctness_with_callback(
         self, generator, device, monkeypatch
@@ -389,8 +387,7 @@ class TestCorrectnessCheck:
             assert mock_print.call_count == 1
             assert 'Warning' in mock_print.call_args[0][0]
 
-        # The sequence that raised an exception should be marked as correct (false=correct)
-        assert result[0].item() is False
+        assert result[0].item() is True
         # The other sequence should be marked based on the callback result (0.5 < 1.0, so incorrect)
         assert result[1].item() is True
 
@@ -402,7 +399,7 @@ class TestTokenReplacement:
         mock_tokenizer = Mock(spec=PreTrainedTokenizer)
 
         # Create generator with no source tokens
-        generator = StochasticLLMGenerator(
+        generator = ExploreLLMGenerator(
             model=mock_model,
             tokenizer=mock_tokenizer,
             device=device,
@@ -511,7 +508,7 @@ class TestReplacementEligibility:
         mock_tokenizer = Mock(spec=PreTrainedTokenizer)
 
         # Create generator with no source tokens
-        generator = StochasticLLMGenerator(
+        generator = ExploreLLMGenerator(
             model=mock_model, tokenizer=mock_tokenizer, device=device
         )
 
@@ -524,7 +521,7 @@ class TestReplacementEligibility:
             generated_ids,
             next_tokens,
             replacement_counts,
-            explore_max_replacements=3,
+            replace_max_per_seq=3,
         )
 
         # No replacements should be eligible without source tokens
@@ -546,7 +543,7 @@ class TestReplacementEligibility:
             generated_ids,
             next_tokens,
             replacement_counts,
-            explore_max_replacements=3,
+            replace_max_per_seq=3,
         )
 
         # No eligibility when tokens aren't in source_tokens
@@ -576,7 +573,7 @@ class TestReplacementEligibility:
             generated_ids,
             next_tokens,
             replacement_counts,
-            explore_max_replacements=3,
+            replace_max_per_seq=3,
         )
 
         assert result[0].item() is True  # Eligible: no pattern, below max
@@ -606,7 +603,7 @@ class TestReplacementEligibility:
             generated_ids,
             next_tokens,
             replacement_counts,
-            explore_max_replacements=3,
+            replace_max_per_seq=3,
             correctness_callback=mock_correctness_callback,
         )
 
@@ -871,7 +868,7 @@ class TestTokenReplacementIntegration:
             input_ids,
             initial_seq_len,
             replacement_counts,
-            explore_max_replacements=3,
+            replace_max_per_seq=3,
             explore_replace_prob=0.5,
             correctness_callback=None,
         )
@@ -915,7 +912,7 @@ class TestTokenReplacementIntegration:
                         input_ids,
                         initial_seq_len,
                         replacement_counts,
-                        explore_max_replacements=3,
+                        replace_max_per_seq=3,
                         explore_replace_prob=0.5,
                         correctness_callback=None,
                     )
@@ -1033,7 +1030,7 @@ class TestGenerateMethod:
                     pad_token_id=0,
                     eos_token_id=50,
                     max_new_tokens=3,
-                    explore_start_steps=2,  # Explore for first 2 steps
+                    explore_steps=2,  # Explore for first 2 steps
                     explore_skip_n=0,
                     explore_top_k=20,
                 )
@@ -1094,7 +1091,7 @@ class TestGenerateMethod:
                     eos_token_id=50,
                     max_new_tokens=3,
                     explore_replace_prob=0.5,
-                    explore_max_replacements=2,
+                    replace_max_per_seq=2,
                 )
 
                 # Verify replacement was called for each step
@@ -1350,9 +1347,9 @@ class TestIntegration:
                         pad_token_id=0,
                         eos_token_id=100,  # Set high to prevent early stopping
                         max_new_tokens=3,
-                        explore_start_steps=2,
+                        explore_steps=2,
                         explore_replace_prob=1.0,
-                        explore_max_replacements=2,
+                        replace_max_per_seq=2,
                     )
 
                     # Exploration should be used for first 2 steps
@@ -1434,7 +1431,7 @@ class TestIsolatedFunctionality:
                 input_ids,
                 0,
                 replacement_counts,
-                explore_max_replacements=3,
+                replace_max_per_seq=3,
                 explore_replace_prob=1.0,
                 correctness_callback=mock_correctness_callback,
             )

@@ -18,9 +18,6 @@ from rl4llm.utils.dataset_utils import shard_dataset
 
 logger = logging.getLogger(LOGGER_NAME)
 
-# logger = logging.getLogger(__name__)
-# logging.basicConfig(level=logging.INFO)  # Basic logging setup
-
 
 class EpisodeData(BaseModel):
     """LLM ENV rollout episode"""
@@ -42,18 +39,18 @@ class EpisodeData(BaseModel):
         description='Timestamp when the data was generated',
     )
 
-    @model_validator(mode='after')
-    def check_tensor_shapes(cls, values):
-        if values.prompt_tokens.dim() != 1:
-            raise ValueError(
-                f"Prompt tokens tensor must be 1D vector: {values.prompt_tokens.shape}"
-            )
-        if values.completion_tokens.dim() != 1:
-            raise ValueError(
-                f"Completion tokens tensor must be 1D vector: {values.completion_tokens.shape}"
-            )
+    # @model_validator(mode='after')
+    # def check_tensor_shapes(cls, values):
+    #     if values.prompt_tokens.dim() != 1:
+    #         raise ValueError(
+    #             f"Prompt tokens tensor must be 1D vector: {values.prompt_tokens.shape}"
+    #         )
+    #     if values.completion_tokens.dim() != 1:
+    #         raise ValueError(
+    #             f"Completion tokens tensor must be 1D vector: {values.completion_tokens.shape}"
+    #         )
 
-        return values
+    #     return values
 
     class Config:
         arbitrary_types_allowed = True
@@ -162,49 +159,50 @@ class LLMEnv:
                 'reward_functions must be a non-empty list of BaseRewardFunction instances'
             )
 
-        self._seed = seed
-        if self._seed is not None:
+        self.seed = seed
+        if self.seed is not None:
             # Seed setting should ideally happen outside the class or once globally
             # But keeping it here as per original code for consistency
             random.seed(
-                self._seed + rank
+                self.seed + rank
             )  # Add rank for different seeds per process
-            np.random.seed(self._seed + rank)
-            torch.manual_seed(self._seed + rank)
+            np.random.seed(self.seed + rank)
+            torch.manual_seed(self.seed + rank)
             if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(self._seed + rank)
+                torch.cuda.manual_seed_all(self.seed + rank)
 
-        self._reward_functions = reward_functions
-        self._tokenizer = tokenizer
-        if self._tokenizer.pad_token is None:
+        self.reward_functions = reward_functions
+        self.tokenizer = tokenizer
+        self.tokenizer.padding_side = 'left'
+        if self.tokenizer.pad_token is None:
             logger.warning(
                 'Tokenizer does not have a pad token. Setting to eos_token.'
             )
-            self._tokenizer.pad_token = self._tokenizer.eos_token
-            if self._tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            if self.tokenizer.pad_token is None:
                 raise ValueError(
                     'Tokenizer needs a pad_token or eos_token for padding.'
                 )
         # Ensure pad_token_id is available
-        self._pad_token_id = self._tokenizer.pad_token_id
-        self._eos_token_id = self._tokenizer.eos_token_id
-        if self._eos_token_id is None:
+        self.pad_token_id = self.tokenizer.pad_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id
+        if self.eos_token_id is None:
             # Warning: Some models might not have a distinct EOS token.
             # Generation might rely solely on max_length.
             logger.warning('Tokenizer does not have an EOS token defined.')
 
-        self._batch_size = batch_size
-        self._world_size = world_size
-        self._rank = rank
+        self.batch_size = batch_size
+        self.world_size = world_size
+        self.rank = rank
 
         # Consider adding num_workers > 0 if data loading is slow
         # and pin_memory=True if using GPU
         shared_dataset = shard_dataset(
             dataset,
-            self._world_size,
-            self._rank,
+            self.world_size,
+            self.rank,
         )
-        self._loader = DataLoader(
+        self.loader = DataLoader(
             shared_dataset,
             batch_size=batch_size,
             shuffle=True,  # Shuffle can add overhead, disable if order doesn't matter
@@ -212,15 +210,15 @@ class LLMEnv:
             # num_workers=4, # Example: Use multiple workers
             # pin_memory=torch.cuda.is_available(), # Example: Pin memory if using CUDA
         )
-        self._dataset_iterator = iter(self._loader)
-        self._max_prompt_length = max_prompt_length or getattr(
-            self._tokenizer, 'model_max_length', 512
+        self.dataset_iterator = iter(self.loader)
+        self.max_prompt_length = max_prompt_length or getattr(
+            self.tokenizer, 'model_max_length', 512
         )  # Provide a default if not set
-        if self._max_prompt_length is None:
+        if self.max_prompt_length is None:
             logger.warning(
                 'model_max_length not found in tokenizer. Consider setting max_prompt_length.'
             )
-            self._max_prompt_length = 512  # Set a reasonable default
+            self.max_prompt_length = 512
 
     def _collate_fn(self, batch: List[Dict]) -> Dict[str, List]:
         """Collates list of dicts into a dict of lists."""
@@ -239,39 +237,21 @@ class LLMEnv:
             EnvState: The initial state for the new batch, or None if dataset exhausted.
         """
         try:
-            item_batch = next(self._dataset_iterator)
-            if not item_batch:  # Handle empty batch from collate_fn
+            item_batch = next(self.dataset_iterator)
+            if not item_batch:
                 logger.warning('DataLoader returned an empty batch.')
-                # Attempt to get the next batch recursively or handle end of epoch
-                return (
-                    self.reset()
-                )  # Simple retry, might lead to infinite loop if dataset is empty
-            return self._prepare_new_initial_state(item_batch)
+                return self.reset()
+            return self._prepare_new_episode_state(item_batch)
         except StopIteration:
             logger.info('Dataset iterator exhausted. Resetting DataLoader.')
-            # Optionally check if the dataset is truly empty before resetting
-            if len(self._loader.dataset) == 0:
-                logger.warning('Dataset appears to be empty.')
-                return None  # Signal exhaustion
-            self._dataset_iterator = iter(self._loader)
-            try:
-                item_batch = next(self._dataset_iterator)
-                if not item_batch:
-                    logger.warning(
-                        'DataLoader returned an empty batch after reset.'
-                    )
-                    return None  # Or handle differently
-                return self._prepare_new_initial_state(item_batch)
-            except StopIteration:
-                logger.error(
-                    'Failed to get batch even after resetting iterator.'
-                )
-                return None  # Indicate failure or exhaustion
+            self.dataset_iterator = iter(self.loader)
+            item_batch = next(self.dataset_iterator)
+            return self._prepare_new_episode_state(item_batch)
         except Exception as e:
             logger.error(f"Error getting next batch: {e}", exc_info=True)
             raise
 
-    def _prepare_new_initial_state(
+    def _prepare_new_episode_state(
         self, item_batch: Dict[str, List]
     ) -> EnvState:
         """
@@ -300,15 +280,20 @@ class LLMEnv:
 
         # Tokenize the batch of prompts
         # Padding side 'left' is crucial for decoder-only models like GPT
-        inputs = self._tokenizer(
+        inputs = self.tokenizer(
             prompts,
             return_tensors='pt',
-            padding='longest' if self._batch_size > 1 else False,
-            padding_side='left',  # Use left padding for generation
-            truncation=True,
-            max_length=self._max_prompt_length,
+            padding='longest',
+            padding_side='left',
+            truncation=False,
+            max_length=self.max_prompt_length,
             return_attention_mask=True,
         )
+
+        prompt_len = inputs['input_ids'].shape[1]
+        if self.max_prompt_length and prompt_len > self.max_prompt_length:
+            logger.warning(f"Skip sample with prompt tokens size {prompt_len}")
+            return self.reset()
 
         # Store raw data per sample
         raw_data_list = []
@@ -329,7 +314,11 @@ class LLMEnv:
         return state
 
     def _generate_completions(
-        self, llm: PreTrainedModel, gen_args: Dict, state: EnvState
+        self,
+        llm: PreTrainedModel,
+        gen_args: Dict,
+        state: EnvState,
+        **kwargs: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
         """Generates completions using the LLM."""
         input_ids = state.input_ids.to(llm.device)
@@ -361,8 +350,8 @@ class LLMEnv:
             # Find first EOS or end of non-padding tokens
             length = seq.shape[0]
             for i, token in enumerate(seq):
-                if token == self._eos_token_id or token == self._pad_token_id:
-                    length = i + (1 if token == self._eos_token_id else 0)
+                if token == self.eos_token_id or token == self.pad_token_id:
+                    length = i + (1 if token == self.eos_token_id else 0)
                     break
             actual_lengths.append(length)
 
@@ -371,7 +360,7 @@ class LLMEnv:
             seq[:length]
             for seq, length in zip(completion_ids_full, actual_lengths)
         ]
-        completion_texts = self._tokenizer.batch_decode(
+        completion_texts = self.tokenizer.batch_decode(
             sequences_to_decode,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=True,
@@ -409,7 +398,7 @@ class LLMEnv:
     ) -> Dict[str, List[float]]:
         """Calculates rewards for each completion."""
         reward_dict_batch = {}
-        for reward_fn in self._reward_functions:
+        for reward_fn in self.reward_functions:
             try:
                 rewards = reward_fn(completion_texts, expanded_ground_truths)
                 if not isinstance(rewards, list) or len(rewards) != len(
@@ -428,7 +417,10 @@ class LLMEnv:
 
     @torch.inference_mode()
     def rollout(
-        self, llm: PreTrainedModel, gen_args: Dict
+        self,
+        llm: PreTrainedModel,
+        gen_args: Dict,
+        **kwargs: Optional[Dict[str, Any]],
     ) -> List[EpisodeData]:
         """Performs a rollout: generates completions and calculates rewards."""
         group_size = gen_args.get('num_return_sequences', 1)
@@ -441,7 +433,9 @@ class LLMEnv:
             return []
 
         # Generate and process completions
-        full_sequences = self._generate_completions(llm, gen_args, state)
+        full_sequences = self._generate_completions(
+            llm, gen_args, state, **kwargs
+        )
         (
             completion_texts,
             expanded_prompts,
@@ -467,7 +461,7 @@ class LLMEnv:
             # Get padded prompt tokens and calculate actual length
             prompt_tokens_padded = expanded_prompt_tokens[i]
             prompt_len = (
-                (prompt_tokens_padded != self._pad_token_id).sum().item()
+                (prompt_tokens_padded != self.pad_token_id).sum().item()
             )
 
             # Extract unpadded prompt tokens (last prompt_len tokens since padding is on the left)
