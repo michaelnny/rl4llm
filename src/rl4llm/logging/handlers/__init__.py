@@ -1,12 +1,13 @@
-# rl4llm/logging/handlers/__init__.py
-from .base import BaseHandler
-from .metric import MetricHandler
-from .sample import SampleHandler
-from .backend import BackendHandler
+from .backend_handler import BackendHandler
+from .base_handler import BaseHandler
+from .metric_handler import MetricHandler
+from .resource_handler import ResourceHandler
+from .sample_handler import SampleHandler
 
 __all__ = [
-    "BaseHandler",
-    "MetricHandler",
-    "SampleHandler",
-    "BackendHandler",
+    'BaseHandler',
+    'MetricHandler',
+    'SampleHandler',
+    'BackendHandler',
+    'ResourceHandler',
 ]

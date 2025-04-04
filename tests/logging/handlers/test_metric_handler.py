@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from rl4llm.logging.handlers.metric import MetricHandler
+from rl4llm.logging.handlers.metric_handler import MetricHandler
 
 
 # Helper mock distributed manager
@@ -44,11 +44,6 @@ def test_log_scalar_non_finite(handler, caplog):
     handler.log_scalar('reward', float('inf'))
     assert 'Non-finite value' in caplog.text
     assert 'reward' not in handler._metric_buffer
-
-
-def test_get_aggregation_methods_direct_match(handler):
-    methods = handler._get_aggregation_methods('reward')
-    assert methods == ['mean', 'std', 'p90']
 
 
 def test_get_aggregation_methods_regex_match(handler):

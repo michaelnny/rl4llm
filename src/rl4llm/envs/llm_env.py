@@ -1,3 +1,5 @@
+"""Implements MDP ENV for collect samples for RL"""
+
 import logging
 import random
 import re
@@ -12,8 +14,6 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.constants import LOGGER_NAME
-
-# from rl4llm.logging import LoggingManager
 from rl4llm.utils.dataset_utils import shard_dataset
 
 logger = logging.getLogger(LOGGER_NAME)
@@ -163,9 +163,7 @@ class LLMEnv:
         if self.seed is not None:
             # Seed setting should ideally happen outside the class or once globally
             # But keeping it here as per original code for consistency
-            random.seed(
-                self.seed + rank
-            )  # Add rank for different seeds per process
+            random.seed(self.seed + rank)
             np.random.seed(self.seed + rank)
             torch.manual_seed(self.seed + rank)
             if torch.cuda.is_available():
@@ -196,7 +194,6 @@ class LLMEnv:
         self.rank = rank
 
         # Consider adding num_workers > 0 if data loading is slow
-        # and pin_memory=True if using GPU
         shared_dataset = shard_dataset(
             dataset,
             self.world_size,
@@ -205,15 +202,14 @@ class LLMEnv:
         self.loader = DataLoader(
             shared_dataset,
             batch_size=batch_size,
-            shuffle=True,  # Shuffle can add overhead, disable if order doesn't matter
+            shuffle=True,
             collate_fn=self._collate_fn,
             # num_workers=4, # Example: Use multiple workers
-            # pin_memory=torch.cuda.is_available(), # Example: Pin memory if using CUDA
         )
         self.dataset_iterator = iter(self.loader)
         self.max_prompt_length = max_prompt_length or getattr(
             self.tokenizer, 'model_max_length', 512
-        )  # Provide a default if not set
+        )
         if self.max_prompt_length is None:
             logger.warning(
                 'model_max_length not found in tokenizer. Consider setting max_prompt_length.'
@@ -344,7 +340,6 @@ class LLMEnv:
         ].cpu()
         num_sequences = completion_ids_full.shape[0]
 
-        # Simplify length calculation on CPU
         actual_lengths = []
         for seq in completion_ids_full:
             # Find first EOS or end of non-padding tokens
@@ -448,7 +443,7 @@ class LLMEnv:
             completion_texts, expanded_ground_truths
         )
 
-        # Construct EpisodeData with unpadded prompt tokens
+        # Construct episodes
         results = []
         for i in range(len(completion_texts)):
             # Extract completion tokens (already unpadded)
@@ -467,7 +462,6 @@ class LLMEnv:
             # Extract unpadded prompt tokens (last prompt_len tokens since padding is on the left)
             prompt_tokens_unpadded = prompt_tokens_padded[-prompt_len:]
 
-            # Create EpisodeData with unpadded prompt tokens
             sample = EpisodeData(
                 prompt_text=expanded_prompts[i],
                 prompt_tokens=prompt_tokens_unpadded,

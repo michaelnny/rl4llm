@@ -6,12 +6,9 @@ import numpy as np
 import pytest
 import yaml
 
-from rl4llm.logging.handlers.backend import BackendHandler
+from rl4llm.logging.handlers.backend_handler import BackendHandler
 
 
-# ----------------------------------------
-# Fake WandB writer and module
-# ----------------------------------------
 class FakeWandB:
     def __init__(self):
         self.logged_metrics = []
@@ -54,9 +51,6 @@ class FakeWandBModule:
     util = type('util', (), {'generate_id': lambda: 'fake_id'})
 
 
-# ----------------------------------------
-# Fake TensorBoard SummaryWriter
-# ----------------------------------------
 class FakeSummaryWriter:
     def __init__(self, log_dir):
         self.log_dir = log_dir
@@ -72,11 +66,6 @@ class FakeSummaryWriter:
 
     def close(self):
         self.closed = True
-
-
-# ----------------------------------------
-# Tests for BackendHandler
-# ----------------------------------------
 
 
 # Test non-master instance: writer should not be initialized.

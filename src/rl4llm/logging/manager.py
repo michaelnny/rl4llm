@@ -1,3 +1,5 @@
+"""Centralized logging manager for log training metrics, samples"""
+
 import logging
 import os
 import time
@@ -19,6 +21,7 @@ from rl4llm.logging.handlers import (
     BackendHandler,
     BaseHandler,
     MetricHandler,
+    ResourceHandler,
     SampleHandler,
 )
 
@@ -102,11 +105,17 @@ class LoggingManager:
             is_master=self.is_master,
             logger=self.console_logger,
         )
+        self.resource_handler = ResourceHandler(
+            dist_manager=self.dist_manager,
+            logger=self.console_logger,
+            sampling_interval_seconds=30.0,
+        )
 
         self._handlers: List[BaseHandler] = [
             self.metric_handler,
             self.sample_handler,
             self.backend_handler,
+            self.resource_handler,
         ]
 
     def log_scalar(
@@ -139,15 +148,10 @@ class LoggingManager:
         self.sample_handler.log_sample(phase, sample_data, step)
 
     def log_hyperparams(self, params: Dict[str, Any]) -> None:
-        """Logs hyperparameters to the backend and console (master only)."""
-        if self.is_master:  # Still log to console on master
+        """Logs hyperparameters to the backend and local file (master only)."""
+        if self.is_master:
             try:
                 self.backend_handler.log_hyperparams(params)
-                params_str = yaml.dump(
-                    params, sort_keys=False, indent=2, width=120
-                )
-                self.info(f"Hyperparameters:\n---\n{params_str.strip()}\n---")
-
                 config_file_path = os.path.join(self.log_dir, 'job_params.yaml')
                 with open(config_file_path, 'w') as f:
                     yaml.dump(params, f, sort_keys=False, indent=2, width=120)
@@ -172,6 +176,29 @@ class LoggingManager:
         logs them to the console (master only), flushes samples, and clears metric buffers.
         """
         self.debug(f"Starting aggregation and logging for step {step}...")
+
+        try:
+            # Collect raw resource metric samples (returns Dict[str, List[values]])
+            resource_metric_samples = self.resource_handler.collect_metrics()
+
+            # Log each individual sample using the MetricHandler
+            if resource_metric_samples:
+                self.debug(
+                    f"Logging {sum(len(v) for v in resource_metric_samples.values())} individual resource samples to MetricHandler..."
+                )
+                for name, samples_list in resource_metric_samples.items():
+                    for sample_value in samples_list:
+                        self.metric_handler.log_scalar(name, sample_value)
+            else:
+                self.debug('No resource metric samples collected this step.')
+
+        except Exception as e:
+            # Catch errors during collection/logging to prevent crashing the whole step
+            self.error(
+                f"Error during resource collection/logging for step {step}: {e}",
+                exc_info=True,
+            )
+
         aggregated_metrics = self.metric_handler.aggregate()
 
         # Logging to backend and console (master only)
@@ -229,10 +256,8 @@ class LoggingManager:
     def close(self) -> None:
         """Closes all registered handlers."""
         self.info(f"Closing LoggingManager on Rank {self.rank}...")
-        # self.flush() # Flush might be called within handler's close if needed
-        for handler in reversed(
-            self._handlers
-        ):  # Close in reverse order? (Backend last?)
+
+        for handler in reversed(self._handlers):
             try:
                 handler.close()
             except Exception as e:

@@ -14,9 +14,6 @@ from rl4llm.constants import EVAL_PHASE, LOGGING_PHASES, TRAIN_PHASE
 from rl4llm.logging.manager import LoggingManager
 
 
-# ------------------------------------------------
-# Fake Logger and setup_logger override
-# ------------------------------------------------
 class FakeLogger:
     def __init__(self):
         self.messages = []  # Store tuples: (level, message)
@@ -39,9 +36,6 @@ def fake_setup_logger(rank, log_level):
     return FakeLogger()
 
 
-# ------------------------------------------------
-# Fake Distributed Manager
-# ------------------------------------------------
 class FakeDistManager:
     def __init__(self, is_master=True, world_size=1, global_rank=0):
         self.is_master = is_master
@@ -52,9 +46,6 @@ class FakeDistManager:
         pass
 
 
-# ------------------------------------------------
-# Pytest Fixture for LoggingManager Instance
-# ------------------------------------------------
 @pytest.fixture
 def logging_manager(tmp_path, monkeypatch):
     # Monkey-patch the setup_logger function in the module where LoggingManager is defined.
@@ -81,16 +72,14 @@ def logging_manager(tmp_path, monkeypatch):
     )
 
 
-# ------------------------------------------------
-# Tests for LoggingManager
-# ------------------------------------------------
 def test_logging_manager_initialization(logging_manager):
     # Verify that all underlying handlers are created.
     assert hasattr(logging_manager, 'metric_handler')
     assert hasattr(logging_manager, 'sample_handler')
     assert hasattr(logging_manager, 'backend_handler')
+    assert hasattr(logging_manager, 'resource_handler')
     # _handlers list should contain three handlers.
-    assert len(logging_manager._handlers) == 3
+    assert len(logging_manager._handlers) == 4
     # The console logger should be our FakeLogger.
     assert hasattr(logging_manager.console_logger, 'messages')
 
@@ -137,14 +126,6 @@ def test_log_hyperparams(logging_manager):
     hyperparams = {'lr': 0.001, 'batch_size': 32}
     logging_manager.log_hyperparams(hyperparams)
     assert called is True
-    # Also, on master, hyperparameters are logged to the console.
-    # Check that the FakeLogger recorded an info message containing "Hyperparameters:"
-    messages = [
-        msg
-        for level, msg in logging_manager.console_logger.messages
-        if 'Hyperparameters:' in msg
-    ]
-    assert messages  # Should not be empty
 
 
 def test_timer(logging_manager):

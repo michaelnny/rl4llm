@@ -1,3 +1,5 @@
+"""Handler for saving samples to external file"""
+
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,7 +11,7 @@ import pyarrow.parquet as pq
 
 from rl4llm.constants import EVAL_PHASE, TRAIN_PHASE
 from rl4llm.core.distributed import DistributedManager
-from rl4llm.logging.handlers.base import BaseHandler
+from rl4llm.logging.handlers.base_handler import BaseHandler
 
 
 class SampleFileLogger:

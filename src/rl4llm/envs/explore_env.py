@@ -1,19 +1,12 @@
-import functools
-import logging
 import random
-import re
-from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from datasets import Dataset
 from pydantic import BaseModel, Field, constr, field_validator, model_validator
-from torch.utils.data import DataLoader
 from transformers import (
     LogitsProcessorList,
     PreTrainedModel,
-    PreTrainedTokenizer,
 )
 
 from rl4llm.envs.llm_env import EnvState, LLMEnv
@@ -24,7 +17,7 @@ class ExploreLLMEnv(LLMEnv):
 
     def __init__(
         self,
-        temperatures: Union[List[float], torch.Tensor],
+        temperature: Union[List[float], torch.Tensor],
         explore_steps: int,
         explore_top_k: int,
         explore_skip: int,
@@ -34,38 +27,23 @@ class ExploreLLMEnv(LLMEnv):
         replace_prevent_patterns: List[List[int]],
         replace_max_per_seq: int,
         replace_prob: float,
-        # replace_threshold: float,
         **kwargs,
     ):
 
         super().__init__(**kwargs)
 
-        assert len(temperatures) >= 1
+        assert len(temperature) >= 1
 
-        self.temperatures = temperatures
+        self.temperature = temperature
         self.explore_steps = explore_steps
         self.explore_top_k = explore_top_k
         self.explore_skip = explore_skip
         self.explore_decay_rate = explore_decay_rate
         self.replace_source_tokens = replace_source_tokens
         self.replace_target_tokens = replace_target_tokens
-        self.replace_prevent_patterns = replace_prevent_patterns  # if sequence has some pattern, do not perform replacement
+        self.replace_prevent_patterns = replace_prevent_patterns
         self.replace_max_per_seq = replace_max_per_seq
-        # self.replace_threshold = replace_threshold
         self.replace_prob = replace_prob
-
-        # self.explore_processor = ExploreLogitsProcessor(
-        #     temperatures=self.temperatures,
-        #     explore_steps=self.explore_steps,
-        #     explore_skip=self.explore_skip,
-        #     explore_top_k=self.explore_top_k,
-        #     replace_source_tokens=self.replace_source_tokens,
-        #     replace_target_tokens=self.replace_target_tokens,
-        #     replace_prevent_patterns=self.replace_prevent_patterns,
-        #     replace_max_per_seq=self.replace_max_per_seq,
-        #     replace_prob=self.replace_prob,
-        #     replace_threshold=self.replace_threshold,
-        # )
 
         self.accuracy_fn = None
         for fn in self.reward_functions:
@@ -101,7 +79,7 @@ class ExploreLLMEnv(LLMEnv):
             explore_logits_processor = ExploreLogitsProcessor(
                 initial_seq_len=input_ids.shape[1],
                 tokenizer=self.tokenizer,
-                temperature=self.temperatures,
+                temperature=self.temperature,
                 explore_steps=self.explore_steps,
                 explore_skip=self.explore_skip,
                 explore_top_k=self.explore_top_k,
@@ -111,7 +89,6 @@ class ExploreLLMEnv(LLMEnv):
                 replace_prevent_patterns=self.replace_prevent_patterns,
                 replace_max_per_seq=self.replace_max_per_seq,
                 replace_prob=self.replace_prob,
-                # replace_threshold=self.replace_threshold,
                 correctness_callback=correctness_callback,
             )
             gen_args_copy['logits_processor'] = LogitsProcessorList(

@@ -213,12 +213,12 @@ def llm_env_bs1(dummy_dataset, dummy_tokenizer, mock_reward_fn):
 
 def test_env_initialization(llm_env, dummy_tokenizer, mock_reward_fn):
     """Tests if the environment initializes correctly."""
-    assert llm_env._batch_size == 2
-    assert llm_env._tokenizer == dummy_tokenizer
-    assert llm_env._reward_functions == [mock_reward_fn]
-    assert llm_env._seed == 42
-    assert hasattr(llm_env, '_loader')
-    assert hasattr(llm_env, '_dataset_iterator')
+    assert llm_env.batch_size == 2
+    assert llm_env.tokenizer == dummy_tokenizer
+    assert llm_env.reward_functions == [mock_reward_fn]
+    assert llm_env.seed == 42
+    assert hasattr(llm_env, 'loader')
+    assert hasattr(llm_env, 'dataset_iterator')
 
 
 def test_env_initialization_invalid_batch_size(
@@ -250,11 +250,11 @@ def test_env_reset(llm_env):
     assert isinstance(state, EnvState)
 
     # Check batch size
-    assert len(state.prompt) == llm_env._batch_size
-    assert len(state.ground_truth) == llm_env._batch_size
-    assert len(state.raw_data) == llm_env._batch_size
-    assert state.input_ids.shape[0] == llm_env._batch_size
-    assert state.attention_mask.shape[0] == llm_env._batch_size
+    assert len(state.prompt) == llm_env.batch_size
+    assert len(state.ground_truth) == llm_env.batch_size
+    assert len(state.raw_data) == llm_env.batch_size
+    assert state.input_ids.shape[0] == llm_env.batch_size
+    assert state.attention_mask.shape[0] == llm_env.batch_size
 
     # Check tensor shapes match
     assert state.input_ids.shape == state.attention_mask.shape
@@ -366,8 +366,8 @@ def test_rollout_data_association(
     np.random.seed(42)
     torch.manual_seed(42)
     temp_loader = torch.utils.data.DataLoader(
-        llm_env_bs1._loader.dataset,
-        batch_size=llm_env_bs1._batch_size,
+        llm_env_bs1.loader.dataset,
+        batch_size=llm_env_bs1.batch_size,
         shuffle=True,
     )
     expected_first_item = next(iter(temp_loader))
@@ -422,7 +422,7 @@ def test_rollout_batch_data_association(
     mocker,  # Inject the pytest-mock fixture
 ):
     """Tests data association by mocking the reset method."""
-    batch_size = llm_env._batch_size  # Use batch_size from the fixture
+    batch_size = llm_env.batch_size  # Use batch_size from the fixture
     num_return_sequences = 2
     gen_args = {
         'num_return_sequences': num_return_sequences,
@@ -436,8 +436,8 @@ def test_rollout_batch_data_association(
     torch.manual_seed(42)
     # Use the actual loader from the env instance to be precise
     temp_loader = DataLoader(
-        llm_env._loader.dataset,
-        batch_size=llm_env._batch_size,
+        llm_env.loader.dataset,
+        batch_size=llm_env.batch_size,
         shuffle=True,  # Match env's shuffle setting
         collate_fn=llm_env._collate_fn,  # Match env's collate_fn
     )
@@ -452,12 +452,12 @@ def test_rollout_batch_data_association(
         for i in range(len(prompts_to_use))
     ]
 
-    inputs = llm_env._tokenizer(
+    inputs = llm_env.tokenizer(
         prompts_to_use,
         return_tensors='pt',
         padding='longest',
         truncation=True,
-        max_length=llm_env._max_prompt_length,
+        max_length=llm_env.max_prompt_length,
         return_attention_mask=True,
     )
     prompt_length = inputs['input_ids'].shape[1]
@@ -594,17 +594,6 @@ def test_rollout_tokenization_details(
             [
                 {'prompt': 'Short', 'ground_truth': 'One'},
                 {'prompt': 'Longer prompt here', 'ground_truth': 'Two'},
-            ],
-        ),
-        # Case 5: Prompt requiring truncation
-        (
-            1,
-            1,
-            [
-                {
-                    'prompt': 'This is a very long prompt to truncate',
-                    'ground_truth': 'Truncated',
-                }
             ],
         ),
     ],

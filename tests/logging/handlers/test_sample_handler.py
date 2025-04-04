@@ -11,7 +11,10 @@ import pyarrow.parquet as pq
 import pytest
 
 from rl4llm.constants import LOGGING_PHASES
-from rl4llm.logging.handlers.sample import SampleFileLogger, SampleHandler
+from rl4llm.logging.handlers.sample_handler import (
+    SampleFileLogger,
+    SampleHandler,
+)
 
 
 # Mock DistributedManager

@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_explore_grpo_qwen2.5_0.5b_gsm8k"
+  artifacts_path: "./runs/test_explore_start_grpo_qwen2.5_0.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -19,8 +19,8 @@ grpo_config:
   max_steps: 100
   train_rollout_size: 512
   num_updates: 1
-  train_micro_batch_size: 4
-  train_batch_size: 64
+  train_micro_batch_size: 8
+  train_batch_size: 128
   gamma: 1.0                          # fixed discount
   clip_eps: 0.2                       # PPO policy clip parameter
   normalize_group_rewards: true       
@@ -50,19 +50,18 @@ grpo_config:
   explore_decay_steps: 50
 
   # exploring start
-  explore_steps: 2              # initial start steps to do random sampling
+  explore_steps: 2                    # initial start steps to do random sampling
   explore_top_k: 30                   # Top K tokens to random sample during initial start steps
   explore_decay_rate: 0.9
 
   # exploring by token replacement
   replace_prob: 0.0
-  # replace_threshold: 0.9
-  replace_max_per_seq: 0         # max number of replacements to the same sequence
+  replace_max_per_seq: 0              # max number of replacements to the same sequence
 
   # evaluation
   eval_rollout_size: 1024    
   eval_batch_size: 64
-  eval_interval: 0
+  eval_interval: 25
 
   # others
   checkpoint_interval: 100            # every N iteration
@@ -70,6 +69,7 @@ grpo_config:
 
 deepspeed_config:
   # memory_breakdown: true  # for debugging
+  # enable_hybrid_engine: false
   steps_per_print: 1000000 # disable default logging
   gradient_clipping: 0.0
   bf16:

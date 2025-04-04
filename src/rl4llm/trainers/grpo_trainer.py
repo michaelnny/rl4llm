@@ -1,10 +1,10 @@
+"""Implements GRPO trainer"""
+
 import math
-import random
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import deepspeed
 import torch
-from datasets import Dataset
 from deepspeed import DeepSpeedEngine
 from pydantic import BaseModel, Field, field_validator, model_validator
 from torch.nn.utils.rnn import pad_sequence
@@ -60,19 +60,13 @@ class GRPOConfig(RLConfig):
         0, ge=0, le=500, description='Explore start top-k'
     )
     explore_decay_rate: Optional[float] = Field(
-        0.8, gt=0, le=1, description='Rate to decay explore start top-k'
+        0.8, gt=0, le=1, description='Rate to decay explore top-k'
     )
     replace_max_per_seq: Optional[int] = Field(
         0,
         ge=0,
         le=10,
         description='Maximum number of token replacements to the same sequence during exploration',
-    )
-    replace_threshold: Optional[float] = Field(
-        0,
-        ge=0,
-        le=1.0,
-        description='Source token probability scores to consider for replacement',
     )
     replace_prob: Optional[float] = Field(
         0,
@@ -165,7 +159,7 @@ class GRPOTrainer(RLTrainer):
 
         self.config: GRPOConfig = config
 
-    def _initialize_trainer(self):
+    def initialize_trainer(self):
         """Initialize GRPO specific settings"""
 
         # avoid adding group of samples with almost identical outcomes
@@ -178,32 +172,223 @@ class GRPOTrainer(RLTrainer):
             _dummy_rewards, unbiased=False
         )
 
-    def _get_exploration_epsilon(self) -> float:
-        """Computes exploration epsilon based on the current iteration step count."""
-        if self.config.explore_decay_steps == 0:
-            self.explore_epsilon = 0.0
-        elif self.iteration_count >= self.config.explore_decay_steps:
-            self.explore_epsilon = self.config.explore_min_epsilon
+        # Controls exploration
+        self.explore_epsilon = 0.0
+
+    def sync_policy_model(self):
+        """Not required with Zero-2"""
+        pass
+
+    def build_train_loader(
+        self, experience: List[TransitionData]
+    ) -> DataLoader:
+        """Creates a train loader using the collected experiences.
+
+        Args:
+            experience (List[TransitionData]): Rollout transitions
+        Returns:
+            DataLoader: A dataloader ready for training.
+        """
+        data_loader = DataLoader(
+            experience,
+            batch_size=self.config.train_micro_batch_size,
+            shuffle=True,
+            pin_memory=self.device.type == 'cuda',
+            collate_fn=self._train_collate_fn,
+            drop_last=True,
+        )
+
+        return data_loader
+
+    def compute_loss(
+        self, pi_logits: torch.Tensor, experience_batch: TransitionData
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute GRPO loss for a single training batch
+
+        Args:
+            pi_logits (torch.Tensor): Raw logits of actions computed using
+                current policy, shape [batch_size, seq_len]
+            experience_batch (TransitionData): A batch of samples collected
+                during generation
+        Returns:
+            Tuple[torch.Tensor, Dict]: Tuple containing the total loss tensor
+                and a dictionary of metrics
+        """
+        behavior_logprobs = experience_batch.pi_logprobs.to(self.device)
+        actions = experience_batch.actions.to(self.device)
+        advantages = experience_batch.advantages.to(self.device)
+        loss_mask = experience_batch.loss_mask.to(self.device)
+
+        if self.config.normalize_advantages:
+            advantages = self.masked_whiten(advantages, loss_mask)
+
+        # PPO clipped surrogate PG loss
+        pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
+        ratio = torch.exp(pi_logprobs - behavior_logprobs)
+        clipped_ratio = ratio.clamp(
+            1 - self.config.clip_eps, 1 + self.config.clip_eps
+        )
+        pg_losses1 = ratio * advantages.detach()
+        pg_losses2 = clipped_ratio * advantages.detach()
+        pg_losses = -torch.min(pg_losses1, pg_losses2)
+
+        with torch.no_grad():
+            approxkl = 0.5 * self.masked_mean(
+                torch.square(pi_logprobs - behavior_logprobs), loss_mask
+            )
+            clipfrac = self.masked_mean(
+                torch.lt(pg_losses2, pg_losses1), loss_mask
+            )
+
+        # First average over the sequence length, then average over the batch
+        pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
+
+        # Compute entropy for the policy
+        # Convert log probabilities to probabilities first
+        probs = torch.exp(pi_logprobs)
+        entropies = -torch.sum(probs * pi_logprobs * loss_mask, dim=-1)
+        entropy = entropies.mean()
+        entropy_loss = self.config.entropy_loss_coef * entropy
+
+        # Initialize metrics with common values
+        metrics = {
+            'train/pg_loss': pg_loss.detach().item(),
+            'train/entropy_loss': entropy_loss.detach().item(),
+            'policy/entropy': entropy.detach().item(),
+            'policy/approxkl': approxkl.detach().item(),
+            'policy/clipfrac': clipfrac.detach().item(),
+        }
+
+        # Compute KL divergence if coefficient is positive
+        if self.config.kl_loss_coef > 0:
+            ref_logprobs = experience_batch.ref_logprobs.to(self.device)
+            # Compute the KL divergence between the model and the reference model
+            per_token_kl = (
+                torch.exp(ref_logprobs - pi_logprobs)
+                - (ref_logprobs - pi_logprobs)
+                - 1
+            )
+
+            # # Clamp for stability
+            # per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
+            # per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
+
+            kl = self.masked_mean(per_token_kl, loss_mask, dim=1).mean()
+            kl_loss = self.config.kl_loss_coef * kl
+
+            loss = pg_loss + kl_loss + entropy_loss
+            metrics.update(
+                {
+                    'train/kl_loss': kl_loss.detach().item(),
+                    'objective/kl': kl.detach().item(),
+                }
+            )
         else:
-            # Cosine decay schedule
-            progress = self.iteration_count / self.config.explore_decay_steps
-            cosine_decay = (
-                0.5 * (1 + torch.cos(torch.tensor(progress * torch.pi))).item()
-            )
-            self.explore_epsilon = (
-                self.config.explore_min_epsilon
-                + (
-                    self.config.explore_init_epsilon
-                    - self.config.explore_min_epsilon
+            loss = pg_loss + entropy_loss
+
+        return loss, metrics
+
+    def train_step(self, train_dataloader: DataLoader):
+        """Performs the policy update using collected rollout."""
+
+        for _ in range(self.config.num_updates):
+            for i, micro_batch in enumerate(train_dataloader):
+                input_ids = micro_batch.states.to(self.device)
+                attention_mask = (
+                    input_ids != self.tokenizer.pad_token_id
+                ).bool()
+                pi_logits = self.policy_engine.forward(
+                    input_ids=input_ids, attention_mask=attention_mask
+                ).logits
+
+                loss, metrics = self.compute_loss(pi_logits, micro_batch)
+
+                del micro_batch, input_ids, attention_mask, pi_logits
+                self.clean_up()
+
+                self.policy_engine.backward(loss)
+                self.policy_engine.step()
+
+                for k, v in metrics.items():
+                    self.logger.log_scalar(k, v)
+
+                if self.policy_engine.is_gradient_accumulation_boundary():
+                    self.policy_update_count += 1
+                    self.logger.log_scalar(
+                        'train/policy_update', self.policy_update_count
+                    )
+                    self.logger.log_scalar(
+                        'train/learning_rate',
+                        self.policy_engine.get_lr()[0],
+                    )
+
+    @torch.inference_mode()
+    def evaluate_step(self):
+        """Run the policy on evaluation dataset"""
+
+        if self.eval_env is None:
+            return
+
+        local_rollout_size = (
+            self.config.eval_rollout_size
+            // self.config.eval_batch_size
+            // self.dist_manager.world_size
+        )
+
+        # Use greedy sampling
+        eval_gen_kwargs = {
+            'eos_token_id': self.tokenizer.eos_token_id,
+            'pad_token_id': self.tokenizer.pad_token_id,
+            'max_new_tokens': self.config.max_completion_tokens,
+            'temperature': None,
+            'top_p': None,
+            'top_k': None,
+            'repetition_penalty': None,
+            'num_return_sequences': 1,
+            'do_sample': False,
+            'use_cache': True,
+            'output_scores': False,
+            'output_logits': False,
+            'return_dict_in_generate': True,
+            'return_legacy_cache': False,
+        }
+
+        with self.unwrapped_model_for_generation() as model:
+            for _ in range(local_rollout_size):
+                outputs = self.eval_env.rollout(model, eval_gen_kwargs)
+                self.log_batch_episodes(
+                    self._eval_phase, outputs, self.global_step
                 )
-                * cosine_decay
+
+    @torch.inference_mode()
+    def generate_experience(self) -> List[TransitionData]:
+        """Generates samples using the current policy."""
+
+        with self.unwrapped_model_for_generation() as model:
+            collected_samples: List[TransitionData] = []
+
+            # we always use batch size of 1 during training roll out
+            local_rollout_size = (
+                self.config.train_rollout_size // self.dist_manager.world_size
             )
 
-        return self.explore_epsilon
+            while len(collected_samples) < local_rollout_size:
+                samples = self._generate_group_samples(model)
+                if samples:
+                    collected_samples.extend(samples)
 
-    def _generate_group_samples(self) -> List[TransitionData]:
+            if len(collected_samples) > local_rollout_size:
+                collected_samples = collected_samples[:local_rollout_size]
+
+        return collected_samples
+
+    def _generate_group_samples(
+        self, model: PreTrainedModel
+    ) -> List[TransitionData]:
         """Generate responses for a batch of questions
 
+        Args:
+            model (PreTrainedModel): The current policy model.
         Returns:
             List[TransitionData]: List of samples for all groups in the batch
         """
@@ -229,14 +414,14 @@ class GRPOTrainer(RLTrainer):
             'explore_probability': self._get_exploration_epsilon(),  # control explore env custom logit
         }
 
-        outputs = self.train_env.rollout(
-            self.policy_model, llm_gen_kwargs, **custom_kwargs
-        )
-
+        outputs = self.train_env.rollout(model, llm_gen_kwargs, **custom_kwargs)
         self.log_batch_episodes(self._train_phase, outputs, self.global_step)
-
+        self.logger.log_scalar(
+            'other/exploration_epsilon', self.explore_epsilon
+        )
         return self._convert_group_episodes_to_transitions(outputs)
 
+    @torch.no_grad()
     def _convert_group_episodes_to_transitions(
         self,
         episodes: List[EpisodeData],
@@ -245,7 +430,6 @@ class GRPOTrainer(RLTrainer):
 
         Args:
             episodes (List[TransitionData]): A list of episodes from the env rollout.
-
         Returns:
             List[TransitionData]: A list of training sample for training
         """
@@ -269,12 +453,12 @@ class GRPOTrainer(RLTrainer):
                 f"Skipping samples with identical rewards, \
                     minimum group reward std: {self.group_reward_std_threshold}"
             )
-            self.logger.log_scalar('others/skipped_sample_count', len(rewards))
+            self.logger.log_scalar('other/skipped_sample_count', len(rewards))
             return []
 
         # Training specific processing
         normalized_rewards = (
-            self.normalize_group_rewards(rewards)
+            self._normalize_group_rewards(rewards)
             if self.config.normalize_rewards
             else rewards
         )
@@ -402,7 +586,7 @@ class GRPOTrainer(RLTrainer):
 
         return transitions
 
-    def normalize_group_rewards(
+    def _normalize_group_rewards(
         self,
         rewards: torch.Tensor,
         zero_mean_only: bool = True,
@@ -414,14 +598,13 @@ class GRPOTrainer(RLTrainer):
         Args:
             rewards (torch.Tensor): List of rewards for the group.
             eps (float): Small value to prevent division by zero.
-
         Returns:
             torch.Tensor: Normalized rewards.
         """
         assert eps > 0.0, 'Epsilon must be positive'
         assert rewards.dim() == 1, 'Rewards must be 1-dimensional'
-        if len(rewards) <= 1:
-            return rewards
+        if len(rewards) < 4:
+            raise ValueError('Number of group rewards must be greater than 4')
 
         mean_reward = rewards.mean()
         std_reward = rewards.std(unbiased=False)
@@ -430,221 +613,28 @@ class GRPOTrainer(RLTrainer):
 
         return (rewards - mean_reward) / (std_reward + eps)
 
-    @torch.inference_mode()
-    def generate_experience(self) -> List[TransitionData]:
-        """Generates samples using the current policy."""
-
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            record_shapes=True,
-            with_stack=True,
-            profile_memory=True,  # Optional, but can be useful
-        ) as prof:
-
-            with torch.amp.autocast(
-                device_type='cuda',
-                enabled=self.torch_dtype in [torch.float16, torch.bfloat16],
-                dtype=self.torch_dtype,
-            ):
-                assert not self.policy_model.training
-                collected_samples: List[TransitionData] = []
-
-                # we always use batch size of 1 during training roll out
-                local_rollout_size = (
-                    self.config.train_rollout_size
-                    // self.dist_manager.world_size
-                )
-
-                while len(collected_samples) < local_rollout_size:
-                    samples = self._generate_group_samples()
-                    if samples:
-                        collected_samples.extend(samples)
-
-                if len(collected_samples) > local_rollout_size:
-                    collected_samples = collected_samples[:local_rollout_size]
-
-        # Print results sorted by CPU and CUDA time
-        print(prof.key_averages().table(sort_by='cpu_time_total', row_limit=20))
-        print(
-            prof.key_averages().table(sort_by='cuda_time_total', row_limit=20)
-        )
-
-        return collected_samples
-
-    def build_train_batch(self, experience: List[TransitionData]) -> DataLoader:
-        data_loader = DataLoader(
-            experience,
-            batch_size=self.config.train_micro_batch_size,
-            shuffle=True,
-            pin_memory=self.device.type == 'cuda',
-            collate_fn=self._train_collate_fn,
-            drop_last=True,
-        )
-
-        return data_loader
-
-    def compute_loss(
-        self, pi_logits: torch.Tensor, experience_batch: TransitionData
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute loss for a single training batch
-
-        Args:
-            pi_logits (torch.Tensor): Raw logits of actions computed using
-                current policy, shape [batch_size, seq_len]
-            experience_batch (TransitionData): A batch of samples collected
-                during generation
-
-        Returns:
-            Tuple[torch.Tensor, Dict]: Tuple containing the total loss tensor
-                and a dictionary of metrics
-        """
-        behavior_logprobs = experience_batch.pi_logprobs.to(self.device)
-        actions = experience_batch.actions.to(self.device)
-        advantages = experience_batch.advantages.to(self.device)
-        loss_mask = experience_batch.loss_mask.to(self.device)
-
-        if self.config.normalize_advantages:
-            advantages = self.masked_whiten(advantages, loss_mask)
-
-        # PPO clipped surrogate PG loss
-        pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
-        ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clipped_ratio = ratio.clamp(
-            1 - self.config.clip_eps, 1 + self.config.clip_eps
-        )
-        pg_losses1 = ratio * advantages.detach()
-        pg_losses2 = clipped_ratio * advantages.detach()
-        pg_losses = -torch.min(pg_losses1, pg_losses2)
-
-        with torch.no_grad():
-            approxkl = 0.5 * self.masked_mean(
-                torch.square(pi_logprobs - behavior_logprobs), loss_mask
-            )
-            clipfrac = self.masked_mean(
-                torch.lt(pg_losses2, pg_losses1), loss_mask
-            )
-
-        # First average over the sequence length, then average over the batch
-        pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
-
-        # Compute entropy for the policy
-        # Convert log probabilities to probabilities first
-        probs = torch.exp(pi_logprobs)
-        entropies = -torch.sum(probs * pi_logprobs * loss_mask, dim=-1)
-        entropy = entropies.mean()
-        entropy_loss = self.config.entropy_loss_coef * entropy
-
-        # Initialize metrics with common values
-        metrics = {
-            'train/pg_loss': pg_loss.detach().item(),
-            'train/entropy_loss': entropy_loss.detach().item(),
-            'policy/entropy': entropy.detach().item(),
-            'policy/approxkl': approxkl.detach().item(),
-            'policy/clipfrac': clipfrac.detach().item(),
-        }
-
-        # Compute KL divergence if coefficient is positive
-        if self.config.kl_loss_coef > 0:
-            ref_logprobs = experience_batch.ref_logprobs.to(self.device)
-            # Compute the KL divergence between the model and the reference model
-            per_token_kl = (
-                torch.exp(ref_logprobs - pi_logprobs)
-                - (ref_logprobs - pi_logprobs)
-                - 1
-            )
-
-            # # Clamp for stability
-            # per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
-            # per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
-
-            kl = self.masked_mean(per_token_kl, loss_mask, dim=1).mean()
-            kl_loss = self.config.kl_loss_coef * kl
-
-            loss = pg_loss + kl_loss + entropy_loss
-            metrics.update(
-                {
-                    'train/kl_loss': kl_loss.detach().item(),
-                    'objective/kl': kl.detach().item(),
-                }
-            )
+    def _get_exploration_epsilon(self) -> float:
+        """Computes exploration epsilon based on the current iteration step count."""
+        if self.config.explore_decay_steps == 0:
+            self.explore_epsilon = 0.0
+        elif self.global_step >= self.config.explore_decay_steps:
+            self.explore_epsilon = self.config.explore_min_epsilon
         else:
-            loss = pg_loss + entropy_loss
+            # Cosine decay schedule
+            progress = self.global_step / self.config.explore_decay_steps
+            cosine_decay = (
+                0.5 * (1 + torch.cos(torch.tensor(progress * torch.pi))).item()
+            )
+            self.explore_epsilon = (
+                self.config.explore_min_epsilon
+                + (
+                    self.config.explore_init_epsilon
+                    - self.config.explore_min_epsilon
+                )
+                * cosine_decay
+            )
 
-        return loss, metrics
-
-    def train_step(self, train_dataloader: DataLoader):
-        """Performs the policy update phase."""
-
-        for _ in range(self.config.num_updates):
-            for i, micro_batch in enumerate(train_dataloader):
-                input_ids = micro_batch.states.to(self.device)
-                attention_mask = (
-                    input_ids != self.tokenizer.pad_token_id
-                ).bool()
-                pi_logits = self.policy_engine.forward(
-                    input_ids=input_ids, attention_mask=attention_mask
-                ).logits
-
-                loss, metrics = self.compute_loss(pi_logits, micro_batch)
-
-                del micro_batch, input_ids, attention_mask, pi_logits
-                self.clean_up()
-
-                self.policy_engine.backward(loss)
-                self.policy_engine.step()
-
-                for k, v in metrics.items():
-                    self.logger.log_scalar(k, v)
-
-                if self.policy_engine.is_gradient_accumulation_boundary():
-                    self.policy_update_count += 1
-                    self.logger.log_scalar(
-                        'train/policy_update', self.policy_update_count
-                    )
-                    self.logger.log_scalar(
-                        'train/learning_rate',
-                        self.policy_engine.get_lr()[0],
-                    )
-
-    @torch.inference_mode()
-    def evaluate_step(self):
-        """Run the policy on evaluation dataset"""
-
-        if self.eval_env is None:
-            return
-
-        assert not self.policy_model.training
-
-        local_rollout_size = (
-            self.config.eval_rollout_size
-            // self.config.eval_batch_size
-            // self.dist_manager.world_size
-        )
-
-        # Use greedy sampling
-        eval_gen_kwargs = {
-            'eos_token_id': self.tokenizer.eos_token_id,
-            'pad_token_id': self.tokenizer.pad_token_id,
-            'max_new_tokens': self.config.max_completion_tokens,
-            'temperature': None,
-            'top_p': None,
-            'top_k': None,
-            'repetition_penalty': None,
-            'num_return_sequences': 1,
-            'do_sample': False,
-            'use_cache': True,
-            'output_scores': False,
-            'output_logits': False,
-            'return_dict_in_generate': True,
-            'return_legacy_cache': False,
-        }
-
-        for _ in range(local_rollout_size):
-            outputs = self.eval_env.rollout(self.policy_model, eval_gen_kwargs)
-            self.log_batch_episodes(self._eval_phase, outputs, self.global_step)
+        return self.explore_epsilon
 
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""

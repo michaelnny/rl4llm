@@ -62,7 +62,6 @@ class ExploreLogitsProcessor(LogitsProcessor):
             TypeError: If input types are invalid.
             ValueError: If input values are out of expected ranges.
         """
-        # --- Input Validation ---
         if not isinstance(initial_seq_len, int) or initial_seq_len < 0:
             raise ValueError('initial_seq_len must be a non-negative integer.')
         if not isinstance(temperature, (float, int, list, torch.Tensor)):

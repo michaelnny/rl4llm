@@ -1,3 +1,5 @@
+"""Handler for aggregate metrics"""
+
 import logging
 import re
 from collections import defaultdict
@@ -7,7 +9,7 @@ import numpy as np
 import torch
 
 from rl4llm.core.distributed import DistributedManager
-from rl4llm.logging.handlers.base import BaseHandler
+from rl4llm.logging.handlers.base_handler import BaseHandler
 
 
 def is_valid_array(x) -> bool:
@@ -48,9 +50,9 @@ class MetricHandler(BaseHandler):
     BASE_DEFAULT_METRICS_AGGREGATION_CONFIG = {
         # Non-regex keywords
         'prompt_length': ['mean', 'std'],
-        'completion_length': ['mean', 'std', 'p90'],
-        'reward': ['mean', 'std', 'p90'],
-        'accuracy_reward': ['mean', 'std', 'p90'],
+        'completion_length': ['mean', 'std', 'p50', 'p90'],
+        'reward': ['mean', 'std', 'p50', 'p90'],
+        'accuracy_reward': ['mean', 'std', 'p50', 'p90'],
         'loss': ['mean'],
         'learning_rate': ['last'],
         'lr': ['last'],
@@ -71,6 +73,7 @@ class MetricHandler(BaseHandler):
         r'.*_total$': ['sum'],
         r'.*_update$': ['sum'],
         r'^time/.*$': ['sum'],
+        r'^resource/.*$': ['mean', 'min', 'max'],
         # Default
         'default': ['mean'],
     }
@@ -101,7 +104,6 @@ class MetricHandler(BaseHandler):
         )
         self._aggregation_methods_cache: Dict[str, List[str]] = {}
 
-        # --- Simplified Config Storage ---
         # Store non-regex keys sorted by length descending for prioritized matching (exact & fuzzy)
         self._non_regex_config_sorted: List[Tuple[str, List[str]]] = []
         # Store compiled regex patterns
@@ -350,4 +352,3 @@ class MetricHandler(BaseHandler):
         self._logger.debug('Closing MetricHandler.')
         self.clear_buffer()
         self._aggregation_methods_cache.clear()
-        pass

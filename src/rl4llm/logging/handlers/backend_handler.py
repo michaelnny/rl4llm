@@ -1,3 +1,5 @@
+"""Handler for logging metrics to Tensorboard"""
+
 import logging
 import os
 import time
@@ -7,7 +9,7 @@ import numpy as np
 import yaml
 
 from rl4llm.core.distributed import DistributedManager
-from rl4llm.logging.handlers.base import BaseHandler
+from rl4llm.logging.handlers.base_handler import BaseHandler
 
 
 class BackendHandler(BaseHandler):

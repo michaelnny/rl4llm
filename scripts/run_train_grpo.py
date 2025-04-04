@@ -238,16 +238,16 @@ def main():
         explore_skip = len(tokenizer.encode('<think>'))
 
     if grpo_config.group_temperature:
-        temperatures = torch.linspace(
+        temperature = torch.linspace(
             grpo_config.min_temperature,
             grpo_config.max_temperature,
             steps=grpo_config.group_size,
             dtype=torch_dtype,
         )
-        temperatures = torch.round(temperatures, decimals=2)
+        temperature = torch.round(temperature, decimals=2)
 
     explore_env_args = {
-        'temperatures': temperatures,
+        'temperature': temperature,
         'explore_steps': grpo_config.explore_steps,
         'explore_top_k': grpo_config.explore_top_k,
         'explore_skip': explore_skip,
@@ -257,7 +257,6 @@ def main():
         'replace_prevent_patterns': replace_prevent_patterns,
         'replace_max_per_seq': grpo_config.replace_max_per_seq,
         'replace_prob': grpo_config.replace_prob,
-        # 'replace_threshold': grpo_config.replace_threshold,
     }
 
     train_env = ExploreLLMEnv(
