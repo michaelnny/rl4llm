@@ -1,3 +1,4 @@
+import functools
 import logging
 import random
 import re
@@ -16,7 +17,7 @@ from transformers import (
 )
 
 from rl4llm.envs.llm_env import EnvState, LLMEnv
-from rl4llm.generations.explore_processor import ExploreLogitsProcessor
+from rl4llm.generation.explore_processor import ExploreLogitsProcessor
 
 
 class ExploreLLMEnv(LLMEnv):
@@ -27,12 +28,13 @@ class ExploreLLMEnv(LLMEnv):
         explore_steps: int,
         explore_top_k: int,
         explore_skip: int,
+        explore_decay_rate: float,
         replace_source_tokens: List[int],
         replace_target_tokens: List[int],
         replace_prevent_patterns: List[List[int]],
         replace_max_per_seq: int,
         replace_prob: float,
-        replace_threshold: float,
+        # replace_threshold: float,
         **kwargs,
     ):
 
@@ -44,25 +46,32 @@ class ExploreLLMEnv(LLMEnv):
         self.explore_steps = explore_steps
         self.explore_top_k = explore_top_k
         self.explore_skip = explore_skip
+        self.explore_decay_rate = explore_decay_rate
         self.replace_source_tokens = replace_source_tokens
         self.replace_target_tokens = replace_target_tokens
         self.replace_prevent_patterns = replace_prevent_patterns  # if sequence has some pattern, do not perform replacement
         self.replace_max_per_seq = replace_max_per_seq
-        self.replace_threshold = replace_threshold
+        # self.replace_threshold = replace_threshold
         self.replace_prob = replace_prob
 
-        self.explore_processor = ExploreLogitsProcessor(
-            temperatures=self.temperatures,
-            explore_steps=self.explore_steps,
-            explore_skip=self.explore_skip,
-            explore_top_k=self.explore_top_k,
-            replace_source_tokens=self.replace_source_tokens,
-            replace_target_tokens=self.replace_target_tokens,
-            replace_prevent_patterns=self.replace_prevent_patterns,
-            replace_max_per_seq=self.replace_max_per_seq,
-            replace_prob=self.replace_prob,
-            replace_threshold=self.replace_threshold,
-        )
+        # self.explore_processor = ExploreLogitsProcessor(
+        #     temperatures=self.temperatures,
+        #     explore_steps=self.explore_steps,
+        #     explore_skip=self.explore_skip,
+        #     explore_top_k=self.explore_top_k,
+        #     replace_source_tokens=self.replace_source_tokens,
+        #     replace_target_tokens=self.replace_target_tokens,
+        #     replace_prevent_patterns=self.replace_prevent_patterns,
+        #     replace_max_per_seq=self.replace_max_per_seq,
+        #     replace_prob=self.replace_prob,
+        #     replace_threshold=self.replace_threshold,
+        # )
+
+        self.accuracy_fn = None
+        for fn in self.reward_functions:
+            if fn.name == 'accuracy_reward':
+                self.accuracy_fn = fn
+                break
 
     def _generate_completions(
         self,
@@ -81,12 +90,32 @@ class ExploreLLMEnv(LLMEnv):
         gen_args_copy['return_dict_in_generate'] = True
 
         # add explore logits processor
-        explore_prob = gen_args_copy.pop('explore_probability', 0.0)
+        explore_prob = kwargs.get('explore_probability', 0.0)
 
         if explore_prob > 0 and (random.random() < explore_prob):
-            self.explore_processor.reset()
+            correctness_callback = None
+            # TODO handle recover the ground truth from state
+            # if self.accuracy_fn:
+            #     correctness_callback = functools.partial(self.accuracy_fn.__call__, ground_truths=ground_truths)
+
+            explore_logits_processor = ExploreLogitsProcessor(
+                initial_seq_len=input_ids.shape[1],
+                tokenizer=self.tokenizer,
+                temperature=self.temperatures,
+                explore_steps=self.explore_steps,
+                explore_skip=self.explore_skip,
+                explore_top_k=self.explore_top_k,
+                explore_decay_rate=self.explore_decay_rate,
+                replace_source_tokens=self.replace_source_tokens,
+                replace_target_tokens=self.replace_target_tokens,
+                replace_prevent_patterns=self.replace_prevent_patterns,
+                replace_max_per_seq=self.replace_max_per_seq,
+                replace_prob=self.replace_prob,
+                # replace_threshold=self.replace_threshold,
+                correctness_callback=correctness_callback,
+            )
             gen_args_copy['logits_processor'] = LogitsProcessorList(
-                [self.explore_processor]
+                [explore_logits_processor]
             )
 
         output = llm.generate(

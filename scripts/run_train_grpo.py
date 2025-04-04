@@ -24,7 +24,6 @@ from rl4llm.trainers.grpo_trainer import (
     GRPOTrainer,
 )
 from rl4llm.utils import load_yaml_config_file, set_seed
-from rl4llm.utils.dataset_utils import shard_dataset
 from rl4llm.utils.model_utils import (
     build_model_and_tokenizer,
     create_optimizer_and_scheduler,
@@ -251,13 +250,14 @@ def main():
         'temperatures': temperatures,
         'explore_steps': grpo_config.explore_steps,
         'explore_top_k': grpo_config.explore_top_k,
+        'explore_skip': explore_skip,
+        'explore_decay_rate': grpo_config.explore_decay_rate,
         'replace_source_tokens': replace_source_tokens,
         'replace_target_tokens': replace_target_tokens,
         'replace_prevent_patterns': replace_prevent_patterns,
         'replace_max_per_seq': grpo_config.replace_max_per_seq,
         'replace_prob': grpo_config.replace_prob,
-        'replace_threshold': grpo_config.replace_threshold,
-        'explore_skip': explore_skip,
+        # 'replace_threshold': grpo_config.replace_threshold,
     }
 
     train_env = ExploreLLMEnv(

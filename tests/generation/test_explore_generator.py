@@ -1,4 +1,4 @@
-from unittest.mock import (  # Use MagicMock for flexibility
+from unittest.mock import (
     MagicMock,
     Mock,
     call,
@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 try:
-    from rl4llm.generations.explore_generator import (
+    from rl4llm.generation.explore_generator import (
         ExploreLLMGenerator,
         GenerateDecoderOnlyOutput,
     )

@@ -52,16 +52,17 @@ grpo_config:
   # exploring start
   explore_steps: 2              # initial start steps to do random sampling
   explore_top_k: 30                   # Top K tokens to random sample during initial start steps
+  explore_decay_rate: 0.9
 
   # exploring by token replacement
-  replace_prob: 0.5
-  replace_threshold: 0.8
-  replace_max_per_seq: 2         # max number of replacements to the same sequence
+  replace_prob: 0.0
+  # replace_threshold: 0.9
+  replace_max_per_seq: 0         # max number of replacements to the same sequence
 
   # evaluation
   eval_rollout_size: 1024    
   eval_batch_size: 64
-  eval_interval: 25
+  eval_interval: 0
 
   # others
   checkpoint_interval: 100            # every N iteration

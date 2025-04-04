@@ -478,6 +478,10 @@ class DistributedManager:
         # Return the received object (it's placed in the first element of output_obj_list)
         return output_obj_list[0]  # type: ignore # Correctly typed based on runtime check
 
+    def synchronize(self) -> None:
+        """Calls torch.cuda.synchronize."""
+        torch.cuda.synchronize(self.device)
+
     @classmethod
     def get_instance(cls, **kwargs) -> 'DistributedManager':
         """Gets the singleton instance of the DistributedManager."""

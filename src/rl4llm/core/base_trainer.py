@@ -212,21 +212,6 @@ class RLTrainer(ABC, TrainingMixin):
         """
         pass
 
-    @abstractmethod
-    def _train_collate_fn(
-        self, batch: List[Dict[str, Any]], **kwargs: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Collate function for training loader
-
-        Args:
-            batch (List[Dict[str, Any]]): Current batch samples.
-
-        Returns:
-            Dict[str, Any]: A dictionary containing evaluation data for current batch.
-        """
-        pass
-
     def _prepare_for_generation(self):
         """Sets models to evaluation mode for experience generation."""
         self.policy_engine.eval()
@@ -286,6 +271,8 @@ class RLTrainer(ABC, TrainingMixin):
         if run_config and self.dist_manager.is_master:
             self.logger.log_hyperparams(run_config)
 
+        self.dist_manager.synchronize()
+
         # Initial evaluation before training starts
         if self.config.eval_interval > 0 and self.eval_env:
             self.logger.info('Running initial evaluation...')
@@ -296,62 +283,62 @@ class RLTrainer(ABC, TrainingMixin):
             self.dist_manager.barrier()
 
         for t in range(self.config.max_steps):
-            self.global_step = t
-
-            # 1. Generation Phase
-            with self.logger.timer('generation'):
-                self._prepare_for_generation()
-                # generate_experience returns rank-local experience
-                local_experience = self.generate_experience()
-                self.clean_up()
-            self.dist_manager.barrier()
-
-            # 2. Learning Phase
-            with self.logger.timer('train'):
-                self._prepare_for_training()
-                # build_train_batch processes local_experience and returns a DataLoader
-                train_dataloader = self.build_train_batch(local_experience)
-                self.train_step(train_dataloader)
-                self.clean_up()
-            self.dist_manager.barrier()
-
-            # 3. Post-Iteration Operations
-            # Sync reference model
-            if (
-                self.reference_model
-                and self.config.sync_reference_interval > 0
-                and (t + 1) % self.config.sync_reference_interval == 0
-            ):
-                with self.logger.timer('sync_reference_model'):
-                    self.sync_reference_model()
-
-            # Checkpointing
-            if (
-                self.config.checkpoint_interval > 0
-                and (t + 1) % self.config.checkpoint_interval == 0
-            ):
-                with self.logger.timer('checkpoint'):
-                    self.save_checkpoint(t + 1)
-
-            # Evaluation
-            if (
-                self.config.eval_interval > 0
-                and self.eval_env
-                and (t + 1) % self.config.eval_interval == 0
-            ):
-                with self.logger.timer('evaluate'):
+            with self.logger.timer('global_step'):
+                self.global_step = t
+                # 1. Generation Phase
+                with self.logger.timer('generation'):
                     self._prepare_for_generation()
-                    self.evaluate_step()
+                    # generate_experience returns rank-local experience
+                    local_experience = self.generate_experience()
                     self.clean_up()
                 self.dist_manager.barrier()
 
-            # Logging metrics
-            self.logger.aggregate_and_log(self.global_step)
+                # 2. Learning Phase
+                with self.logger.timer('train'):
+                    self._prepare_for_training()
+                    # build_train_batch processes local_experience and returns a DataLoader
+                    train_dataloader = self.build_train_batch(local_experience)
+                    self.train_step(train_dataloader)
+                    self.clean_up()
+                self.dist_manager.barrier()
 
-            # Clean up memory
-            del local_experience
-            del train_dataloader
-            self.clean_up()
+                # 3. Post-Iteration Operations
+                # Sync reference model
+                if (
+                    self.reference_model
+                    and self.config.sync_reference_interval > 0
+                    and (t + 1) % self.config.sync_reference_interval == 0
+                ):
+                    with self.logger.timer('sync_reference_model'):
+                        self.sync_reference_model()
+
+                # Checkpointing
+                if (
+                    self.config.checkpoint_interval > 0
+                    and (t + 1) % self.config.checkpoint_interval == 0
+                ):
+                    with self.logger.timer('checkpoint'):
+                        self.save_checkpoint(t + 1)
+
+                # Evaluation
+                if (
+                    self.config.eval_interval > 0
+                    and self.eval_env
+                    and (t + 1) % self.config.eval_interval == 0
+                ):
+                    with self.logger.timer('evaluate'):
+                        self._prepare_for_generation()
+                        self.evaluate_step()
+                        self.clean_up()
+                    self.dist_manager.barrier()
+
+                # Logging metrics
+                self.logger.aggregate_and_log(self.global_step)
+
+                # Clean up memory
+                del local_experience
+                del train_dataloader
+                self.clean_up()
 
         self.logger.info('Training finished.')
         # Final checkpoint save
