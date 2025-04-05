@@ -401,7 +401,7 @@ class GRPOTrainer(RLTrainer):
             'top_p': self.config.top_p,
             'top_k': self.config.top_k,
             'repetition_penalty': self.config.repetition_penalty,
-            'num_return_sequences': self.config.group_size,
+            'num_return_sequences': 1,  # we handle the group size inside the LLMEnv
             'do_sample': True,
             'use_cache': True,
             'output_scores': False,

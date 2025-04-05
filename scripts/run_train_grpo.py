@@ -5,6 +5,7 @@ import cProfile
 import os
 import pstats
 import sys
+from functools import partial
 from traceback import format_exc
 from typing import Any, Dict, List, Union
 
@@ -50,7 +51,7 @@ def parse_args():
 
 
 PROMPT_TEMPLATE_EASY = """Question:
-{query}
+{question}
 
 Answer:
 Let's think step by step.
@@ -62,27 +63,18 @@ You are a helpful assistant.<|im_end|>
 Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
 
 Question:
-{query}<|im_end|>
+{question}<|im_end|>
 <|im_start|>assistant
 """
 
 
-def preprocess_dataset(dataset: List[Dict], model_name: str) -> List[Dict]:
-    """Pre-tokenize the entire dataset and return a list of tokenized inputs."""
+def apply_prompt_template(item: Dict, template: str) -> Dict:
+    """Apply the prompt template for sample, assume the template has a 'question' place holder"""
+    question = item['question']
 
-    if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
-        template = PROMPT_TEMPLATE_EASY
-    else:
-        template = PROMPT_TEMPLATE
+    prompt = template.format(question=question)
 
-    processed_data = []
-    for item in dataset:
-        question = item['question']
-        prompt = template.format(query=question)
-
-        processed_data.append({'prompt': prompt, **item})
-
-    return processed_data
+    return {'prompt': prompt}
 
 
 class AccuracyRewardFunction(BaseRewardFunction):
@@ -110,43 +102,6 @@ class AccuracyRewardFunction(BaseRewardFunction):
             math_problem_grader(full_answer=answer, ground_truth=truth)
             for answer, truth in zip(completions, ground_truths)
         ]
-
-
-# def preprocess_dataset(
-#     dataset: List[Dict], tokenizer: PreTrainedTokenizer, model_name: str
-# ) -> List[Dict]:
-#     """Pre-tokenize the entire dataset and return a list of tokenized inputs."""
-
-#     if any([k in model_name for k in ["0.5B", "1B", "1.5B"]]):
-#         template = PROMPT_TEMPLATE_EASY
-#     else:
-#         template = PROMPT_TEMPLATE
-
-#     tokenized_data = []
-#     for item in dataset:
-#         question = item["question"]
-#         ground_truth = item["ground_truth"]
-#         task_type = item["task_type"]
-#         prompt = template.format(query=question)
-#         inputs = tokenizer(
-#             prompt,
-#             return_tensors="pt",
-#             truncation=False,
-#             padding=False,
-#             max_length=tokenizer.model_max_length,
-#         )
-
-#         tokenized_data.append(
-#             {
-#                 "input_ids": inputs["input_ids"].squeeze(0),  # Shape: [seq_len]
-#                 "attention_mask": inputs["attention_mask"].squeeze(0),
-#                 "question": question,
-#                 "ground_truth": ground_truth,
-#                 "task_type": task_type,
-#             }
-#         )
-
-#     return tokenized_data
 
 
 def main():
@@ -201,8 +156,16 @@ def main():
         config['model'], torch_dtype
     )
 
-    train_dataset = preprocess_dataset(train_dataset, model_name)
-    eval_dataset = preprocess_dataset(eval_dataset, model_name)
+    if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
+        template = PROMPT_TEMPLATE_EASY
+    else:
+        template = PROMPT_TEMPLATE
+
+    # Define the function with fixed template using partial
+    apply_prompt = partial(apply_prompt_template, template=template)
+
+    train_dataset = train_dataset.map(apply_prompt)
+    eval_dataset = eval_dataset.map(apply_prompt)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
@@ -246,31 +209,43 @@ def main():
         )
         temperature = torch.round(temperature, decimals=2)
 
-    explore_env_args = {
-        'temperature': temperature,
-        'explore_steps': grpo_config.explore_steps,
-        'explore_top_k': grpo_config.explore_top_k,
-        'explore_skip': explore_skip,
-        'explore_decay_rate': grpo_config.explore_decay_rate,
-        'replace_source_tokens': replace_source_tokens,
-        'replace_target_tokens': replace_target_tokens,
-        'replace_prevent_patterns': replace_prevent_patterns,
-        'replace_max_per_seq': grpo_config.replace_max_per_seq,
-        'replace_prob': grpo_config.replace_prob,
-    }
+    # explore_env_args = {
+    #     'temperature': temperature,
+    #     'explore_steps': grpo_config.explore_steps,
+    #     'explore_top_k': grpo_config.explore_top_k,
+    #     'explore_skip': explore_skip,
+    #     'explore_decay_rate': grpo_config.explore_decay_rate,
+    #     'replace_source_tokens': replace_source_tokens,
+    #     'replace_target_tokens': replace_target_tokens,
+    #     'replace_prevent_patterns': replace_prevent_patterns,
+    #     'replace_max_per_seq': grpo_config.replace_max_per_seq,
+    #     'replace_prob': grpo_config.replace_prob,
+    # }
 
-    train_env = ExploreLLMEnv(
+    # train_env = ExploreLLMEnv(
+    #     dataset=train_dataset,
+    #     batch_size=1,
+    #     group_size=grpo_config.group_size,
+    #     tokenizer=tokenizer,
+    #     reward_functions=[AccuracyRewardFunction()],
+    #     rank=dist_manager.local_rank,
+    #     world_size=dist_manager.world_size,
+    #     **explore_env_args,
+    # )
+
+    train_env = LLMEnv(
         dataset=train_dataset,
         batch_size=1,
+        group_size=grpo_config.group_size,
         tokenizer=tokenizer,
         reward_functions=[AccuracyRewardFunction()],
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
-        **explore_env_args,
     )
     eval_env = LLMEnv(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
+        group_size=1,
         tokenizer=tokenizer,
         reward_functions=[AccuracyRewardFunction()],
         rank=dist_manager.local_rank,

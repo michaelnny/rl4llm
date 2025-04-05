@@ -646,7 +646,10 @@ class ExploreLLMGenerator:
         """
 
         if kwargs.get('num_return_sequences', 1) > 1:
-            raise ValueError('Does not support generate multiple sequences.')
+            raise ValueError(
+                'Does not support generate multiple sequences, \
+                             repeat the prompts before apply tokenization.'
+            )
 
         batch_size = input_ids.shape[0]
         initial_seq_len = input_ids.size(1)

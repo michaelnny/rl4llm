@@ -267,15 +267,15 @@ class LoggingManager:
         self.dist_manager.barrier()
         self.info(f"LoggingManager closed on Rank {self.rank}.")
 
-    def info(self, message: str) -> None:
+    def info(self, message: str, **kwargs) -> None:
         if self.is_master:
-            self.console_logger.info(message)
+            self.console_logger.info(message, **kwargs)
 
-    def warning(self, message: str) -> None:
-        self.console_logger.warning(message)
+    def warning(self, message: str, **kwargs) -> None:
+        self.console_logger.warning(message, **kwargs)
 
-    def error(self, message: str) -> None:
-        self.console_logger.error(message)
+    def error(self, message: str, **kwargs) -> None:
+        self.console_logger.error(message, **kwargs)
 
-    def debug(self, message: str) -> None:
-        self.console_logger.debug(message)
+    def debug(self, message: str, **kwargs) -> None:
+        self.console_logger.debug(message, **kwargs)

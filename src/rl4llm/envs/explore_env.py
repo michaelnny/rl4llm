@@ -65,6 +65,7 @@ class ExploreLLMEnv(LLMEnv):
         gen_args_copy = gen_args.copy()
         gen_args_copy.pop('input_ids', None)
         gen_args_copy.pop('attention_mask', None)
+        gen_args_copy.pop('num_return_sequences', None)
         gen_args_copy['return_dict_in_generate'] = True
 
         # add explore logits processor
