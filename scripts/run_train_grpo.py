@@ -155,6 +155,7 @@ def main():
     policy_model, tokenizer = build_model_and_tokenizer(
         config['model'], torch_dtype
     )
+    policy_model = policy_model.to(dist_manager.device)
 
     if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
         template = PROMPT_TEMPLATE_EASY

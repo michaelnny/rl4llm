@@ -353,11 +353,12 @@ class GRPOTrainer(RLTrainer):
             'return_legacy_cache': False,
         }
 
-        # with self.unwrapped_model_for_generation() as model:
-        model = self.policy_engine
-        for _ in range(local_rollout_size):
-            outputs = self.eval_env.rollout(model, eval_gen_kwargs)
-            self.log_batch_episodes(self._eval_phase, outputs, self.global_step)
+        with self.unwrapped_model_for_generation() as policy_model:
+            for _ in range(local_rollout_size):
+                outputs = self.eval_env.rollout(policy_model, eval_gen_kwargs)
+                self.log_batch_episodes(
+                    self._eval_phase, outputs, self.global_step
+                )
 
     @torch.inference_mode()
     def generate_experience(self) -> List[TransitionData]:
@@ -380,23 +381,20 @@ class GRPOTrainer(RLTrainer):
             'return_legacy_cache': False,
         }
 
-        with self.unwrapped_model_for_generation() as model:
+        # we always use batch size of 1 during training roll out
+        local_rollout_size = (
+            self.config.train_rollout_size // self.dist_manager.world_size
+        )
+        collected_samples: List[TransitionData] = []
 
-            collected_samples: List[TransitionData] = []
-
-            # we always use batch size of 1 during training roll out
-            local_rollout_size = (
-                self.config.train_rollout_size // self.dist_manager.world_size
-            )
-
+        with self.unwrapped_model_for_generation() as policy_model:
             while len(collected_samples) < local_rollout_size:
                 # control explore env custom logit
                 custom_kwargs = {
                     'explore_probability': self._get_exploration_epsilon(),
                 }
-
                 outputs = self.train_env.rollout(
-                    model, llm_gen_kwargs, **custom_kwargs
+                    policy_model, llm_gen_kwargs, **custom_kwargs
                 )
                 self.log_batch_episodes(
                     self._train_phase, outputs, self.global_step
@@ -408,8 +406,8 @@ class GRPOTrainer(RLTrainer):
                 if samples:
                     collected_samples.extend(samples)
 
-            if len(collected_samples) > local_rollout_size:
-                collected_samples = collected_samples[:local_rollout_size]
+        if len(collected_samples) > local_rollout_size:
+            collected_samples = collected_samples[:local_rollout_size]
 
         return collected_samples
 

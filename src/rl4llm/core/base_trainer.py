@@ -67,7 +67,6 @@ class RLTrainer(ABC, TrainingMixin):
         self.eval_env = eval_env
         self.artifacts_path = artifacts_path
         self.seed = seed
-
         self.device = dist_manager.device
         self.torch_dtype = self._get_torch_dtype()
 
@@ -231,7 +230,7 @@ class RLTrainer(ABC, TrainingMixin):
             )
 
         metric_key = f"objective/{phase}"
-        token_metric_key = f"tokens/{phase}"
+        token_metric_key = f"Tokens/{phase}"
 
         for ep in samples:
             data_to_log = {

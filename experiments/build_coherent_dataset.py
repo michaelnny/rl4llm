@@ -58,7 +58,7 @@ def parse_args():
         '--split-ratio',
         type=float,
         default=0.9,
-        help='Train/test split ratio (default: 0.9)',
+        help='train/test split ratio (default: 0.9)',
     )
     parser.add_argument(
         '--seed', type=int, default=153, help='Runtime seed (default: 153)'

@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_hybrid_mode_explore_grpo_qwen2.5_0.5b_gsm8k"
+  artifacts_path: "./runs/test_2_explore_grpo_qwen2.5_0.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -106,8 +106,3 @@ deepspeed_config:
     contiguous_memory_optimization: true
     number_checkpoints: null
     synchronize_checkpoint_boundary: false
-  hybrid_engine:
-    enabled: true
-    max_out_tokens: 4096
-    inference_tp_size: 1
-    release_inference_cache: false
