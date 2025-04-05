@@ -40,18 +40,18 @@ class EpisodeData(BaseModel):
         description='Timestamp when the data was generated',
     )
 
-    # @model_validator(mode='after')
-    # def check_tensor_shapes(cls, values):
-    #     if values.prompt_tokens.dim() != 1:
-    #         raise ValueError(
-    #             f"Prompt tokens tensor must be 1D vector: {values.prompt_tokens.shape}"
-    #         )
-    #     if values.completion_tokens.dim() != 1:
-    #         raise ValueError(
-    #             f"Completion tokens tensor must be 1D vector: {values.completion_tokens.shape}"
-    #         )
+    @model_validator(mode='after')
+    def check_tensor_shapes(cls, values):
+        if values.prompt_tokens.dim() != 1:
+            raise ValueError(
+                f"Prompt tokens tensor must be 1D vector: {values.prompt_tokens.shape}"
+            )
+        if values.completion_tokens.dim() != 1:
+            raise ValueError(
+                f"Completion tokens tensor must be 1D vector: {values.completion_tokens.shape}"
+            )
 
-    #     return values
+        return values
 
     class Config:
         arbitrary_types_allowed = True

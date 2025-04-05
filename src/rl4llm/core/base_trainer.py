@@ -14,7 +14,7 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import deepspeed
 import torch
-from deepspeed import DeepSpeedEngine
+from deepspeed import DeepSpeedEngine, DeepSpeedHybridEngine
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
@@ -28,7 +28,7 @@ from rl4llm.logging import LoggingManager
 
 class RLTrainer(ABC, TrainingMixin):
     """
-    Base class for training RL algorithms on LLM environments using DeepSpeed.
+    Base class for training RL algorithms on LLM environments using DeepSpeed with Zero-1/Zero-2 only.
     """
 
     _train_phase: str = TRAIN_PHASE
@@ -48,10 +48,15 @@ class RLTrainer(ABC, TrainingMixin):
         seed: Optional[int] = 175,
     ):
         if policy_engine.zero_optimization_stage() == 3:
-            logger.warning('Zero-3 is not fully supported')
-
+            raise RuntimeError('Zero-3 is not supported at the moment')
         if config.train_rollout_size % dist_manager.world_size != 0:
-            raise ValueError('Rollout size must be divisible by world size')
+            raise ValueError(
+                'Train rollout size must be divisible by world size'
+            )
+        if config.eval_rollout_size % dist_manager.world_size != 0:
+            raise ValueError(
+                'Evaluation rollout size must be divisible by world size'
+            )
 
         self.config = config
         self.tokenizer = tokenizer
@@ -192,6 +197,20 @@ class RLTrainer(ABC, TrainingMixin):
         elif torch.cuda.is_available() and torch.cuda.is_bf16_supported():
             return torch.float16
         return torch.float32
+
+    # def _sync_vllm_weights(self, llm, state_dict: Dict) -> None:
+    #     """A hacky way to update vLLM engine weights in non tensor parallel setting."""
+    #     # only works with vLLM V0 engine
+    #     try:
+    #         model = (
+    #             llm.llm_engine.model_executor.driver_worker.model_runner.model
+    #         )
+    #         model.load_weights(state_dict.items())
+    #         self._clean_up()
+    #     except Exception as e:
+    #         self.logger.error(
+    #             f"Failed to update vLLM engine weights, error: {str(e)}"
+    #         )
 
     def is_zero3_enabled(self) -> bool:
         """Checks if ZeRO-3 is enabled."""

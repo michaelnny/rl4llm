@@ -104,27 +104,27 @@ class TransitionData(BaseModel):
         description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
 
-    # @model_validator(mode='after')
-    # def check_tensor_shapes(cls, values):
-    #     tensors = [
-    #         values.states,
-    #         values.actions,
-    #         values.loss_mask,
-    #         values.pi_logprobs,
-    #         values.ref_logprobs,
-    #         values.advantages,
-    #     ]
+    @model_validator(mode='after')
+    def check_tensor_shapes(cls, values):
+        tensors = [
+            values.states,
+            values.actions,
+            values.loss_mask,
+            values.pi_logprobs,
+            values.ref_logprobs,
+            values.advantages,
+        ]
 
-    #     # Ensure all tensors are of the same shape
-    #     tensor_shapes = [
-    #         tensor.shape if isinstance(tensor, torch.Tensor) else None
-    #         for tensor in tensors
-    #     ]
+        # Ensure all tensors are of the same shape
+        tensor_shapes = [
+            tensor.shape if isinstance(tensor, torch.Tensor) else None
+            for tensor in tensors
+        ]
 
-    #     if len(set(tensor_shapes)) > 1:
-    #         raise ValueError(f"Tensors have mismatched shapes: {tensor_shapes}")
+        if len(set(tensor_shapes)) > 1:
+            raise ValueError(f"Tensors have mismatched shapes: {tensor_shapes}")
 
-    #     return values
+        return values
 
     class Config:
         arbitrary_types_allowed = True
@@ -353,45 +353,15 @@ class GRPOTrainer(RLTrainer):
             'return_legacy_cache': False,
         }
 
-        with self.unwrapped_model_for_generation() as model:
-            for _ in range(local_rollout_size):
-                outputs = self.eval_env.rollout(model, eval_gen_kwargs)
-                self.log_batch_episodes(
-                    self._eval_phase, outputs, self.global_step
-                )
+        # with self.unwrapped_model_for_generation() as model:
+        model = self.policy_engine
+        for _ in range(local_rollout_size):
+            outputs = self.eval_env.rollout(model, eval_gen_kwargs)
+            self.log_batch_episodes(self._eval_phase, outputs, self.global_step)
 
     @torch.inference_mode()
     def generate_experience(self) -> List[TransitionData]:
         """Generates samples using the current policy."""
-
-        with self.unwrapped_model_for_generation() as model:
-            collected_samples: List[TransitionData] = []
-
-            # we always use batch size of 1 during training roll out
-            local_rollout_size = (
-                self.config.train_rollout_size // self.dist_manager.world_size
-            )
-
-            while len(collected_samples) < local_rollout_size:
-                samples = self._generate_group_samples(model)
-                if samples:
-                    collected_samples.extend(samples)
-
-            if len(collected_samples) > local_rollout_size:
-                collected_samples = collected_samples[:local_rollout_size]
-
-        return collected_samples
-
-    def _generate_group_samples(
-        self, model: PreTrainedModel
-    ) -> List[TransitionData]:
-        """Generate responses for a batch of questions
-
-        Args:
-            model (PreTrainedModel): The current policy model.
-        Returns:
-            List[TransitionData]: List of samples for all groups in the batch
-        """
 
         llm_gen_kwargs = {
             'eos_token_id': self.tokenizer.eos_token_id,
@@ -410,16 +380,38 @@ class GRPOTrainer(RLTrainer):
             'return_legacy_cache': False,
         }
 
-        custom_kwargs = {
-            'explore_probability': self._get_exploration_epsilon(),  # control explore env custom logit
-        }
+        with self.unwrapped_model_for_generation() as model:
 
-        outputs = self.train_env.rollout(model, llm_gen_kwargs, **custom_kwargs)
-        self.log_batch_episodes(self._train_phase, outputs, self.global_step)
-        self.logger.log_scalar(
-            'other/exploration_epsilon', self.explore_epsilon
-        )
-        return self._convert_group_episodes_to_transitions(outputs)
+            collected_samples: List[TransitionData] = []
+
+            # we always use batch size of 1 during training roll out
+            local_rollout_size = (
+                self.config.train_rollout_size // self.dist_manager.world_size
+            )
+
+            while len(collected_samples) < local_rollout_size:
+                # control explore env custom logit
+                custom_kwargs = {
+                    'explore_probability': self._get_exploration_epsilon(),
+                }
+
+                outputs = self.train_env.rollout(
+                    model, llm_gen_kwargs, **custom_kwargs
+                )
+                self.log_batch_episodes(
+                    self._train_phase, outputs, self.global_step
+                )
+                self.logger.log_scalar(
+                    'other/exploration_epsilon', self.explore_epsilon
+                )
+                samples = self._convert_group_episodes_to_transitions(outputs)
+                if samples:
+                    collected_samples.extend(samples)
+
+            if len(collected_samples) > local_rollout_size:
+                collected_samples = collected_samples[:local_rollout_size]
+
+        return collected_samples
 
     @torch.no_grad()
     def _convert_group_episodes_to_transitions(

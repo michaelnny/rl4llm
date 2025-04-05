@@ -1,9 +1,9 @@
+import functools
 import random
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from pydantic import BaseModel, Field, constr, field_validator, model_validator
 from transformers import (
     LogitsProcessorList,
     PreTrainedModel,
@@ -14,6 +14,9 @@ from rl4llm.generation.explore_processor import ExploreLogitsProcessor
 
 
 class ExploreLLMEnv(LLMEnv):
+    """An extension of the standard LLM Env
+    where we apply some custom logits processor to the generation process
+    to encourage exploration."""
 
     def __init__(
         self,
@@ -73,9 +76,12 @@ class ExploreLLMEnv(LLMEnv):
 
         if explore_prob > 0 and (random.random() < explore_prob):
             correctness_callback = None
-            # TODO handle recover the ground truth from state
-            # if self.accuracy_fn:
-            #     correctness_callback = functools.partial(self.accuracy_fn.__call__, ground_truths=ground_truths)
+            # Checks for outcome correctness using the accuracy function,
+            # if applied, will only apply token replacement to sequences with incorrect outcome
+            if self.accuracy_fn:
+                correctness_callback = functools.partial(
+                    self.accuracy_fn.__call__, ground_truths=state.ground_truth
+                )
 
             explore_logits_processor = ExploreLogitsProcessor(
                 initial_seq_len=input_ids.shape[1],

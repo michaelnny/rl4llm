@@ -1,41 +1,35 @@
-# core
-torch==2.5.*
-torchaudio==2.5.*
-transformers==4.49.*
-safetensors==0.5.*
-flash_attn==2.7.*
-deepspeed==0.16.*
-datasets==3.2.*
-tiktoken==0.8.*
-tokenizers==0.21.*
-pydantic==2.10.*
+# Core
+mpi4py==4.0.3
+mpmath==1.3.0
+huggingface-hub==0.30.1
+accelerate==1.6.0
+bitsandbytes==0.45.4
+flash_attn==2.7.4.post1
+datasets==3.5.0
+deepspeed==0.16.5
+transformers==4.50.3
+triton==3.2.0
+torch==2.5.1
 
+# # SGLang inference
+# sglang==0.4.4.post3
+# sgl-kernel==0.0.7
+# flashinfer-python==0.2.3
 
-# 4bit quantization
-bitsandbytes==0.45.*
-accelerate==1.4.*
+# uUtils
+pyarrow==19.0.1
+pydantic==2.11.2
+packaging==24.2
+numpy==2.1.2
+pandas==2.2.3
+psutil==7.0.0
+PyYAML==6.0.2
+sympy==1.13.1
+tensorboard==2.19.0
+tqdm==4.67.1
 
-
-# utils
-sympy==1.13.*
-tqdm==4.67.*
-mpi4py==4.0.*
-mpmath==1.3.*
-numpy==2.*
-openai==1.59.9
-pandas==2.2.*
-PyYAML==6.0.*
-tensorboard==2.18.*
-wandb==0.19.*
-psutil==6.1.1
-
-
-# tests
-pytest==8.3.4
-pytest-cov==6.0.0
+# Tests
+pytest==8.3.5
+pytest-cov==6.1.0
 pytest-mock==3.14.0
-coverage==7.6.12
-
-
-# debug
-torch_tb_profiler==0.4.3
+coverage==7.8.0

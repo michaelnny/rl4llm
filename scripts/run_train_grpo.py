@@ -173,7 +173,7 @@ def main():
         config_params=deepspeed_config,
     )
 
-    # for special LLM Env config
+    # for Explore LLM Env config
     replace_source_tokens = []
     # # Determine which tokens should be replaced based on format
     if grpo_config.xml_format:
@@ -185,9 +185,7 @@ def main():
         replace_source_tokens.append(tokenizer.eos_token_id)
 
     replace_target_tokens = [tokenizer.encode(f' {kwd}')[0] for kwd in ['Wait']]
-
     replace_prevent_patterns = []
-
     explore_skip = 0
 
     if grpo_config.xml_format:
@@ -209,31 +207,20 @@ def main():
         )
         temperature = torch.round(temperature, decimals=2)
 
-    # explore_env_args = {
-    #     'temperature': temperature,
-    #     'explore_steps': grpo_config.explore_steps,
-    #     'explore_top_k': grpo_config.explore_top_k,
-    #     'explore_skip': explore_skip,
-    #     'explore_decay_rate': grpo_config.explore_decay_rate,
-    #     'replace_source_tokens': replace_source_tokens,
-    #     'replace_target_tokens': replace_target_tokens,
-    #     'replace_prevent_patterns': replace_prevent_patterns,
-    #     'replace_max_per_seq': grpo_config.replace_max_per_seq,
-    #     'replace_prob': grpo_config.replace_prob,
-    # }
+    explore_env_args = {
+        'temperature': temperature,
+        'explore_steps': grpo_config.explore_steps,
+        'explore_top_k': grpo_config.explore_top_k,
+        'explore_skip': explore_skip,
+        'explore_decay_rate': grpo_config.explore_decay_rate,
+        'replace_source_tokens': replace_source_tokens,
+        'replace_target_tokens': replace_target_tokens,
+        'replace_prevent_patterns': replace_prevent_patterns,
+        'replace_max_per_seq': grpo_config.replace_max_per_seq,
+        'replace_prob': grpo_config.replace_prob,
+    }
 
-    # train_env = ExploreLLMEnv(
-    #     dataset=train_dataset,
-    #     batch_size=1,
-    #     group_size=grpo_config.group_size,
-    #     tokenizer=tokenizer,
-    #     reward_functions=[AccuracyRewardFunction()],
-    #     rank=dist_manager.local_rank,
-    #     world_size=dist_manager.world_size,
-    #     **explore_env_args,
-    # )
-
-    train_env = LLMEnv(
+    train_env = ExploreLLMEnv(
         dataset=train_dataset,
         batch_size=1,
         group_size=grpo_config.group_size,
@@ -241,7 +228,18 @@ def main():
         reward_functions=[AccuracyRewardFunction()],
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
+        **explore_env_args,
     )
+
+    # train_env = LLMEnv(
+    #     dataset=train_dataset,
+    #     batch_size=1,
+    #     group_size=grpo_config.group_size,
+    #     tokenizer=tokenizer,
+    #     reward_functions=[AccuracyRewardFunction()],
+    #     rank=dist_manager.local_rank,
+    #     world_size=dist_manager.world_size,
+    # )
     eval_env = LLMEnv(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,

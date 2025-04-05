@@ -274,11 +274,10 @@ class ExploreLogitsProcessor(LogitsProcessor):
         )
 
         if indices_to_check.numel() > 0:
-            sequences_to_check = generated_ids[indices_to_check]
+            # the check correctness callback expects the full batch data
             texts = self.tokenizer.batch_decode(
-                sequences_to_check, skip_special_tokens=True
+                generated_ids, skip_special_tokens=True
             )
-
             try:
                 correctness_scores = self.correctness_callback(texts)
                 if len(correctness_scores) != len(texts):

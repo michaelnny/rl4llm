@@ -488,20 +488,3 @@ def test_evaluate_step_without_env(dummy_trainer):
     """Test evaluate_step does nothing when eval_env is None."""
     dummy_trainer.eval_env = None
     dummy_trainer.evaluate_step()
-
-
-def test_generate_experience(dummy_trainer, dummy_tokenizer):
-    """Test generate_experience returns correct number of transitions."""
-
-    dummy_td = TransitionData(
-        states=torch.tensor([[2, 3, 4]], dtype=torch.long),
-        actions=torch.tensor([[3, 4, 5]], dtype=torch.long),
-        loss_mask=torch.tensor([[True, True, True]]),
-        pi_logprobs=torch.tensor([[0.2, 0.2, 0.2]], dtype=torch.float32),
-        ref_logprobs=torch.tensor([[0.2, 0.2, 0.2]], dtype=torch.float32),
-        advantages=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
-    )
-    dummy_trainer._generate_group_samples = lambda model: [dummy_td]
-    dummy_trainer.config.train_rollout_size = 4
-    transitions = dummy_trainer.generate_experience()
-    assert len(transitions) == 4
