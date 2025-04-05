@@ -12,11 +12,12 @@ from typing import Any, Dict, List, Union
 import deepspeed
 import torch
 import torch.distributed as dist
+import vllm
 from datasets import Dataset
 from transformers import PreTrainedTokenizer
 
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import BaseRewardFunction, ExploreLLMEnv, LLMEnv
+from rl4llm.envs import BaseRewardFunction, ExploreLLMEnv, LLMEnv, vLLMEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.logging import LoggingManager
 from rl4llm.trainers.grpo_trainer import (
@@ -113,8 +114,11 @@ def main():
 
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-    args = parse_args()
+    # IMPORTANT: need to disable V1 engine to access the true model with model_executor
+    # in order to use an easy way to update model weights with vllm 0.8.x
+    os.environ['VLLM_USE_V1'] = '0'
 
+    args = parse_args()
     config = load_yaml_config_file(args.config_file)
 
     seed = int(config.get('job').get('seed', 142))
@@ -126,6 +130,21 @@ def main():
     deepspeed_config = config['deepspeed_config']
 
     set_seed(seed)
+
+    local_rank = int(os.environ.get('LOCAL_RANK'))
+    device = torch.device(f"cuda:{local_rank}")
+
+    # IMPORTANT: must initialize vLLM before deepspeed
+    vllm_engine = vllm.LLM(
+        model=model_name,
+        tensor_parallel_size=1,
+        device=device,
+        gpu_memory_utilization=0.3,
+        max_seq_len_to_capture=4096,
+        enable_sleep_mode=True,
+        seed=seed,
+    )
+    vllm_engine.sleep()
 
     # Initialize DeepSpeed distributed environment
     deepspeed.init_distributed(verbose=False)
@@ -208,31 +227,20 @@ def main():
         )
         temperature = torch.round(temperature, decimals=2)
 
-    explore_env_args = {
-        'temperature': temperature,
-        'explore_steps': grpo_config.explore_steps,
-        'explore_top_k': grpo_config.explore_top_k,
-        'explore_skip': explore_skip,
-        'explore_decay_rate': grpo_config.explore_decay_rate,
-        'replace_source_tokens': replace_source_tokens,
-        'replace_target_tokens': replace_target_tokens,
-        'replace_prevent_patterns': replace_prevent_patterns,
-        'replace_max_per_seq': grpo_config.replace_max_per_seq,
-        'replace_prob': grpo_config.replace_prob,
-    }
+    # explore_env_args = {
+    #     'temperature': temperature,
+    #     'explore_steps': grpo_config.explore_steps,
+    #     'explore_top_k': grpo_config.explore_top_k,
+    #     'explore_skip': explore_skip,
+    #     'explore_decay_rate': grpo_config.explore_decay_rate,
+    #     'replace_source_tokens': replace_source_tokens,
+    #     'replace_target_tokens': replace_target_tokens,
+    #     'replace_prevent_patterns': replace_prevent_patterns,
+    #     'replace_max_per_seq': grpo_config.replace_max_per_seq,
+    #     'replace_prob': grpo_config.replace_prob,
+    # }
 
-    train_env = ExploreLLMEnv(
-        dataset=train_dataset,
-        batch_size=1,
-        group_size=grpo_config.group_size,
-        tokenizer=tokenizer,
-        reward_functions=[AccuracyRewardFunction()],
-        rank=dist_manager.local_rank,
-        world_size=dist_manager.world_size,
-        **explore_env_args,
-    )
-
-    # train_env = LLMEnv(
+    # train_env = ExploreLLMEnv(
     #     dataset=train_dataset,
     #     batch_size=1,
     #     group_size=grpo_config.group_size,
@@ -240,8 +248,19 @@ def main():
     #     reward_functions=[AccuracyRewardFunction()],
     #     rank=dist_manager.local_rank,
     #     world_size=dist_manager.world_size,
+    #     **explore_env_args,
     # )
-    eval_env = LLMEnv(
+
+    train_env = vLLMEnv(
+        dataset=train_dataset,
+        batch_size=1,
+        group_size=grpo_config.group_size,
+        tokenizer=tokenizer,
+        reward_functions=[AccuracyRewardFunction()],
+        rank=dist_manager.local_rank,
+        world_size=dist_manager.world_size,
+    )
+    eval_env = vLLMEnv(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
         group_size=1,
@@ -257,9 +276,10 @@ def main():
         policy_engine=policy_engine,
         dist_manager=dist_manager,
         logger=logger,
+        artifacts_path=artifacts_path,
         train_env=train_env,
         eval_env=eval_env,
-        artifacts_path=artifacts_path,
+        vllm_engine=vllm_engine,
         seed=seed,
     )
 

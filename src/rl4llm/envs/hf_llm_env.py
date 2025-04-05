@@ -413,7 +413,7 @@ class LLMEnv:
     def _generate_completions(
         self,
         llm: PreTrainedModel,
-        gen_args: Dict,
+        sampling_params: Dict,
         state: EnvState,
         **kwargs: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
@@ -422,7 +422,7 @@ class LLMEnv:
 
         Args:
             llm: The pre-trained language model.
-            gen_args: Dictionary of generation arguments (e.g., max_new_tokens, do_sample).
+            sampling_params: Dictionary of generation arguments (e.g., max_new_tokens, do_sample).
             state: The current EnvState containing input_ids and attention_mask.
             **kwargs: Additional custom arguments.
 
@@ -432,12 +432,12 @@ class LLMEnv:
         input_ids = state.input_ids.to(llm.device)
         attention_mask = state.attention_mask.to(llm.device)
         # Remove keys that conflict with inputs
-        gen_args = {
+        sampling_params = {
             k: v
-            for k, v in gen_args.items()
+            for k, v in sampling_params.items()
             if k not in ['input_ids', 'attention_mask', 'num_return_sequences']
         }
-        gen_args.update(
+        sampling_params.update(
             {
                 'return_dict_in_generate': True,
                 'output_scores': False,
@@ -446,7 +446,9 @@ class LLMEnv:
             }
         )
         output = llm.generate(
-            input_ids=input_ids, attention_mask=attention_mask, **gen_args
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **sampling_params,
         )
         return output.sequences
 
@@ -554,7 +556,7 @@ class LLMEnv:
     def rollout(
         self,
         llm: PreTrainedModel,
-        gen_args: Dict,
+        sampling_params: Dict,
         **kwargs: Optional[Dict[str, Any]],
     ) -> List[EpisodeData]:
         """
@@ -563,14 +565,14 @@ class LLMEnv:
 
         Args:
             llm: The pre-trained language model to use for generation.
-            gen_args: Dictionary of generation arguments (e.g., max_new_tokens).
+            sampling_params: Dictionary of generation arguments (e.g., max_new_tokens).
             **kwargs: Additional custom arguments.
 
         Returns:
             A list of EpisodeData objects, one for each generated sample in the batch
             (batch_size * group_size samples). Returns an empty list if the dataset is exhausted.
         """
-        if gen_args.get('num_return_sequences', 1) > 1:
+        if sampling_params.get('num_return_sequences', 1) > 1:
             raise ValueError(
                 'Set group_size during initialization instead of using num_return_sequences.'
             )
@@ -581,7 +583,7 @@ class LLMEnv:
             )
             return []
         full_sequences = self._generate_completions(
-            llm, gen_args, state, **kwargs
+            llm, sampling_params, state, **kwargs
         )
         # post-processing completions
         start = state.input_ids.shape[1]

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from rl4llm.envs.llm_env import (
+from rl4llm.envs.hf_llm_env import (
     BaseRewardFunction,
     EnvState,
     EpisodeData,

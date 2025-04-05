@@ -10,11 +10,12 @@ import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import deepspeed
 import torch
-from deepspeed import DeepSpeedEngine, DeepSpeedHybridEngine
+import vllm
+from deepspeed import DeepSpeedEngine
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
@@ -24,6 +25,26 @@ from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.training_mixin import TrainingMixin
 from rl4llm.envs import EpisodeData, LLMEnv
 from rl4llm.logging import LoggingManager
+
+# @contextmanager
+# def unwrap_deepspeed_model(
+#     engine: deepspeed.DeepSpeedEngine, is_zero3_enabled: bool
+# ) -> Generator[PreTrainedModel, None, None]:
+#     """
+#     Unwraps a DeepSpeed engine to yield the underlying model.
+
+#     Args:
+#         engine: The DeepSpeed engine containing the model
+#         is_zero3_enabled: Whether Zero-3 optimization is enabled
+
+#     Yields:
+#         PreTrainedModel: The unwrapped model
+#     """
+#     if is_zero3_enabled:
+#         with deepspeed.zero.GatheredParameters(engine.parameters()):
+#             yield engine.module
+#     else:
+#         yield engine.module
 
 
 class RLTrainer(ABC, TrainingMixin):
@@ -45,6 +66,7 @@ class RLTrainer(ABC, TrainingMixin):
         artifacts_path: str,
         train_env: LLMEnv,
         eval_env: Optional[LLMEnv] = None,
+        vllm_engine: Optional[vllm.LLM] = None,
         seed: Optional[int] = 175,
     ):
         if policy_engine.zero_optimization_stage() == 3:
@@ -78,6 +100,8 @@ class RLTrainer(ABC, TrainingMixin):
         self.reference_model: Optional[PreTrainedModel] = (
             self._create_reference_model() if config.kl_loss_coef > 0 else None
         )
+
+        self.vllm_engine = vllm_engine
 
         self.global_step = 0
         self.policy_update_count = 0
@@ -139,10 +163,22 @@ class RLTrainer(ABC, TrainingMixin):
     @contextmanager
     def unwrapped_model_for_generation(
         self,
+    ) -> Generator[Union[PreTrainedModel, vllm.LLM], None, None]:
+        """
+        Returns the unwrapped model for generation.
+        """
+        if self.is_vllm_inference_enabled():
+            yield self.vllm_engine
+        else:
+            with self._unwrapped_deepspeed_model() as model:
+                yield model
+        self.clean_up()
+
+    @contextmanager
+    def _unwrapped_deepspeed_model(
+        self,
     ) -> Generator[PreTrainedModel, None, None]:
-        """
-        Returns the unwrapped model for generation, supporting ZeRO-3.
-        """
+        """Returns the unwrapped model from the DeepSpeed engine."""
         if self.is_zero3_enabled():
             with deepspeed.zero.GatheredParameters(
                 self.policy_engine.parameters()
@@ -150,21 +186,40 @@ class RLTrainer(ABC, TrainingMixin):
                 yield self.policy_engine.module
         else:
             yield self.policy_engine.module
-        self.clean_up()
 
     def _prepare_for_generation(self):
         """Switch models to eval mode for rollout."""
+        if self.vllm_engine is not None:
+            try:
+                # Load vLLM to CUDA
+                self.vllm_engine.wake_up()
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to wake up vLLM engine, error: {str(e)}"
+                )
+
         self.policy_engine.eval()
         if self.reference_model:
             self.reference_model = self.reference_model.to(self.device)
             self.reference_model.eval()
+
         self.clean_up()
 
     def _prepare_for_training(self):
         """Switch models to train mode."""
+        if self.vllm_engine is not None:
+            try:
+                # Offload vLLM and remove CUDA RAM caches
+                self.vllm_engine.sleep(1)
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to offload vLLM engine, error: {str(e)}"
+                )
+
         self.policy_engine.train()
         if self.reference_model and self.reference_model.device != self.device:
             self.reference_model = self.reference_model.to('cpu')
+
         self.clean_up()
 
     def _sync_reference_model(self):
@@ -197,23 +252,32 @@ class RLTrainer(ABC, TrainingMixin):
             return torch.float16
         return torch.float32
 
-    # def _sync_vllm_weights(self, llm, state_dict: Dict) -> None:
-    #     """A hacky way to update vLLM engine weights in non tensor parallel setting."""
-    #     # only works with vLLM V0 engine
-    #     try:
-    #         model = (
-    #             llm.llm_engine.model_executor.driver_worker.model_runner.model
-    #         )
-    #         model.load_weights(state_dict.items())
-    #         self._clean_up()
-    #     except Exception as e:
-    #         self.logger.error(
-    #             f"Failed to update vLLM engine weights, error: {str(e)}"
-    #         )
+    def _sync_vllm_weights(self, state_dict: Dict) -> None:
+        """A hacky way to update vLLM engine weights in non tensor parallel setting."""
+        if self.vllm_engine is None:
+            self.logger.warning('No vLLM engine specified, skipping')
+
+        # only works with vLLM V0 engine with env variable "VLLM_USE_V1 = '0'"
+        try:
+            model = (
+                self.vllm_engine.llm_engine.model_executor.driver_worker.model_runner.model
+            )
+            model.load_weights(state_dict.items())
+            self.clean_up()
+        except Exception as e:
+            self.logger.error(
+                f"Failed to update vLLM engine weights, error: {str(e)}"
+            )
 
     def is_zero3_enabled(self) -> bool:
         """Checks if ZeRO-3 is enabled."""
         return self.policy_engine.zero_optimization_stage() == 3
+
+    def is_vllm_inference_enabled(self) -> bool:
+        """Checks if vLLM inference mode is enabled."""
+        return self.vllm_engine is not None and isinstance(
+            self.vllm_engine, vllm.LLM
+        )
 
     def log_batch_episodes(
         self,

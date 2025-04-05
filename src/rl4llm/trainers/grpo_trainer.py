@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import deepspeed
 import torch
+import vllm
 from deepspeed import DeepSpeedEngine
 from pydantic import BaseModel, Field, field_validator, model_validator
 from torch.nn.utils.rnn import pad_sequence
@@ -143,6 +144,7 @@ class GRPOTrainer(RLTrainer):
         artifacts_path: str,
         train_env: LLMEnv,
         eval_env: Optional[LLMEnv] = None,
+        vllm_engine: Optional[vllm.LLM] = None,
         seed: Optional[int] = 175,
     ):
         super().__init__(
@@ -154,6 +156,7 @@ class GRPOTrainer(RLTrainer):
             artifacts_path=artifacts_path,
             train_env=train_env,
             eval_env=eval_env,
+            vllm_engine=vllm_engine,
             seed=seed,
         )
 
@@ -176,8 +179,16 @@ class GRPOTrainer(RLTrainer):
         self.explore_epsilon = 0.0
 
     def sync_policy_model(self):
-        """Not required with Zero-2"""
-        pass
+        """Update policy model weights with the generator/engine"""
+        if self.is_vllm_inference_enabled():
+            self.vllm_engine.wake_up()  # requires vLLM model on GPU
+            with self._unwrapped_deepspeed_model() as model:
+                state_dict = model.state_dict()
+                self._sync_vllm_weights(state_dict)
+            self.vllm_engine.sleep(1)
+            self.clean_up()
+
+        # do nothing if in zero-1/zero-2
 
     def build_train_loader(
         self, experience: List[TransitionData]
@@ -336,26 +347,34 @@ class GRPOTrainer(RLTrainer):
         )
 
         # Use greedy sampling
-        eval_gen_kwargs = {
-            'eos_token_id': self.tokenizer.eos_token_id,
-            'pad_token_id': self.tokenizer.pad_token_id,
-            'max_new_tokens': self.config.max_completion_tokens,
-            'temperature': None,
-            'top_p': None,
-            'top_k': None,
-            'repetition_penalty': None,
-            'num_return_sequences': 1,
-            'do_sample': False,
-            'use_cache': True,
-            'output_scores': False,
-            'output_logits': False,
-            'return_dict_in_generate': True,
-            'return_legacy_cache': False,
-        }
+        if self.is_vllm_inference_enabled():
+            eval_sampling_params = {
+                'max_tokens': self.config.max_completion_tokens,
+                'temperature': 0.0,
+            }
+        else:
+            eval_sampling_params = {
+                'eos_token_id': self.tokenizer.eos_token_id,
+                'pad_token_id': self.tokenizer.pad_token_id,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': None,
+                'top_p': None,
+                'top_k': None,
+                'repetition_penalty': None,
+                'num_return_sequences': 1,
+                'do_sample': False,
+                'use_cache': True,
+                'output_scores': False,
+                'output_logits': False,
+                'return_dict_in_generate': True,
+                'return_legacy_cache': False,
+            }
 
         with self.unwrapped_model_for_generation() as policy_model:
             for _ in range(local_rollout_size):
-                outputs = self.eval_env.rollout(policy_model, eval_gen_kwargs)
+                outputs = self.eval_env.rollout(
+                    policy_model, eval_sampling_params
+                )
                 self.log_batch_episodes(
                     self._eval_phase, outputs, self.global_step
                 )
@@ -364,22 +383,33 @@ class GRPOTrainer(RLTrainer):
     def generate_experience(self) -> List[TransitionData]:
         """Generates samples using the current policy."""
 
-        llm_gen_kwargs = {
-            'eos_token_id': self.tokenizer.eos_token_id,
-            'pad_token_id': self.tokenizer.pad_token_id,
-            'max_new_tokens': self.config.max_completion_tokens,
-            'temperature': self.config.temperature,
-            'top_p': self.config.top_p,
-            'top_k': self.config.top_k,
-            'repetition_penalty': self.config.repetition_penalty,
-            'num_return_sequences': 1,  # we handle the group size inside the LLMEnv
-            'do_sample': True,
-            'use_cache': True,
-            'output_scores': False,
-            'output_logits': False,
-            'return_dict_in_generate': True,
-            'return_legacy_cache': False,
-        }
+        if self.is_vllm_inference_enabled():
+            train_sampling_params = {
+                'max_tokens': self.config.max_completion_tokens,
+                'temperature': self.config.temperature,
+                'top_p': self.config.top_p,
+                'top_k': (
+                    -1 if self.config.top_k == 0 else self.config.top_k
+                ),  # vllm requires -1 to disable top_k
+                'repetition_penalty': self.config.repetition_penalty,
+            }
+        else:
+            train_sampling_params = {
+                'eos_token_id': self.tokenizer.eos_token_id,
+                'pad_token_id': self.tokenizer.pad_token_id,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': self.config.temperature,
+                'top_p': self.config.top_p,
+                'top_k': self.config.top_k,
+                'repetition_penalty': self.config.repetition_penalty,
+                'num_return_sequences': 1,  # we handle the group size inside the LLMEnv
+                'do_sample': True,
+                'use_cache': True,
+                'output_scores': False,
+                'output_logits': False,
+                'return_dict_in_generate': True,
+                'return_legacy_cache': False,
+            }
 
         # we always use batch size of 1 during training roll out
         local_rollout_size = (
@@ -394,7 +424,7 @@ class GRPOTrainer(RLTrainer):
                     'explore_probability': self._get_exploration_epsilon(),
                 }
                 outputs = self.train_env.rollout(
-                    policy_model, llm_gen_kwargs, **custom_kwargs
+                    policy_model, train_sampling_params, **custom_kwargs
                 )
                 self.log_batch_episodes(
                     self._train_phase, outputs, self.global_step

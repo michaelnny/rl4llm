@@ -9,7 +9,7 @@ from transformers import (
     PreTrainedModel,
 )
 
-from rl4llm.envs.llm_env import EnvState, LLMEnv
+from rl4llm.envs.hf_llm_env import EnvState, LLMEnv
 from rl4llm.generation.explore_processor import ExploreLogitsProcessor
 
 
@@ -57,7 +57,7 @@ class ExploreLLMEnv(LLMEnv):
     def _generate_completions(
         self,
         llm: PreTrainedModel,
-        gen_args: Dict,
+        sampling_params: Dict,
         state: EnvState,
         **kwargs: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
@@ -65,7 +65,7 @@ class ExploreLLMEnv(LLMEnv):
 
         input_ids = state.input_ids.to(llm.device)
         attention_mask = state.attention_mask.to(llm.device)
-        gen_args_copy = gen_args.copy()
+        gen_args_copy = sampling_params.copy()
         gen_args_copy.pop('input_ids', None)
         gen_args_copy.pop('attention_mask', None)
         gen_args_copy.pop('num_return_sequences', None)
