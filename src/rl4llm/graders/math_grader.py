@@ -11,6 +11,7 @@ from rl4llm.graders.math_utils import (
     extract_math_answer_from_last_boxed,
     normalize_math_answer,
 )
+from rl4llm.graders.text_utils import check_repetition
 
 logger = logging.getLogger(__name__)
 
@@ -21,16 +22,20 @@ def try_compare_fractions_equal(input_str1: str, input_str2: str) -> bool:
     def fraction_to_float(frac_str):
         try:
             # Normalize fractions (both \frac, \dfrac, \tfrac) including negatives and decimals
-            frac_str = re.sub(r'\\(?:frac|dfrac|tfrac){([+-]?\d*\.?\d+)}{([+-]?\d*\.?\d+)}', r'\1/\2', frac_str)
+            frac_str = re.sub(
+                r"\\(?:frac|dfrac|tfrac){([+-]?\d*\.?\d+)}{([+-]?\d*\.?\d+)}",
+                r"\1/\2",
+                frac_str,
+            )
             return float(frac_str)
         except ValueError:
             pass
 
         try:
-            num, denom = frac_str.split('/')
+            num, denom = frac_str.split("/")
             denom = float(denom)
             if denom == 0:
-                raise ValueError('Denominator cannot be zero.')
+                raise ValueError("Denominator cannot be zero.")
             return float(num) / denom
         except Exception:
             pass
@@ -51,10 +56,10 @@ def _normalize_expression(expr: str) -> str:
     Normalize a mathematical expression by removing spaces and standardizing formatting.
     """
     # Remove all whitespace
-    expr = re.sub(r'\s+', '', expr)
+    expr = re.sub(r"\s+", "", expr)
 
     # Remove unnecessary parentheses around single terms
-    expr = re.sub(r'\(([^()+-/*]+)\)', r'\1', expr)
+    expr = re.sub(r"\(([^()+-/*]+)\)", r"\1", expr)
 
     return expr
 
@@ -63,7 +68,7 @@ def _split_comma_separated_values(expr: str) -> List[str]:
     """
     Split comma-separated values and normalize each value.
     """
-    parts = [part.strip() for part in expr.split(',')]
+    parts = [part.strip() for part in expr.split(",")]
     return [_normalize_expression(part) for part in parts if part.strip()]
 
 
@@ -73,13 +78,13 @@ def split_multiplicative_terms(expr: str) -> List[str]:
     """
     # Remove outer parentheses if they enclose the entire expression
     expr = expr.strip()
-    if expr.startswith('(') and expr.endswith(')'):
+    if expr.startswith("(") and expr.endswith(")"):
         count = 0
         all_enclosed = True
         for char in expr[1:-1]:
-            if char == '(':
+            if char == "(":
                 count += 1
-            elif char == ')':
+            elif char == ")":
                 count -= 1
             if count < 0:
                 all_enclosed = False
@@ -88,20 +93,20 @@ def split_multiplicative_terms(expr: str) -> List[str]:
             expr = expr[1:-1]
 
     terms = []
-    current_term = ''
+    current_term = ""
     paren_count = 0
 
     for char in expr:
-        if char == '(':
+        if char == "(":
             paren_count += 1
             current_term += char
-        elif char == ')':
+        elif char == ")":
             paren_count -= 1
             current_term += char
-        elif char in ['*', '·'] and paren_count == 0:
+        elif char in ["*", "·"] and paren_count == 0:
             if current_term:
                 terms.append(current_term)
-            current_term = ''
+            current_term = ""
         else:
             current_term += char
 
@@ -111,7 +116,7 @@ def split_multiplicative_terms(expr: str) -> List[str]:
     # Handle implicit multiplication (adjacent parentheses)
     final_terms = []
     for term in terms:
-        parts = re.findall(r'\([^()]+\)', term)
+        parts = re.findall(r"\([^()]+\)", term)
         if len(parts) > 1:
             final_terms.extend(parts)
         else:
@@ -129,7 +134,7 @@ def are_expressions_equal(expr1: str, expr2: str) -> bool:
         return True
 
     # Handle comma-separated values
-    if ',' in expr1 and ',' in expr2:
+    if "," in expr1 and "," in expr2:
         values1 = _split_comma_separated_values(expr1)
         values2 = _split_comma_separated_values(expr2)
 
@@ -172,7 +177,11 @@ def are_expressions_equal(expr1: str, expr2: str) -> bool:
     return False
 
 
-def check_expressions_equivalent(expression1: Optional[str], expression2: Optional[str], verbose: bool = False) -> bool:
+def check_expressions_equivalent(
+    expression1: Optional[str],
+    expression2: Optional[str],
+    verbose: bool = False,
+) -> bool:
     """
     Checks if two mathematical expressions are equivalent after applying a series of normalization steps.
 
@@ -185,7 +194,7 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
         True if the normalized forms of the two expressions are identical, False otherwise.
     """
     if expression1 is None and expression2 is None:
-        logger.warning('Both values are None')
+        logger.warning("Both values are None")
         return True
     if expression1 is None or expression2 is None:
         return False
@@ -194,9 +203,9 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
         normalized_expression1 = normalize_math_answer(expression1)
         normalized_expression2 = normalize_math_answer(expression2)
         logger.debug(normalized_expression1, normalized_expression2)
-        return normalized_expression1 == normalized_expression2 or float(normalized_expression1) == float(
-            normalized_expression2
-        )
+        return normalized_expression1 == normalized_expression2 or float(
+            normalized_expression1
+        ) == float(normalized_expression2)
     except Exception:
         pass
 
@@ -225,18 +234,25 @@ def check_expressions_equivalent(expression1: Optional[str], expression2: Option
 
 
 def math_problem_grader(
-    full_answer: str,
-    ground_truth: str,
-    last_n: int = 2,
+    full_answer: str, ground_truth: Union[str, float, int], **kwargs
 ) -> float:
     """
     Enhanced grader that handles multiple answer formats and extraction methods.
     """
+
+    last_n = kwargs.get("last_n", 1)
+
     if full_answer is None or ground_truth is None:
+        logger.warning(
+            f"Missing full answer or ground_truth. {full_answer} {ground_truth}"
+        )
         return 0.0
 
     logger.debug(f"Processing answer: {full_answer}")
     logger.debug(f"Ground truth: {ground_truth}")
+
+    if check_repetition(full_answer):
+        return 0.0
 
     # 1. Try boxed answers
     boxed_answer = extract_math_answer_from_last_boxed(full_answer)
@@ -248,10 +264,11 @@ def math_problem_grader(
             return 0.0
 
     # 2. Fallback to last N numerical values
-    number_list = extract_last_n_numerical_values(full_answer, size=last_n)
-    if number_list:
-        for num in number_list:
-            if check_expressions_equivalent(num, ground_truth):
-                return 1.0
+    if last_n is not None and last_n >= 1:
+        number_list = extract_last_n_numerical_values(full_answer, size=last_n)
+        if number_list:
+            for num in number_list:
+                if check_expressions_equivalent(num, ground_truth):
+                    return 1.0
 
     return 0.0

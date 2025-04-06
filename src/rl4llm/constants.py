@@ -1,0 +1,9 @@
+PACKAGE_NAME = 'RL4LLM'
+LOGGER_NAME = f"{PACKAGE_NAME}_Logger"
+
+
+# For logging of metrics
+TRAIN_PHASE = 'train'
+EVAL_PHASE = 'eval'
+
+LOGGING_PHASES = [TRAIN_PHASE, EVAL_PHASE]

@@ -1,80 +1,117 @@
 # RL GRPO config
-job:
-  seed: 117
-  artifacts_path: "./runs/grpo_qwen2.5_3b_math"
-  datasets: # List of math datasets to load
-    # - "gsm"
-    - "math"
-  # max_train_samples: 8000         # for a quick run
-  max_test_samples: 1024        
+seed: 117
+
+logging:
+  output_dir: "./runs/test_vllm_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  enable_tensorboard: true
+  sample_buffer_size: 100               # how often to save samples to external files
+  sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
+  log_level: 20
+  # metrics_aggregation_config:         # define custom metics aggregation config
+  #   accuracy_reward: ['mean', 'std', 'min', 'max']
+
+dataset: 
+  names:                                # List of math datasets to load
+    - "gsm"
+    # - "math"
+  # max_train_samples: 4096             # for a quick run
+  # max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-3B-Instruct"
-  load_in_4bit: true
+  pretrained_model: "Qwen/Qwen2.5-0.5B"
+  load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
+  model_max_length: 4000
 
-grpo_config:
-  max_steps: 500
-  rollout_size: 512
+grpo:
+  max_steps: 100
+  train_rollout_size: 512
   num_updates: 1
-  batch_size: 8
-  gradient_accumulate_steps: 16
-  # dynamic_discount: true            # compute dynamic discount based on completion length
-  # min_gamma: 0.999                  # for compute dynamic discount
-  # max_gamma: 0.9997                 # for compute dynamic discount
-  # max_completion_length: 4000       # for compute dynamic discount
-  gamma: 1.0                          # fixed discount
-  clip_eps: 0.2                       # PPO policy clip parameter
+  train_micro_batch_size: 8
+  train_batch_size: 128
+  gamma: 1.0                            # discount
+  clip_eps: 0.2                         # PPO0-style policy clip parameter
   normalize_group_rewards: true       
   normalize_advantages: false
-  kl_loss_coef: 0.01
-  clip_grad_norm: 0.0
-  sync_reference_interval: 120        # every N iteration
+  kl_loss_coef: 0.0
+  entropy_loss_coef: 0.0
+  # clip_grad_norm: 0.0
+  sync_reference_interval: 0            # every N iteration
 
   # for sample generation
-  max_prompt_length: 500              # skip sample question that's too long
-  xml_format: true                   # check for R1 style XML format
-  # system_prompt: |
-  #   A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
-  #   The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
-  system_prompt: |
-    A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
-    The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. 
-    The reasoning process and answer are enclosed within <think> </think> and
-    <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think>
-    <answer> answer here </answer>.
-  max_new_tokens: 2500
-  temperature: 0.7
-  group_size: 8                      # for each sample we generate a group of answers
-  # group temperature where some are more 'exploitive'
-  # group_temperature: true
-  # random start exploration
-  # explore_init_epsilon: 0.9
-  # explore_min_epsilon: 0.05
-  # explore_decay_steps: 100
-  # explore_start_ratio: 0.1          # how many initial start steps to do explorations
-  # explore_top_k: 500                # Top K tokens to explore
-  # explore_entropy_ratio: 0.2        # minimum entropy ratio during exploration
+  max_prompt_tokens: 512                # skip sample question that's too long
+  group_size: 16                        # for each sample we generate a group of answers
+  max_completion_tokens: 1000
+  temperature: 1.0                      # not used if using group_temperature
+  repetition_penalty: 1.0
+  top_p: 0.0
+  top_k: 0
 
   # evaluation
-  eval_batch_size: 32
-  eval_interval: 1
+  eval_rollout_size: 1024    
+  eval_batch_size: 64
+  eval_interval: 20                     # every N global steps
 
   # others
-  checkpoint_interval: 100            # every N iteration
+  checkpoint_interval: 100              # every N global steps
 
-optimizer:
-  type: AdamW8bit
-  params:
-    lr: 1.0e-6
-    betas: [0.9, 0.999]
-    eps: 1.0e-8
-    weight_decay: 0.0
+  # # exploration generation
+  # group_temperature: true             # group temperature where we balance exploration and exploitation
+  # min_temperature: 0.6
+  # max_temperature: 1.0
 
-# scheduler:
-#   type: "OneCycleLR"
-#   params:
-#     warmup_fraction: 0.02
-#     initial_lr_fraction: 0.1
-#     final_lr_fraction: 0.5
+  # # control rate of explore
+  # explore_init_epsilon: 0.9           # exploration epsilon decay
+  # explore_min_epsilon: 0.0
+  # explore_decay_steps: 50
+
+  # # exploring start
+  # explore_steps: 5                    # initial start steps to do random sampling
+  # explore_top_k: 30                   # Top K tokens to random sample during initial start steps
+  # explore_decay_rate: 0.8
+
+  # # exploring by token replacement
+  # replace_prob: 0.5
+  # replace_max_per_seq: 3              # max number of replacements to the same sequence
+
+
+deepspeed:
+  # memory_breakdown: true  # for debugging
+  steps_per_print: 1000000 # disable default logging
+  gradient_clipping: 0.0
+  bf16:
+    enabled: true
+  optimizer:
+    type: Adam
+    params:
+      lr: 1.0e-6                   
+      betas: [0.9, 0.999]
+      eps: 1.0e-8
+      weight_decay: 0.0
+      adam_w_mode: true
+  # scheduler:
+  #   type: "WarmupDecayLR"
+  #   params:
+  #     warmup_num_steps: 200
+  #     total_num_steps: 10000
+  #     warmup_min_lr: 1.0e-8
+  #     warmup_max_lr: 9.0e-7
+  zero_optimization:
+    stage: 2
+    contiguous_gradients: true
+    overlap_comm: true
+    allgather_partitions: true
+    reduce_scatter: true
+    # offload_param:
+    #   device: cpu
+    #   pin_memory: false
+    # offload_optimizer:
+    #   device: cpu
+    #   pin_memory: false
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: true
+    contiguous_memory_optimization: true
+    number_checkpoints: null
+    synchronize_checkpoint_boundary: false

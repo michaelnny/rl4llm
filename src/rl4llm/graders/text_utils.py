@@ -1,74 +1,55 @@
-import re
 from collections import Counter
 
 
-def has_irregular_words(text: str, min_length: int = 20) -> bool:
-    """Checks for very long irregular words while ignoring LaTeX and equations.
-
-    Args:
-        text (str): Input text to check for irregular words
-        min_length (int): Threshold for minimum word length
-
-    Returns:
-        bool: True if long words are found (excluding LaTeX/equations), False otherwise
+def check_repetition(
+    text: str,
+    min_ngram: int = 8,
+    max_ngram: int = 16,
+    ngram_threshold: int = 6,
+    min_sentence_words: int = 8,
+    sentence_threshold: int = 4,
+) -> bool:
     """
-    # Define patterns to detect LaTeX and mathematical expressions
-    latex_patterns = [
-        r'\\\w+',  # LaTeX commands (e.g., \textbf, \frac)
-        r'\$.*?\$',  # Inline math mode $...$
-        r'\\\[.*?\\\]',  # Display math mode \[...\]
-        r'\{.*?\}',  # Curly brace content often used in LaTeX
+    Checks for repetition patterns in the given text.
+
+    Returns True if any n-gram (of lengths between min_ngram and max_ngram)
+    repeats more than ngram_threshold times, or if any sentence (with more than
+    min_sentence_words words) repeats more than sentence_threshold times.
+    """
+
+    if not (min_ngram > 5 and min_ngram < max_ngram):
+        raise ValueError(
+            'min_ngram must be greater than 5 and less than max_ngram.'
+        )
+    if not (
+        ngram_threshold > 5
+        and min_sentence_words > 5
+        and sentence_threshold > 3
+    ):
+        raise ValueError(
+            'ngram_threshold and min_sentence_words must be > 5, and sentence_threshold must be > 3.'
+        )
+
+    text_lower = text.lower()
+
+    # Check repeated n-grams
+    words = text_lower.split()
+    for n in range(min_ngram, max_ngram + 1):
+        # Create n-grams and count occurrences
+        ngram_counts = Counter(
+            tuple(words[i : i + n]) for i in range(len(words) - n + 1)
+        )
+        if any(count >= ngram_threshold for count in ngram_counts.values()):
+            return True
+
+    # Check repeated sentences
+    sentences = [
+        line.strip()
+        for line in text_lower.splitlines()
+        if len(line.split()) > min_sentence_words
     ]
-
-    # First, mask LaTeX/equation content to prevent false positives
-    masked_text = text
-    for pattern in latex_patterns:
-        masked_text = re.sub(pattern, ' MASKED ', masked_text, flags=re.DOTALL)
-
-    # Split the text into words by whitespace
-    words = masked_text.split()
-
-    for word in words:
-        # Skip if it's our mask or obviously not a real word
-        if word == 'MASKED' or not any(c.isalpha() for c in word):
-            continue
-
-        # Remove common punctuation from consideration in length
-        cleaned_word = re.sub(r'[.,!?;:()\'"]', '', word)
-
-        # Check if the cleaned word is longer than the specified length
-        if len(cleaned_word) >= min_length:
-            return True
-
-    return False
-
-
-def has_repetitions(text: str, ngram_size: int = 8, threshold: int = 3) -> bool:
-    """
-    Checks if there are N-gram repetition.
-
-    Args:
-        text: the raw text to check
-        ngram_size: size of the n-grams
-        threshold: threshold for minimum number of repetitions to consider as true
-
-    Returns:
-        bool indicate if there are repetitions detected in the text.
-    """
-
-    assert ngram_size > 3
-    assert threshold > 2
-
-    def zipngram(text: str, n_size: int):
-        words = text.lower().split()
-        return zip(*[words[i:] for i in range(n_size)])
-
-    ngram_counts = Counter()
-    for ng in zipngram(text, ngram_size):
-        ngram_counts[ng] += 1
-
-    for count in ngram_counts.values():
-        if count >= threshold:
-            return True
+    sentence_counts = Counter(sentences)
+    if any(count >= sentence_threshold for count in sentence_counts.values()):
+        return True
 
     return False

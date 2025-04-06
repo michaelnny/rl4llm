@@ -1,0 +1,8 @@
+{
+    "train_size": 10530,
+    "test_size": 1170,
+    "positive_train_size": 5265,
+    "positive_test_size": 585,
+    "negative_train_size": 5265,
+    "negative_test_size": 585
+}
