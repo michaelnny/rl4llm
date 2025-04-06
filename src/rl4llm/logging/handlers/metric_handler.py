@@ -28,6 +28,7 @@ class MetricHandler(BaseHandler):
     AGGREGATORS: Dict[str, Callable[[np.ndarray], Union[float, int]]] = {
         'mean': lambda x: np.mean(x) if is_valid_array(x) else np.nan,
         'std': lambda x: np.std(x) if is_valid_array(x) else np.nan,
+        'var': lambda x: np.var(x) if is_valid_array(x) else np.nan,
         'min': lambda x: np.min(x) if is_valid_array(x) else np.nan,
         'max': lambda x: np.max(x) if is_valid_array(x) else np.nan,
         'sum': lambda x: np.sum(x) if is_valid_array(x) else 0.0,
@@ -91,6 +92,23 @@ class MetricHandler(BaseHandler):
 
         effective_config = self.BASE_DEFAULT_METRICS_AGGREGATION_CONFIG.copy()
         if user_aggregation_config:
+            # ---Validation Check ---
+            supported_methods = set(self.AGGREGATORS.keys())
+            for metric_pattern, methods in user_aggregation_config.items():
+                if not isinstance(methods, list):
+                    # Optional: Add type check for robustness
+                    raise TypeError(
+                        f"Aggregation methods for '{metric_pattern}' must be a list, "
+                        f"got {type(methods).__name__}"
+                    )
+                for method in methods:
+                    if method not in supported_methods:
+                        raise ValueError(
+                            f"Unsupported aggregation method '{method}' found in "
+                            f"user_aggregation_config for pattern '{metric_pattern}'. "
+                            f"Supported methods are: {sorted(list(supported_methods))}"
+                        )
+
             effective_config.update(user_aggregation_config)
             self._logger.info(
                 'User metrics aggregation config provided. Merged (user keys override base).'

@@ -1,28 +1,22 @@
 """Script to run RL GRPO fine-tuning on a single GPU."""
 
 import argparse
-import cProfile
 import os
-import pstats
-import sys
 from functools import partial
-from traceback import format_exc
 from typing import Any, Dict, List, Union
 
 import deepspeed
 import torch
-import torch.distributed as dist
 import vllm
-from datasets import Dataset
 from transformers import PreTrainedTokenizer
 
+from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import (
-    BaseRewardFunction,
-    Env,
-    ExploreEnv,
-    vLLMEnv,
-    vLLMExploreEnv,
+    ExploreHFEnv,
+    ExploreVLLMEnv,
+    HFEnv,
+    VLLMEnv,
 )
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.logging import LoggingManager
@@ -32,10 +26,7 @@ from rl4llm.trainers.grpo_trainer import (
     GRPOTrainer,
 )
 from rl4llm.utils import load_yaml_config_file, set_seed
-from rl4llm.utils.model_utils import (
-    build_model_and_tokenizer,
-    create_optimizer_and_scheduler,
-)
+from rl4llm.utils.model_utils import build_model_and_tokenizer
 
 
 def parse_args():
@@ -178,48 +169,48 @@ def prepare_explore_processor_config(
 def main():
     """Starts RL GRPO training loop."""
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
-        raise RuntimeError(
-            'This script only supports run on GPU with BF16 mode.'
-        )
+        raise RuntimeError('This script only supports run on GPU.')
 
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-    # IMPORTANT: need to disable V1 engine to access the true model with model_executor
+    # IMPORTANT: need to disable V1 engine to access the true model
     # in order to use an easy way to update model weights with vllm 0.8.x
     os.environ['VLLM_USE_V1'] = '0'
 
     args = parse_args()
-    config = load_yaml_config_file(args.config_file)
+    job_config = load_yaml_config_file(args.config_file)
 
-    seed = int(config.get('job').get('seed', 142))
-    artifacts_path = config.get('job').get('artifacts_path')
-    datasets = config.get('job').get('datasets')
-    max_train_samples = config.get('job').get('max_train_samples', None)
-    max_test_samples = config.get('job').get('max_test_samples', None)
-    model_name = config['model']['pretrained_model']
-    deepspeed_config = config['deepspeed_config']
-
-    grpo_config = GRPOConfig(**config['grpo_config'])
+    seed = int(job_config.get('seed', 142))
+    log_config = job_config.get('logging')
+    artifacts_path = log_config.get('output_dir')
+    datasets_config = job_config.get('dataset')
+    max_train_samples = datasets_config.get('max_train_samples', None)
+    max_test_samples = datasets_config.get('max_test_samples', None)
+    model_config = job_config['model']
+    model_name = model_config['pretrained_model']
+    deepspeed_config = job_config['deepspeed']
+    grpo_config = GRPOConfig(**job_config['grpo'])
 
     set_seed(seed)
 
     local_rank = int(os.environ.get('LOCAL_RANK'))
     device = torch.device(f"cuda:{local_rank}")
+    torch_dtype = torch.bfloat16
 
-    # A hacky way to pass the min and max temperatures before apply the patch
-    if grpo_config.group_temperature:
-        os.environ['VLLM_MIN_TEMPERATURE'] = str(grpo_config.min_temperature)
-        os.environ['VLLM_MAX_TEMPERATURE'] = str(grpo_config.max_temperature)
-        from rl4llm.patches import vllm_group_temperature_patch
+    # # A hacky way to pass the min and max temperatures before apply the patch
+    # if grpo_config.group_temperature:
+    #     os.environ['VLLM_MIN_TEMPERATURE'] = str(grpo_config.min_temperature)
+    #     os.environ['VLLM_MAX_TEMPERATURE'] = str(grpo_config.max_temperature)
+    #     from rl4llm.patches import vllm_group_temperature_patch
 
     # IMPORTANT: must initialize vLLM before deepspeed
     vllm_engine = vllm.LLM(
         model=model_name,
         tensor_parallel_size=1,
         device=device,
-        gpu_memory_utilization=0.6,
+        gpu_memory_utilization=0.7,  # for single GPU using 0.7 seems to work
         max_seq_len_to_capture=4096,
-        enable_sleep_mode=True,
+        enable_sleep_mode=True,  # important to enable sleep mode
         seed=seed,
     )
     vllm_engine.sleep()
@@ -228,18 +219,16 @@ def main():
     deepspeed.init_distributed(verbose=False)
 
     dist_manager = DistributedManager()
-    logger = LoggingManager(
-        dist_manager, log_dir=artifacts_path, sample_file_format='jsonl'
-    )
-
-    torch_dtype = torch.bfloat16
+    logger = LoggingManager(dist_manager, **log_config)
 
     deepspeed_config['train_micro_batch_size_per_gpu'] = (
         grpo_config.train_micro_batch_size
     )
     deepspeed_config['train_batch_size'] = grpo_config.train_batch_size
 
-    train_dataset, eval_dataset = load_multiple_datasets(datasets)
+    train_dataset, eval_dataset = load_multiple_datasets(
+        datasets_config['names']
+    )
 
     if max_train_samples is not None and max_train_samples < len(train_dataset):
         train_dataset = train_dataset.shuffle().select(range(max_train_samples))
@@ -248,7 +237,7 @@ def main():
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
     policy_model, tokenizer = build_model_and_tokenizer(
-        config['model'], torch_dtype
+        model_config, torch_dtype
     )
     policy_model = policy_model.to(dist_manager.device)
 
@@ -269,31 +258,31 @@ def main():
         config_params=deepspeed_config,
     )
 
-    explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
-    train_env = vLLMExploreEnv(
-        dataset=train_dataset,
-        batch_size=1,
-        group_size=grpo_config.group_size,
-        tokenizer=tokenizer,
-        reward_functions=[AccuracyRewardFunction()],
-        rank=dist_manager.local_rank,
-        world_size=dist_manager.world_size,
-        **explore_env_args,
-    )
-
-    # train_env = vLLMEnv(
+    # explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
+    # train_env = ExploreVLLMEnv(
     #     dataset=train_dataset,
-    #     batch_size=1,
+    #     batch_size=1,  # always set batch size to 1 for training
     #     group_size=grpo_config.group_size,
     #     tokenizer=tokenizer,
     #     reward_functions=[AccuracyRewardFunction()],
     #     rank=dist_manager.local_rank,
     #     world_size=dist_manager.world_size,
+    #     **explore_env_args,
     # )
-    eval_env = vLLMEnv(
+
+    train_env = VLLMEnv(
+        dataset=train_dataset,
+        batch_size=1,  # always set batch size to 1 for training
+        group_size=grpo_config.group_size,
+        tokenizer=tokenizer,
+        reward_functions=[AccuracyRewardFunction()],
+        rank=dist_manager.local_rank,
+        world_size=dist_manager.world_size,
+    )
+    eval_env = VLLMEnv(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
-        group_size=1,
+        group_size=1,  # always set group size to 1 for evaluation
         tokenizer=tokenizer,
         reward_functions=[AccuracyRewardFunction()],
         rank=dist_manager.local_rank,
@@ -313,40 +302,7 @@ def main():
         seed=seed,
     )
 
-    # Create a profiler instance
-    profiler = None
-
-    # profiler = cProfile.Profile()
-    # profiler.enable()
-
-    def handle_exit():
-
-        trainer.on_exit()
-
-        if profiler is not None:
-            try:
-                profiler.disable()
-                # Save profiling stats
-                stats = pstats.Stats(profiler)
-                stats.sort_stats('cumulative').dump_stats('profile_stats.prof')
-                stats.print_stats()  # Print to console for immediate feedback
-            except Exception as _e:
-                pass
-
-    trainer.train(config)
-
-    # try:
-    #     trainer.train(config)
-    # except KeyboardInterrupt:
-    #     logger.info(
-    #         '\nKeyboardInterrupt received in main loop. Shutting down...'
-    #     )
-    # except Exception as e:
-    #     logger.error(f"An unexpected error occurred: {e}")
-    #     logger.error(format_exc())
-    # finally:
-    #     handle_exit()
-    #     logger.info('Exiting main program.')
+    trainer.train(job_config)
 
 
 if __name__ == '__main__':

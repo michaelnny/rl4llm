@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class ExploreLLMGenerator:
     """
-    A custom class for stochastic text generation using a HF language model (LLM).
+    A custom class for text generation using a HF language model (LLM).
     Supports batch-specific temperatures, exploring start, and special token replacement.
     """
 

@@ -48,7 +48,7 @@ def logging_manager(tmp_path, monkeypatch):
     fake_dist = FakeDistManager(is_master=True, world_size=1, global_rank=0)
     return lm.LoggingManager(
         dist_manager=fake_dist,
-        log_dir=str(tmp_path / 'logs'),
+        output_dir=str(tmp_path / 'logs'),
         metrics_aggregation_config=None,
         enable_wandb=False,
         enable_tensorboard=True,

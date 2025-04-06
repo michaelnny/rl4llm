@@ -1,4 +1,5 @@
 import math
+import tempfile
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
@@ -10,10 +11,10 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.trainers.grpo_trainer import (
-    Env,
     EpisodeData,
     GRPOConfig,
     GRPOTrainer,
+    HFEnv,
     TransitionData,
 )
 
@@ -212,27 +213,30 @@ def dummy_trainer(
 ):
     """Fixture returning a dummy GRPOTrainer instance."""
 
-    trainer = GRPOTrainer(
-        config=dummy_config,
-        tokenizer=dummy_tokenizer,
-        policy_engine=dummy_policy_engine,
-        dist_manager=dummy_dist_manager,
-        logger=dummy_logger,
-        artifacts_path='dummy_path',
-        train_env=dummy_train_env,
-        eval_env=None,
-        seed=42,
-    )
-    trainer.device = torch.device('cpu')
-    trainer.torch_dtype = torch.float32
-    trainer.global_step = 0
-    trainer.policy_update_count = 0
-    trainer.compute_logprobs_from_logits = dummy_compute_logprobs_from_logits
-    trainer.masked_whiten = dummy_masked_whiten
-    trainer.masked_mean = dummy_masked_mean
-    trainer.clean_up = dummy_clean_up
-    trainer.unwrapped_model_for_generation = lambda: DummyContextManager()
-    return trainer
+    with tempfile.TemporaryDirectory() as tmp_artifacts_path:
+        trainer = GRPOTrainer(
+            config=dummy_config,
+            tokenizer=dummy_tokenizer,
+            policy_engine=dummy_policy_engine,
+            dist_manager=dummy_dist_manager,
+            logger=dummy_logger,
+            artifacts_path=tmp_artifacts_path,
+            train_env=dummy_train_env,
+            eval_env=None,
+            seed=42,
+        )
+        trainer.device = torch.device('cpu')
+        trainer.torch_dtype = torch.float32
+        trainer.global_step = 0
+        trainer.policy_update_count = 0
+        trainer.compute_logprobs_from_logits = (
+            dummy_compute_logprobs_from_logits
+        )
+        trainer.masked_whiten = dummy_masked_whiten
+        trainer.masked_mean = dummy_masked_mean
+        trainer.clean_up = dummy_clean_up
+        trainer.unwrapped_model_for_generation = lambda: DummyContextManager()
+        return trainer
 
 
 # Tests for initialize_trainer

@@ -14,7 +14,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_trainer import RLConfig, RLTrainer
 from rl4llm.core.distributed import DistributedManager
-from rl4llm.envs import Env, EpisodeData
+from rl4llm.envs import EpisodeData, HFEnv
 from rl4llm.logging import LoggingManager
 
 
@@ -142,8 +142,8 @@ class GRPOTrainer(RLTrainer):
         dist_manager: DistributedManager,
         logger: LoggingManager,
         artifacts_path: str,
-        train_env: Env,
-        eval_env: Optional[Env] = None,
+        train_env: HFEnv,
+        eval_env: Optional[HFEnv] = None,
         vllm_engine: Optional[vllm.LLM] = None,
         seed: Optional[int] = 175,
     ):
@@ -402,13 +402,12 @@ class GRPOTrainer(RLTrainer):
         """Generates samples using the current policy."""
 
         if self.is_vllm_inference_enabled():
+            # vllm requires -1 to disable top_k, and 1 to disable top_p
             train_sampling_params = {
                 'max_tokens': self.config.max_completion_tokens,
                 'temperature': self.config.temperature,
-                'top_p': self.config.top_p,
-                'top_k': (
-                    -1 if self.config.top_k == 0 else self.config.top_k
-                ),  # vllm requires -1 to disable top_k
+                'top_p': 1.0 if self.config.top_p == 0 else self.config.top_p,
+                'top_k': -1 if self.config.top_k == 0 else self.config.top_k,
                 'repetition_penalty': self.config.repetition_penalty,
             }
         else:
@@ -420,7 +419,7 @@ class GRPOTrainer(RLTrainer):
                 'top_p': self.config.top_p,
                 'top_k': self.config.top_k,
                 'repetition_penalty': self.config.repetition_penalty,
-                'num_return_sequences': 1,  # we handle the group size inside the Env
+                'num_return_sequences': 1,  # we handle the group size inside the HFEnv
                 'do_sample': True,
                 'use_cache': True,
                 'output_scores': False,

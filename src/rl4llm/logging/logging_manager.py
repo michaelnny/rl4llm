@@ -26,7 +26,9 @@ from rl4llm.logging.handlers import (
 )
 
 
-def setup_logger(rank: int = 0, log_level=logging.INFO) -> logging.Logger:
+def setup_logger(
+    rank: int = 0, log_level: int = logging.INFO
+) -> logging.Logger:
     logger = logging.getLogger(LOGGER_NAME)
     # Prevent messages from bubbling to the root logger
     logger.propagate = False
@@ -59,7 +61,7 @@ class LoggingManager:
     def __init__(
         self,
         dist_manager: DistributedManager,
-        log_dir: str,
+        output_dir: str,
         metrics_aggregation_config: Optional[Dict[str, List[str]]] = None,
         enable_wandb: bool = False,
         enable_tensorboard: bool = True,
@@ -68,7 +70,7 @@ class LoggingManager:
         log_level: Optional[str] = None,
     ):
         self.dist_manager = dist_manager
-        self.log_dir = log_dir
+        self.output_dir = output_dir
         self.rank = dist_manager.global_rank
         self.is_master = dist_manager.is_master
         self.world_size = dist_manager.world_size
@@ -93,13 +95,13 @@ class LoggingManager:
         )
         self.sample_handler = SampleHandler(
             dist_manager=self.dist_manager,
-            log_dir=self.log_dir,  # Base log dir
+            log_dir=self.output_dir,
             sample_file_format=sample_file_format,
             sample_buffer_size=sample_buffer_size,
             logger=self.console_logger,
         )
         self.backend_handler = BackendHandler(
-            log_dir=self.log_dir,
+            log_dir=self.output_dir,
             enable_wandb=enable_wandb,
             enable_tensorboard=enable_tensorboard,
             is_master=self.is_master,

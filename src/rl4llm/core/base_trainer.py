@@ -20,31 +20,11 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.constants import EVAL_PHASE, LOGGING_PHASES, TRAIN_PHASE
+from rl4llm.core.base_env import BaseEnv, EpisodeData
 from rl4llm.core.data_types import RLConfig
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.training_mixin import TrainingMixin
-from rl4llm.envs import Env, EpisodeData
 from rl4llm.logging import LoggingManager
-
-# @contextmanager
-# def unwrap_deepspeed_model(
-#     engine: deepspeed.DeepSpeedEngine, is_zero3_enabled: bool
-# ) -> Generator[PreTrainedModel, None, None]:
-#     """
-#     Unwraps a DeepSpeed engine to yield the underlying model.
-
-#     Args:
-#         engine: The DeepSpeed engine containing the model
-#         is_zero3_enabled: Whether Zero-3 optimization is enabled
-
-#     Yields:
-#         PreTrainedModel: The unwrapped model
-#     """
-#     if is_zero3_enabled:
-#         with deepspeed.zero.GatheredParameters(engine.parameters()):
-#             yield engine.module
-#     else:
-#         yield engine.module
 
 
 class RLTrainer(ABC, TrainingMixin):
@@ -64,8 +44,8 @@ class RLTrainer(ABC, TrainingMixin):
         dist_manager: DistributedManager,
         logger: LoggingManager,
         artifacts_path: str,
-        train_env: Env,
-        eval_env: Optional[Env] = None,
+        train_env: BaseEnv,
+        eval_env: Optional[BaseEnv] = None,
         vllm_engine: Optional[vllm.LLM] = None,
         seed: Optional[int] = 175,
     ):
@@ -337,6 +317,7 @@ class RLTrainer(ABC, TrainingMixin):
         token_metric_key = f"tokens/{phase}"
 
         for ep in samples:
+            # Save data to external file
             data_to_log = {
                 'rank': self.dist_manager.global_rank,
                 'prompt_text': ep.prompt_text,
@@ -346,12 +327,11 @@ class RLTrainer(ABC, TrainingMixin):
                 'timestamp': ep.timestamp,
                 **ep.reward_dict,
             }
-
             if ep.raw_data and 'ground_truth' in ep.raw_data:
                 data_to_log['ground_truth'] = ep.raw_data['ground_truth']
-
             self.logger.log_sample(phase, data_to_log, step)
 
+            # Logging metrics
             for k, v in ep.reward_dict.items():
                 self.logger.log_scalar(f"{metric_key}/{k}", v)
             self.logger.log_scalar(
