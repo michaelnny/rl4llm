@@ -1,5 +1,6 @@
+import warnings
 from typing import List, Optional, Tuple
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -8,610 +9,786 @@ from transformers import PreTrainedTokenizer
 
 from rl4llm.generation.explore_processor import ExploreLogitsProcessor
 
-
-class MockTokenizer(PreTrainedTokenizer):
-    def __init__(self, vocab_map, **kwargs):
-        self._vocab_map = vocab_map
-        self._inv_vocab_map = {v: k for k, v in vocab_map.items()}
-        self.pad_token_id = vocab_map.get('<pad>', 0)
-        self.eos_token_id = vocab_map.get('<eos>', 1)
-        self.unk_token_id = vocab_map.get('<unk>', 2)
-        super().__init__(
-            pad_token='<pad>',
-            eos_token='<eos>',
-            unk_token='<unk>',
-            vocab_file=None,
-            **kwargs,
-        )
-
-    @property
-    def vocab_size(self) -> int:
-        return len(self._vocab_map)
-
-    def _convert_token_to_id(self, token):
-        return self._vocab_map.get(token, self.unk_token_id)
-
-    def _convert_id_to_token(self, index):
-        if isinstance(index, torch.Tensor):
-            index = index.item()
-        return self._inv_vocab_map.get(index, '<unk>')
-
-    def get_vocab(self):
-        return self._vocab_map.copy()
-
-    def _tokenize(self, text, **kwargs):
-        return text.split()
-
-    def batch_decode(self, sequences, skip_special_tokens=False, **kwargs):
-        decoded = []
-        special_tokens = (
-            {self.pad_token_id, self.eos_token_id, self.unk_token_id}
-            if skip_special_tokens
-            else set()
-        )
-        for seq in sequences:
-            tokens = [
-                self._convert_id_to_token(
-                    idx.item() if isinstance(idx, torch.Tensor) else idx
-                )
-                for idx in seq
-                if not (skip_special_tokens and idx in special_tokens)
-            ]
-            decoded.append(' '.join(tokens))
-        return decoded
-
-    def save_vocabulary(
-        self, save_directory: str, filename_prefix: Optional[str] = None
-    ) -> Tuple[str]:
-        return (f"{save_directory}/{filename_prefix or ''}vocab.txt",)
+# --- Fixtures ---
 
 
-@pytest.fixture(scope='session')
+@pytest.fixture
 def mock_tokenizer():
-    """Provides a mock tokenizer with a predefined vocabulary for testing."""
-    vocab = {
-        '<pad>': 0,
-        '<eos>': 1,
-        '<unk>': 2,
-        'hello': 3,
-        'world': 4,
-        'test': 5,
-        'a': 6,
-        'pattern': 7,
-        'prevent': 8,
-        'correct': 9,
-        'incorrect': 10,
-        'source': 11,
-        'target1': 12,
-        'target2': 13,
-        'another': 14,
-        'token': 15,
-        'skip': 16,
-        'explore': 17,
-        'replace': 18,
-        'max': 19,
-        'count': 20,
-        'always': 21,
-        'fail': 22,
-        'AAA': 23,
-        'BBB': 24,
-        'CCC': 25,
-        'DDD': 26,
-        'EEE': 27,
-        'FFF': 28,
-        'GGG': 29,
-        'HHH': 30,
+    """Provides a mock tokenizer with a defined vocab size."""
+    tokenizer = MagicMock()
+    tokenizer.vocab_size = 100
+    tokenizer.batch_decode = MagicMock(
+        side_effect=lambda x, **kwargs: [f"decoded_{i}" for i in range(len(x))]
+    )
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 1
+    return tokenizer
+
+
+@pytest.fixture
+def device():
+    """Provides the torch device (CPU for testing)."""
+    return torch.device('cpu')
+
+
+@pytest.fixture
+def default_config(mock_tokenizer):
+    """Provides a default configuration dictionary for the processor."""
+    return {
+        'initial_seq_len': 5,
+        'tokenizer': mock_tokenizer,
+        'temperature': [1.0, 1.0],
+        'group_size': 2,
+        'explore_steps': 0,
+        'explore_skip_n': 0,
+        'explore_top_k': 20,
+        'explore_decay_rate': 0.9,
+        'replace_source_tokens': None,
+        'replace_target_tokens': None,
+        'replace_prevent_patterns': None,
+        'replace_prob': 0.0,
+        'replace_max_per_seq': 0,
+        'replace_boost_value': 100.0,
+        'replace_check_top_n': 3,
+        'correctness_callback': None,
     }
-    return MockTokenizer(vocab)
 
 
 @pytest.fixture
-def initial_input_ids():
-    """Returns a tensor of initial input IDs for testing with batch size 3 and sequence length 5."""
-    return torch.tensor(
-        [[3, 4, 0, 0, 0], [6, 5, 1, 0, 0], [14, 15, 15, 0, 0]], dtype=torch.long
-    )
+def input_ids(default_config, device):
+    """Provides sample input_ids tensor."""
+    batch_size = default_config['group_size']
+    seq_len = (
+        default_config['initial_seq_len'] + 3
+    )  # Simulate a few generation steps
+    return torch.randint(
+        2, 50, (batch_size, seq_len), device=device
+    )  # Avoid pad/eos
 
 
 @pytest.fixture
-def initial_scores(mock_tokenizer):
-    """Generates initial scores for testing with controlled high-score tokens."""
-    batch_size, vocab_size = 3, mock_tokenizer.vocab_size
-    scores = torch.randn(batch_size, vocab_size) * 2
-    scores[0, [3, 4, 11, 23, 24]] = torch.tensor(
-        [10, 9, 8, 7, 6], dtype=torch.float
-    )
-    scores[1, [5, 6, 11, 25, 26]] = torch.tensor(
-        [10, 9, 8, 7, 6], dtype=torch.float
-    )
-    scores[2, [15, 14, 11, 27, 28]] = torch.tensor(
-        [10, 9, 8, 7, 6], dtype=torch.float
-    )
-    return scores.float()
+def scores(default_config, mock_tokenizer, device):
+    """Provides sample scores tensor."""
+    batch_size = default_config['group_size']
+    vocab_size = mock_tokenizer.vocab_size
+    return torch.randn((batch_size, vocab_size), device=device)
 
 
-def correctness_always_fail(texts: List[str]) -> List[float]:
-    """Marks all sequences as incorrect."""
-    return [0.0] * len(texts)
+@pytest.fixture
+def sequence_indices(default_config, device):
+    """Provides sample sequence indices tensor matching group_size."""
+    return torch.arange(default_config['group_size'], device=device)
 
 
-def correctness_always_pass(texts: List[str]) -> List[float]:
-    """Marks all sequences as correct."""
-    return [1.0] * len(texts)
+# --- Initialization Tests ---
 
 
-def correctness_if_contains_fail(texts: List[str]) -> List[float]:
-    """Marks sequences containing 'fail' as incorrect."""
-    return [0.0 if 'fail' in text else 1.0 for text in texts]
+def test_initialization_valid(default_config):
+    """Tests successful initialization with default valid parameters."""
+    processor = ExploreLogitsProcessor(**default_config)
+    assert processor.initial_seq_len == default_config['initial_seq_len']
+    assert processor.group_size == default_config['group_size']
+    assert processor.temperature.shape == (default_config['group_size'],)
+    assert torch.all(processor.temperature == 1.0)
+    assert processor.replacement_counts.shape == (default_config['group_size'],)
+    assert torch.all(processor.replacement_counts == 0)
+    assert processor.current_step == 0
+    assert processor.replace_max_per_seq == 0  # Disabled by default
 
 
-def simulate_steps(processor, initial_ids, initial_scores, num_steps):
-    """Simulates multiple generation steps and returns processed scores."""
-    all_scores, current_ids = [], initial_ids.clone()
-    step_scores = initial_scores.clone()
-    for _ in range(num_steps):
-        processed_scores = processor(current_ids, step_scores.clone())
-        all_scores.append(processed_scores.clone())
-        next_tokens = torch.argmax(processed_scores, dim=-1, keepdim=True)
-        current_ids = torch.cat([current_ids, next_tokens], dim=1)
-    return all_scores
-
-
-# Initialization Tests
 @pytest.mark.parametrize(
-    'temp, is_batch',
-    [(0.7, False), ([0.7, 0.8], True), (torch.tensor([0.7, 0.8]), True)],
-)
-def test_init_temperature(mock_tokenizer, temp, is_batch):
-    """Tests initialization with different temperature types."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=5, tokenizer=mock_tokenizer, temperature=temp
-    )
-    assert processor._is_batch_temp == is_batch
-    assert processor.temperature is None
-    if is_batch:
-        assert torch.equal(
-            processor._initial_temperature_val,
-            (
-                torch.tensor(temp, dtype=torch.float32)
-                if isinstance(temp, list)
-                else temp
-            ),
-        )
-    else:
-        assert processor._initial_temperature_val == temp
-
-
-def test_init_invalid_temp_type(mock_tokenizer):
-    """Tests that an invalid temperature type raises TypeError."""
-    with pytest.raises(TypeError):
-        ExploreLogitsProcessor(
-            initial_seq_len=5, tokenizer=mock_tokenizer, temperature='invalid'
-        )
-
-
-def test_init_state_variables(mock_tokenizer):
-    """Tests initial state variables are set correctly."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=5, tokenizer=mock_tokenizer, temperature=1.0
-    )
-    assert processor.temperature is None
-    assert processor.source_tokens_tensor is None
-    assert processor.target_tokens_tensor is None
-    assert processor.current_step == 0
-    assert processor.replacement_counts is None
-
-
-# State Management Tests
-def test_state_initialization_first_call(
-    mock_tokenizer, initial_input_ids, initial_scores
-):
-    """Tests state initialization on first processor call."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=initial_input_ids.shape[1],
-        tokenizer=mock_tokenizer,
-        temperature=[0.5, 1.0, 1.5],
-        replace_source_tokens=[11],
-        replace_target_tokens=[12],
-    )
-    processor(initial_input_ids, initial_scores)
-    assert processor.current_step == 0
-    assert torch.equal(
-        processor.temperature,
-        torch.tensor([0.5, 1.0, 1.5], dtype=torch.float32),
-    )
-    assert torch.equal(
-        processor.source_tokens_tensor, torch.tensor([11], dtype=torch.long)
-    )
-    assert torch.equal(
-        processor.target_tokens_tensor, torch.tensor([12], dtype=torch.long)
-    )
-    assert torch.equal(
-        processor.replacement_counts, torch.zeros(3, dtype=torch.long)
-    )
-
-
-def test_state_increment_step(
-    mock_tokenizer, initial_input_ids, initial_scores
-):
-    """Tests that current_step increments with each call."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=initial_input_ids.shape[1],
-        tokenizer=mock_tokenizer,
-        temperature=1.0,
-    )
-    processor(initial_input_ids, initial_scores)
-    assert processor.current_step == 0
-    processor(
-        torch.cat(
-            [initial_input_ids, torch.zeros((3, 1), dtype=torch.long)], dim=1
-        ),
-        initial_scores,
-    )
-    assert processor.current_step == 1
-
-
-def test_state_reset_on_initial_len(
-    mock_tokenizer, initial_input_ids, initial_scores
-):
-    """Tests state reset when input length matches initial_seq_len."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=initial_input_ids.shape[1],
-        tokenizer=mock_tokenizer,
-        temperature=1.0,
-        replace_source_tokens=[11],
-        replace_target_tokens=[12],
-        replace_max_per_seq=1,
-        replace_prob=1.0,
-        correctness_callback=correctness_always_fail,
-        explore_steps=1,
-        explore_skip=0,
-    )
-    processor(initial_input_ids, initial_scores)
-    processor(
-        torch.cat([initial_input_ids, torch.tensor([[10], [10], [10]])], dim=1),
-        initial_scores,
-    )
-    processor.replacement_counts = torch.ones(3, dtype=torch.long)
-    processor(initial_input_ids, initial_scores)
-    assert processor.current_step == 0
-    assert torch.equal(
-        processor.replacement_counts, torch.zeros(3, dtype=torch.long)
-    )
-
-
-# Temperature Tests
-@pytest.mark.parametrize('temp_val', [1.0, 0.7, 1.5])
-def test_scalar_temperature(
-    mock_tokenizer, initial_input_ids, initial_scores, temp_val
-):
-    """Tests scalar temperature application to scores."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=initial_input_ids.shape[1],
-        tokenizer=mock_tokenizer,
-        temperature=temp_val,
-    )
-    processed_scores = processor(initial_input_ids, initial_scores.clone())
-    expected_scores = (
-        initial_scores if temp_val == 1.0 else initial_scores / temp_val
-    )
-    torch.testing.assert_close(processed_scores, expected_scores)
-    if temp_val != 1.0:
-        assert torch.all(
-            torch.argmax(processed_scores, dim=1)
-            == torch.argmax(initial_scores, dim=1)
-        )
-
-
-def test_batch_temperature(mock_tokenizer, initial_input_ids, initial_scores):
-    """Tests batch-specific temperature application."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=initial_input_ids.shape[1],
-        tokenizer=mock_tokenizer,
-        temperature=[0.5, 1.0, 2.0],
-    )
-    processed_scores = processor(initial_input_ids, initial_scores.clone())
-    expected_scores = initial_scores.clone()
-    expected_scores[0] /= 0.5
-    expected_scores[1] /= 1.0
-    expected_scores[2] /= 2.0
-    torch.testing.assert_close(processed_scores, expected_scores)
-
-
-def test_zero_temperature(mock_tokenizer, initial_input_ids, initial_scores):
-    """Tests zero temperature forces greedy selection."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=initial_input_ids.shape[1],
-        tokenizer=mock_tokenizer,
-        temperature=0.0,
-    )
-    processed_scores = processor(initial_input_ids, initial_scores.clone())
-    expected_argmax = torch.argmax(initial_scores, dim=-1)
-    for i in range(3):
-        assert (
-            torch.isneginf(processed_scores[i]).sum()
-            == initial_scores.shape[1] - 1
-        )
-        assert processed_scores[i, expected_argmax[i]] == 100.0
-
-
-def test_mixed_zero_batch_temperature(
-    mock_tokenizer, initial_input_ids, initial_scores
-):
-    """Tests mixed batch temperature with zero values."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=initial_input_ids.shape[1],
-        tokenizer=mock_tokenizer,
-        temperature=[0.5, 0.0, 1.5],
-    )
-    processed_scores = processor(initial_input_ids, initial_scores.clone())
-    torch.testing.assert_close(processed_scores[0], initial_scores[0] / 0.5)
-    assert (
-        torch.isneginf(processed_scores[1]).sum() == initial_scores.shape[1] - 1
-    )
-    assert processed_scores[1, torch.argmax(initial_scores[1])] == 100.0
-    torch.testing.assert_close(processed_scores[2], initial_scores[2] / 1.5)
-
-
-# Exploration Tests
-@pytest.mark.parametrize(
-    'step, explore_skip, explore_steps, should_explore',
+    'param, value, error_type',
     [
-        (0, 2, 5, False),
-        (2, 2, 5, True),
-        (7, 2, 5, False),
-        (0, 0, 3, True),
-        (3, 0, 3, False),
+        ('initial_seq_len', -1, ValueError),
+        (
+            'initial_seq_len',
+            1.5,
+            ValueError,
+        ),  # Type enforced by annotation but check runtime
+        ('group_size', 0, ValueError),
+        ('group_size', -1, ValueError),
+        ('temperature', -0.5, ValueError),
+        ('temperature', [1.0, -0.1], ValueError),
+        ('temperature', torch.tensor([1.0, -0.1]), ValueError),
+        ('temperature', [1.0], ValueError),
+        ('explore_steps', -1, ValueError),
+        ('explore_skip_n', -1, ValueError),
+        ('explore_top_k', 0, ValueError),
+        ('explore_decay_rate', 0.0, ValueError),
+        ('explore_decay_rate', 1.1, ValueError),
+        ('replace_source_tokens', 'not_a_list', TypeError),
+        ('replace_target_tokens', 'not_a_list', TypeError),
+        ('replace_prevent_patterns', 'not_a_list', TypeError),
+        ('replace_prevent_patterns', [[1], 'not_a_list'], TypeError),
+        ('replace_prob', -0.1, ValueError),
+        ('replace_prob', 1.1, ValueError),
+        ('replace_max_per_seq', -1, ValueError),
+        ('replace_boost_value', 'not_a_float', TypeError),
+        ('replace_check_top_n', 0, ValueError),
     ],
 )
-def test_exploration_activation(
-    mock_tokenizer,
-    initial_input_ids,
-    initial_scores,
-    step,
-    explore_skip,
-    explore_steps,
-    should_explore,
+def test_initialization_invalid_params(
+    default_config, param, value, error_type
 ):
-    """Tests exploration activation based on step conditions."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=initial_input_ids.shape[1],
-        tokenizer=mock_tokenizer,
-        temperature=1.0,
-        explore_steps=explore_steps,
-        explore_skip=explore_skip,
-        explore_top_k=5,
+    """Tests initialization failure with various invalid parameters."""
+    config = default_config.copy()
+    config[param] = value
+    with pytest.raises(error_type):
+        ExploreLogitsProcessor(**config)
+
+
+@pytest.mark.parametrize(
+    'temp_input, group_size, expected_tensor',
+    [
+        ([1.0, 0.5], 2, torch.tensor([1.0, 0.5])),
+        (torch.tensor([1.0, 0.5]), 2, torch.tensor([1.0, 0.5])),
+    ],
+)
+def test_initialize_temperature(
+    default_config, temp_input, group_size, expected_tensor, device
+):
+    """Tests the _initialize_temperature helper method."""
+    config = default_config.copy()
+    config['temperature'] = temp_input
+    config['group_size'] = group_size
+    processor = ExploreLogitsProcessor(**config)
+    torch.testing.assert_close(
+        processor.temperature,
+        expected_tensor.to(device=device, dtype=torch.float32),
     )
-    processed_scores = simulate_steps(
-        processor, initial_input_ids, initial_scores, step + 1
-    )[step]
-    if should_explore:
-        k = min(
-            max(2, int(5 * (0.9 ** max(0, step - explore_skip)))),
-            initial_scores.shape[-1],
-        )
-        _, top_k_indices = torch.topk(initial_scores, k=k, dim=-1)
-        for i in range(3):
-            expected_non_inf = torch.zeros_like(
-                processed_scores[i], dtype=torch.bool
-            )
-            expected_non_inf[top_k_indices[i]] = True
-            assert torch.equal(
-                ~torch.isneginf(processed_scores[i]), expected_non_inf
-            )
-            assert torch.all(processed_scores[i][expected_non_inf] == 0.0)
-    else:
-        torch.testing.assert_close(processed_scores, initial_scores)
+    assert processor.temperature.device == device
 
 
-# Replacement Tests
+def test_initialization_replacement_setup(default_config):
+    """Tests that replacement tensors are created correctly when enabled."""
+    config = default_config.copy()
+    config['replace_source_tokens'] = [10, 11]
+    config['replace_target_tokens'] = [20, 21]
+    config['replace_max_per_seq'] = 5
+    processor = ExploreLogitsProcessor(**config)
+    assert processor.replace_max_per_seq == 5
+    assert processor.source_tokens_tensor is not None
+    assert processor.target_tokens_tensor is not None
+
+
+def test_initialization_replacement_disabled(default_config):
+    """Tests that replacement is disabled if max_per_seq is 0 or tokens missing."""
+    config_no_max = default_config.copy()
+    config_no_max['replace_source_tokens'] = [10]
+    config_no_max['replace_target_tokens'] = [20]
+    config_no_max['replace_max_per_seq'] = 0
+    processor_no_max = ExploreLogitsProcessor(**config_no_max)
+    assert processor_no_max.replace_max_per_seq == 0
+
+    config_no_source = default_config.copy()
+    config_no_source['replace_target_tokens'] = [20]
+    config_no_source['replace_max_per_seq'] = 5
+    processor_no_source = ExploreLogitsProcessor(**config_no_source)
+    assert processor_no_source.replace_max_per_seq == 0
+
+    config_no_target = default_config.copy()
+    config_no_target['replace_source_tokens'] = [10]
+    config_no_target['replace_max_per_seq'] = 5
+    processor_no_target = ExploreLogitsProcessor(**config_no_target)
+    assert processor_no_target.replace_max_per_seq == 0
+
+
+# --- Temperature Scaling Tests ---
+
+
+def test_temperature_scaling_default(
+    default_config, input_ids, scores, sequence_indices
+):
+    """Tests temperature scaling with default temperature (1.0)."""
+    processor = ExploreLogitsProcessor(**default_config)
+    original_scores = scores.clone()
+    processed_scores = processor(
+        input_ids, scores, sequence_indices=sequence_indices
+    )
+    torch.testing.assert_close(
+        processed_scores, original_scores
+    )  # Temp 1.0 should not change scores
+
+
+def test_temperature_scaling_non_default(
+    default_config, input_ids, scores, sequence_indices
+):
+    """Tests temperature scaling with a temperature != 1.0."""
+    temp = 0.5
+    config = default_config.copy()
+    # Ensure temperature matches batch size if providing a list/tensor
+    config['temperature'] = [temp] * config['group_size']
+    processor = ExploreLogitsProcessor(**config)
+    original_scores = scores.clone()
+    processed_scores = processor(
+        input_ids, scores, sequence_indices=sequence_indices
+    )
+    # Need to handle potential clamping in the processor's safe_temp
+    safe_temp = torch.clamp(torch.tensor(temp), min=1e-8)
+    torch.testing.assert_close(processed_scores, original_scores / safe_temp)
+
+
+def test_temperature_scaling_zero(
+    default_config, input_ids, scores, sequence_indices
+):
+    """Tests temperature scaling with zero temperature (greedy decoding)."""
+    config = default_config.copy()
+    config['temperature'] = [0.0] * config['group_size']  # Match batch size
+    processor = ExploreLogitsProcessor(**config)
+    # Pass a clone as the processor modifies scores
+    processed_scores = processor(
+        input_ids, scores.clone(), sequence_indices=sequence_indices
+    )
+
+    expected_argmax = scores.argmax(dim=-1)
+    for i in range(scores.shape[0]):
+        assert torch.isinf(processed_scores[i]).sum() == scores.shape[1] - 1
+        assert not torch.isinf(processed_scores[i, expected_argmax[i]])
+        assert (
+            processed_scores[i, expected_argmax[i]] == 100.0
+        )  # Check exact boost value
+
+
+def test_temperature_scaling_batch(
+    default_config, input_ids, scores, sequence_indices, device
+):
+    """Tests temperature scaling with different temperatures per batch item."""
+    temps = [0.5, 1.5]
+    config = default_config.copy()
+    config['temperature'] = temps
+    processor = ExploreLogitsProcessor(**config)
+    original_scores = scores.clone()
+    processed_scores = processor(
+        input_ids, scores, sequence_indices=sequence_indices
+    )
+
+    expected_scores = original_scores.clone()
+    expected_scores[0] /= temps[0]
+    expected_scores[1] /= temps[1]
+    torch.testing.assert_close(processed_scores, expected_scores)
+
+
+def test_temperature_scaling_batch_with_zero(
+    default_config, input_ids, scores, sequence_indices, device
+):
+    """Tests batch temperature scaling including a zero temperature."""
+    temps = [0.5, 0.0]
+    config = default_config.copy()
+    config['temperature'] = temps
+    processor = ExploreLogitsProcessor(**config)
+    original_scores = scores.clone()
+    processed_scores = processor(
+        input_ids, scores, sequence_indices=sequence_indices
+    )
+
+    # Check first sequence (temp=0.5)
+    torch.testing.assert_close(
+        processed_scores[0], original_scores[0] / temps[0]
+    )
+
+    # Check second sequence (temp=0.0)
+    expected_argmax_1 = scores[1].argmax()
+    assert torch.isinf(processed_scores[1]).sum() == scores.shape[1] - 1
+    assert not torch.isinf(processed_scores[1, expected_argmax_1])
+    assert processed_scores[1, expected_argmax_1] > 0
+
+
+# --- Exploration Logic Tests ---
+
+
+def test_exploration_active(
+    default_config, input_ids, scores, sequence_indices
+):
+    """Tests that exploration logic modifies scores when active."""
+    config = default_config.copy()
+    config['explore_steps'] = 5
+    config['explore_top_k'] = 10
+    processor = ExploreLogitsProcessor(**config)
+
+    # Simulate being in the exploration phase (step 0)
+    processor.current_step = 0  # Set manually for testing __call__ effect
+    seq_len = default_config['initial_seq_len'] + 1  # First step after prompt
+    current_input_ids = input_ids[:, :seq_len]
+
+    processed_scores = processor(
+        current_input_ids, scores.clone(), sequence_indices=sequence_indices
+    )
+
+    # Check that only top_k scores are non-infinite and equal (0.0)
+    for i in range(scores.shape[0]):
+        non_inf_mask = ~torch.isinf(processed_scores[i])
+        assert non_inf_mask.sum().item() == config['explore_top_k']
+        assert torch.all(processed_scores[i][non_inf_mask] == 0.0)
+
+
+def test_exploration_inactive_before_skip(
+    default_config, input_ids, scores, sequence_indices
+):
+    """Tests that exploration is inactive before explore_skip_n steps."""
+    config = default_config.copy()
+    config['explore_steps'] = 5
+    config['explore_skip_n'] = 2
+    config['explore_top_k'] = 10
+    processor = ExploreLogitsProcessor(**config)
+
+    # Simulate being before the exploration phase (step 1)
+    processor.current_step = 1  # Set manually
+    seq_len = default_config['initial_seq_len'] + 2  # Step 1 after prompt
+    current_input_ids = input_ids[:, :seq_len]
+    original_scores_scaled = scores.clone() / processor.temperature[
+        sequence_indices
+    ].unsqueeze(1)
+
+    processed_scores = processor(
+        current_input_ids, scores.clone(), sequence_indices=sequence_indices
+    )
+
+    # Scores should only be temperature scaled, not explored
+    torch.testing.assert_close(processed_scores, original_scores_scaled)
+
+
+def test_exploration_decay(default_config, input_ids, scores, sequence_indices):
+    """Tests the decay of explore_top_k over exploration steps."""
+    config = default_config.copy()
+    config['explore_steps'] = 3
+    config['explore_skip_n'] = 0
+    config['explore_top_k'] = 20
+    config['explore_decay_rate'] = 0.5
+    processor = ExploreLogitsProcessor(**config)
+
+    # Step 0
+    seq_len_0 = default_config['initial_seq_len'] + 1
+    ids_0 = input_ids[:, :seq_len_0]
+    scores_0 = processor(
+        ids_0, scores.clone(), sequence_indices=sequence_indices
+    )
+    k_0 = int(config['explore_top_k'] * (config['explore_decay_rate'] ** 0))
+    assert (~torch.isinf(scores_0[0])).sum().item() == k_0  # 20
+
+    # Step 1
+    seq_len_1 = default_config['initial_seq_len'] + 2
+    ids_1 = input_ids[:, :seq_len_1]
+    scores_1 = processor(
+        ids_1, scores.clone(), sequence_indices=sequence_indices
+    )
+    k_1 = int(config['explore_top_k'] * (config['explore_decay_rate'] ** 1))
+    assert (~torch.isinf(scores_1[0])).sum().item() == k_1  # 10
+
+    # Step 2
+    seq_len_2 = default_config['initial_seq_len'] + 3
+    ids_2 = input_ids[:, :seq_len_2]
+    scores_2 = processor(
+        ids_2, scores.clone(), sequence_indices=sequence_indices
+    )
+    k_2 = int(config['explore_top_k'] * (config['explore_decay_rate'] ** 2))
+    assert (~torch.isinf(scores_2[0])).sum().item() == k_2  # 5
+
+    # Step 3 (after exploration)
+    seq_len_3 = default_config['initial_seq_len'] + 4
+    ids_3 = input_ids[:, :seq_len_3]
+    scores_3 = processor(
+        ids_3, scores.clone(), sequence_indices=sequence_indices
+    )
+    assert not torch.all(
+        scores_3[0] == 0.0
+    )  # Should not be explored uniform dist
+    assert (
+        ~torch.isinf(scores_3[0])
+    ).sum().item() >= k_2  # Should be more than last k
+
+
+# --- Replacement Logic Tests ---
+
+
 @pytest.fixture
-def replacement_processor(mock_tokenizer):
-    """Provides a processor configured for replacement testing."""
-    return ExploreLogitsProcessor(
-        initial_seq_len=5,
-        tokenizer=mock_tokenizer,
-        temperature=1.0,
-        explore_steps=1,
-        explore_skip=0,
-        replace_source_tokens=[11],
-        replace_target_tokens=[12, 13],
-        replace_prevent_patterns=[[8, 7]],
-        replace_prob=1.0,
-        replace_max_per_seq=2,
-        correctness_callback=correctness_always_fail,
-    )
+def replacement_config(default_config):
+    """Provides a config with replacement enabled."""
+    config = default_config.copy()
+    config['replace_source_tokens'] = [10, 11]
+    config['replace_target_tokens'] = [20, 21]
+    config['replace_prevent_patterns'] = [[5, 6], [7]]
+    config['replace_prob'] = 1.0  # Ensure replacement happens if eligible
+    config['replace_max_per_seq'] = 2
+    config['replace_check_top_n'] = 3
+    return config
 
 
-def test_replacement_eligible_basic(
-    replacement_processor, initial_input_ids, initial_scores
+@pytest.fixture
+def replacement_processor(replacement_config):
+    """Provides a processor instance with replacement enabled."""
+    return ExploreLogitsProcessor(**replacement_config)
+
+
+# Test _check_replacement_patterns
+@pytest.mark.parametrize(
+    'generated_ids_list, patterns, expected_allowed_list',
+    [
+        ([[1, 2, 3]], [[5, 6]], [True]),  # Pattern not present
+        ([[1, 5, 6]], [[5, 6]], [False]),  # Pattern present at end
+        ([[5, 6, 1]], [[5, 6]], [False]),  # Pattern present at start
+        ([[1, 5, 1, 6]], [[5, 6]], [True]),  # Pattern not contiguous
+        ([[1, 7, 2]], [[5, 6], [7]], [False]),  # Second pattern present
+        ([[1, 2, 3], [4, 5, 6]], [[5, 6]], [True, False]),  # Batch check
+        ([[]], [[5, 6]], [True]),  # Empty generated sequence
+        ([[1, 2]], [[5, 6, 7]], [True]),  # Sequence shorter than pattern
+        ([[1, 2, 3]], [], [True]),  # No patterns defined
+        ([[1, 2, 3]], [[]], [True]),  # Empty pattern list
+    ],
+)
+def test_check_replacement_patterns(
+    replacement_processor,
+    generated_ids_list,
+    patterns,
+    expected_allowed_list,
+    device,
 ):
-    """Tests basic replacement eligibility and application."""
-    replacement_processor.current_step = 1
-    replacement_processor._initialize_state(
-        initial_input_ids.shape[0], initial_input_ids.device
+    """Tests the _check_replacement_patterns helper method."""
+    replacement_processor.replace_prevent_patterns = patterns
+    generated_ids = torch.tensor(
+        generated_ids_list, device=device, dtype=torch.long
     )
-    scores = initial_scores.clone()
-    scores[:, [11, 12, 13]] = torch.tensor([5.0, 4.0, 3.0], dtype=torch.float)
-    input_ids = torch.cat(
-        [initial_input_ids, torch.tensor([[3], [5], [14]], dtype=torch.long)],
-        dim=1,
+    expected_allowed = torch.tensor(
+        expected_allowed_list, device=device, dtype=torch.bool
     )
-    processed_scores = replacement_processor(input_ids, scores)
-    assert torch.all(torch.isneginf(processed_scores[:, 11]))
-    assert torch.all(
-        (processed_scores[:, 12] == scores[:, 12] + 100.0)
-        ^ (processed_scores[:, 13] == scores[:, 13] + 100.0)
-    )
-    assert torch.all(replacement_processor.replacement_counts == 1)
+    allowed = replacement_processor._check_replacement_patterns(generated_ids)
+    torch.testing.assert_close(allowed, expected_allowed)
 
 
-def test_replacement_probability_zero(
-    replacement_processor, initial_input_ids, initial_scores
+# Test _check_correctness
+def test_check_correctness_no_callback(
+    replacement_processor, input_ids, device
 ):
-    """Tests no replacement occurs with zero probability."""
-    replacement_processor.replace_prob = 0.0
-    replacement_processor.current_step = 1
-    replacement_processor._initialize_state(
-        initial_input_ids.shape[0], initial_input_ids.device
+    """Tests _check_correctness when no callback is provided."""
+    replacement_processor.correctness_callback = None
+    pattern_allows = torch.tensor([True, True], device=device)
+    is_incorrect = replacement_processor._check_correctness(
+        input_ids, pattern_allows
     )
-    scores = initial_scores.clone()
-    input_ids = torch.cat(
-        [initial_input_ids, torch.tensor([[3], [5], [14]], dtype=torch.long)],
-        dim=1,
+    # Should assume incorrect (eligible) if no callback
+    torch.testing.assert_close(
+        is_incorrect, torch.tensor([True, True], device=device)
     )
-    processed_scores = replacement_processor(input_ids, scores)
-    torch.testing.assert_close(processed_scores, scores)
-    assert torch.all(replacement_processor.replacement_counts == 0)
 
 
-@patch('torch.rand')
-def test_replacement_probability_half(
-    mock_rand, replacement_processor, initial_input_ids, initial_scores
+def test_check_correctness_with_callback(
+    replacement_processor, input_ids, device
 ):
-    """Tests replacement with 0.5 probability using mocked randomness."""
-    replacement_processor.replace_prob = 0.5
-    replacement_processor.current_step = 1
-    replacement_processor._initialize_state(
-        initial_input_ids.shape[0], initial_input_ids.device
+    """Tests _check_correctness using the callback results."""
+    mock_callback = MagicMock(return_value=[0.5, 1.0])
+    replacement_processor.correctness_callback = mock_callback
+    # Ensure processor tensors are on the right device for internal checks
+    replacement_processor._ensure_device(device)
+
+    pattern_allows = torch.tensor([True, True], device=device)
+    # _check_correctness returns is_incorrect mask (True if score < 1.0)
+    is_incorrect = replacement_processor._check_correctness(
+        input_ids, pattern_allows
     )
+
+    # Check that the callback was called with the output from the mock tokenizer's side_effect
+    # The side_effect produces ['decoded_0', 'decoded_1'] for a batch of 2
+    mock_callback.assert_called_once_with(['decoded_0', 'decoded_1'])
+
+    # Expected: seq0 is incorrect (0.5 < 1.0), seq1 is correct (1.0 >= 1.0)
+    # This part of the test remains the same, checking the output mask based on callback return values
+    torch.testing.assert_close(
+        is_incorrect,
+        torch.tensor([True, False], device=device, dtype=torch.bool),
+    )
+
+
+def test_check_correctness_callback_error(
+    replacement_processor, input_ids, device
+):
+    """Tests _check_correctness handling callback errors."""
+    mock_callback = MagicMock(side_effect=ValueError('Callback failed'))
+    replacement_processor.correctness_callback = mock_callback
+    replacement_processor.tokenizer.batch_decode.return_value = ['seq0', 'seq1']
+
+    pattern_allows = torch.tensor([True, True], device=device)
+    with warnings.catch_warnings(record=True) as w:
+        is_incorrect = replacement_processor._check_correctness(
+            input_ids, pattern_allows
+        )
+        assert len(w) == 1
+        assert 'Correctness callback failed' in str(w[0].message)
+
+    # Should assume incorrect on error
+    torch.testing.assert_close(
+        is_incorrect, torch.tensor([True, True], device=device)
+    )
+
+
+def test_check_correctness_callback_wrong_length(
+    replacement_processor, input_ids, device
+):
+    """Tests _check_correctness handling callback returning wrong number of scores."""
+    mock_callback = MagicMock(
+        return_value=[0.5]
+    )  # Only one score for two inputs
+    replacement_processor.correctness_callback = mock_callback
+    replacement_processor.tokenizer.batch_decode.return_value = ['seq0', 'seq1']
+
+    pattern_allows = torch.tensor([True, True], device=device)
+    with warnings.catch_warnings(record=True) as w:
+        is_incorrect = replacement_processor._check_correctness(
+            input_ids, pattern_allows
+        )
+        assert len(w) == 1
+        assert 'returned 1 scores, expected 2' in str(w[0].message)
+
+    # Should assume incorrect on length mismatch
+    torch.testing.assert_close(
+        is_incorrect, torch.tensor([True, True], device=device)
+    )
+
+
+def test_check_correctness_respects_pattern_mask(
+    replacement_processor, input_ids, device
+):
+    """Tests that correctness callback is only called for sequences allowed by patterns."""
+    mock_callback = MagicMock(
+        return_value=[0.5]
+    )  # Callback returns score for the one sequence it receives
+    replacement_processor.correctness_callback = mock_callback
+    # Let the default mock tokenizer fixture's side_effect work:
+    # side_effect=lambda x, **kwargs: [f"decoded_{i}" for i in range(len(x))]
+    # When called with one sequence, it will return ['decoded_0']
+
+    # Ensure processor tensors are on the right device for internal checks
+    replacement_processor._ensure_device(device)
+
+    pattern_allows = torch.tensor([False, True], device=device)
+    # _check_correctness returns is_incorrect mask
+    is_incorrect = replacement_processor._check_correctness(
+        input_ids, pattern_allows
+    )
+
+    # Check tokenizer was called once with the correct input tensor slice (index 1)
+    replacement_processor.tokenizer.batch_decode.assert_called_once()
+    call_args, call_kwargs = (
+        replacement_processor.tokenizer.batch_decode.call_args
+    )
+    indices_passed_to_decode = torch.where(pattern_allows)[
+        0
+    ]  # Should be tensor([1])
+    # Ensure we compare the tensor passed to the mock with the expected slice
+    torch.testing.assert_close(
+        call_args[0].cpu(), input_ids[indices_passed_to_decode].cpu()
+    )
+    assert call_kwargs.get('skip_special_tokens') is True  # Check kwargs too
+
+    # Check callback was called with the text returned by the mock tokenizer's side_effect
+    # For a single input sequence (input_ids[1]), the side_effect returns ['decoded_0']
+    mock_callback.assert_called_once_with(['decoded_0'])
+
+    # Expected: seq0 is correct by default (not checked -> is_incorrect=False),
+    # seq1 is incorrect (checked, score 0.5 < 1.0 -> is_incorrect=True)
+    torch.testing.assert_close(
+        is_incorrect,
+        torch.tensor([False, True], device=device, dtype=torch.bool),
+    )
+
+
+# Test _determine_replacement_eligibility
+@patch.object(ExploreLogitsProcessor, '_check_replacement_patterns')
+@patch.object(ExploreLogitsProcessor, '_check_correctness')
+def test_determine_eligibility(
+    mock_check_correctness,
+    mock_check_patterns,
+    replacement_processor,
+    input_ids,
+    device,
+):
+    """Tests the combination of factors for replacement eligibility."""
+    # Setup: Seq 0: count=1, pattern allows, incorrect. Seq 1: count=2 (max), pattern prevents, correct
+    replacement_processor.replacement_counts = torch.tensor(
+        [1, 2], device=device
+    )  # Seq 1 hits max (2)
+    mock_check_patterns.return_value = torch.tensor(
+        [True, False], device=device
+    )  # Seq 0 allows, Seq 1 prevents
+    mock_check_correctness.return_value = torch.tensor(
+        [True, False], device=device
+    )  # Seq 0 incorrect, Seq 1 correct (though won't be checked)
+
+    eligible = replacement_processor._determine_replacement_eligibility(
+        input_ids
+    )
+
+    # Only Seq 0 should be eligible (count < max AND pattern allows AND incorrect)
+    torch.testing.assert_close(
+        eligible, torch.tensor([True, False], device=device)
+    )
+    mock_check_patterns.assert_called_once()
+    # Correctness check should only be performed where count < max AND pattern allows
+    mock_check_correctness.assert_called_once()
+    torch.testing.assert_close(
+        mock_check_correctness.call_args[0][1],
+        torch.tensor([True, False], device=device),
+    )  # needs_correctness_check mask
+
+
+# Test _apply_replacement_logic
+@patch('torch.rand_like')
+def test_apply_replacement_logic_success(
+    mock_rand, replacement_processor, scores, device
+):
+    """Tests applying replacement when conditions are met."""
     mock_rand.return_value = torch.tensor(
-        [0.2, 0.6, 0.7], device=initial_input_ids.device
+        [0.4, 0.6], device=device
+    )  # Ensure prob check passes for first
+    replacement_processor.replace_prob = 0.5
+
+    # Seq 0: Eligible, Top N includes source token 10. Seq 1: Eligible, Top N does not include source tokens.
+    eligible_mask = torch.tensor([True, True], device=device)
+    # Make top 3 for seq 0 include 10, top 3 for seq 1 not include 10 or 11
+    scores[0, 10] = 1000.0
+    scores[0, 5] = 900.0
+    scores[0, 6] = 800.0
+    scores[1, 50] = 1000.0
+    scores[1, 51] = 900.0
+    scores[1, 52] = 800.0
+    _, original_top_n = torch.topk(
+        scores, k=replacement_processor.replace_check_top_n, dim=-1
     )
-    scores = initial_scores.clone()
-    scores[:, [11, 12, 13]] = torch.tensor([5.0, 4.0, 3.0], dtype=torch.float)
-    input_ids = torch.cat(
-        [initial_input_ids, torch.tensor([[3], [5], [14]], dtype=torch.long)],
-        dim=1,
+
+    initial_scores = scores.clone()
+    initial_counts = replacement_processor.replacement_counts.clone()
+
+    replacement_processor._apply_replacement_logic(
+        scores, eligible_mask, original_top_n
     )
-    processed_scores = replacement_processor(input_ids, scores)
-    assert torch.isneginf(processed_scores[0, 11])
-    assert replacement_processor.replacement_counts[0] == 1
-    torch.testing.assert_close(processed_scores[1:], scores[1:])
-    assert torch.all(replacement_processor.replacement_counts[1:] == 0)
+
+    # Seq 0 should have replacement applied (Eligible & TopNSource & ProbMet)
+    assert torch.isinf(scores[0, 10])  # Source token penalized
+    assert torch.isinf(scores[0, 11])  # Source token penalized
+    # One target token should be boosted
+    boosted_target_0 = (
+        scores[0, replacement_processor.target_tokens_tensor]
+        > initial_scores[0, replacement_processor.target_tokens_tensor]
+    ).any()
+    assert boosted_target_0
+    assert replacement_processor.replacement_counts[0] == initial_counts[0] + 1
+
+    # Seq 1 should NOT have replacement applied (Eligible but TopNSource is False)
+    torch.testing.assert_close(scores[1], initial_scores[1])
+    assert replacement_processor.replacement_counts[1] == initial_counts[1]
 
 
-def test_replacement_max_count(
-    replacement_processor, initial_input_ids, initial_scores
+@patch('torch.rand_like')
+def test_apply_replacement_logic_prob_fail(
+    mock_rand, replacement_processor, scores, device
 ):
-    """Tests replacement stops after reaching max count."""
+    """Tests that replacement is skipped if probability check fails."""
+    mock_rand.return_value = torch.tensor(
+        [0.6], device=device
+    )  # Ensure prob check fails
+    replacement_processor.replace_prob = 0.5
+
+    eligible_mask = torch.tensor(
+        [True], device=device
+    )  # Single item batch for simplicity
+    scores[0, 10] = 1000.0  # Make top N include source token 10
+    _, original_top_n = torch.topk(
+        scores, k=replacement_processor.replace_check_top_n, dim=-1
+    )
+
+    initial_scores = scores.clone()
+    initial_counts = replacement_processor.replacement_counts.clone()
+
+    replacement_processor._apply_replacement_logic(
+        scores, eligible_mask, original_top_n
+    )
+
+    # Scores and counts should be unchanged
+    torch.testing.assert_close(scores, initial_scores)
+    torch.testing.assert_close(
+        replacement_processor.replacement_counts, initial_counts
+    )
+
+
+def test_apply_replacement_logic_ineligible(
+    replacement_processor, scores, device
+):
+    """Tests that replacement is skipped if eligibility mask is false."""
+    eligible_mask = torch.tensor([False, False], device=device)
+    scores[0, 10] = 1000.0  # Make top N include source token 10
+    _, original_top_n = torch.topk(
+        scores, k=replacement_processor.replace_check_top_n, dim=-1
+    )
+
+    initial_scores = scores.clone()
+    initial_counts = replacement_processor.replacement_counts.clone()
+
+    replacement_processor._apply_replacement_logic(
+        scores, eligible_mask, original_top_n
+    )
+
+    # Scores and counts should be unchanged
+    torch.testing.assert_close(scores, initial_scores)
+    torch.testing.assert_close(
+        replacement_processor.replacement_counts, initial_counts
+    )
+
+
+# --- Integration Tests (__call__) ---
+
+
+def test_call_updates_step_count(
+    default_config, input_ids, scores, sequence_indices
+):
+    """Tests that the internal step count is updated correctly."""
+    processor = ExploreLogitsProcessor(**default_config)
+    assert processor.current_step == 0
+
+    # Call with sequence length > initial_seq_len
+    processor(input_ids, scores.clone(), sequence_indices=sequence_indices)
+    assert processor.current_step == 1
+
+    # Call again
+    processor(input_ids, scores.clone(), sequence_indices=sequence_indices)
+    assert processor.current_step == 2
+
+    # Call with sequence length <= initial_seq_len (should not increment)
+    prompt_ids = input_ids[:, : default_config['initial_seq_len']]
+    processor(prompt_ids, scores.clone(), sequence_indices=sequence_indices)
+    assert processor.current_step == 2
+
+
+def test_call_replacement_skipped_during_exploration(
+    replacement_processor, input_ids, scores, sequence_indices
+):
+    """Tests that replacement is skipped during the exploration phase."""
+    replacement_processor.explore_steps = 2
+    replacement_processor.explore_skip_n = 0
+    replacement_processor.replace_prob = 1.0
     replacement_processor.replace_max_per_seq = 1
-    replacement_processor.current_step = 1
-    replacement_processor._initialize_state(
-        initial_input_ids.shape[0], initial_input_ids.device
-    )
-    scores = initial_scores.clone()
-    scores[:, [11, 12, 13]] = torch.tensor([5.0, 4.0, 3.0], dtype=torch.float)
-    input_ids = torch.cat(
-        [initial_input_ids, torch.tensor([[3], [5], [14]], dtype=torch.long)],
-        dim=1,
-    )
-    replacement_processor(input_ids, scores)
-    replacement_processor.current_step = 2
-    processed_scores = replacement_processor(
-        torch.cat(
-            [input_ids, torch.tensor([[3], [5], [14]], dtype=torch.long)], dim=1
-        ),
-        scores,
-    )
-    assert torch.all(replacement_processor.replacement_counts == 1)
-    torch.testing.assert_close(processed_scores, scores)
 
+    # Simulate being in exploration step 1
+    seq_len = replacement_processor.initial_seq_len + 2
+    current_input_ids = input_ids[:, :seq_len]
+    current_scores = scores.clone()
 
-def test_replacement_prevent_pattern_present(
-    replacement_processor, initial_input_ids, initial_scores
-):
-    """Tests replacement is prevented when prevent pattern is present."""
-    replacement_processor.current_step = 1
-    replacement_processor._initialize_state(
-        initial_input_ids.shape[0], initial_input_ids.device
-    )
-    scores = initial_scores.clone()
-    input_ids = torch.cat(
-        [initial_input_ids, torch.tensor([[8], [5], [14]], dtype=torch.long)],
-        dim=1,
-    )
-    input_ids = torch.cat(
-        [input_ids, torch.tensor([[7], [5], [14]], dtype=torch.long)], dim=1
-    )
-    processed_scores = replacement_processor(input_ids, scores)
-    torch.testing.assert_close(processed_scores[0], scores[0])
-    assert replacement_processor.replacement_counts[0] == 0
-    assert torch.all(torch.isneginf(processed_scores[1:, 11]))
-    assert torch.all(replacement_processor.replacement_counts[1:] == 1)
+    with (
+        patch.object(
+            ExploreLogitsProcessor, '_determine_replacement_eligibility'
+        ) as mock_determine,
+        patch.object(
+            ExploreLogitsProcessor, '_apply_replacement_logic'
+        ) as mock_apply,
+    ):
 
-
-def test_replacement_correctness_pass(
-    replacement_processor, initial_input_ids, initial_scores
-):
-    """Tests no replacement occurs when correctness callback passes."""
-    replacement_processor.correctness_callback = correctness_always_pass
-    replacement_processor.current_step = 1
-    replacement_processor._initialize_state(
-        initial_input_ids.shape[0], initial_input_ids.device
-    )
-    scores = initial_scores.clone()
-    input_ids = torch.cat(
-        [initial_input_ids, torch.tensor([[3], [5], [14]], dtype=torch.long)],
-        dim=1,
-    )
-    processed_scores = replacement_processor(input_ids, scores)
-    torch.testing.assert_close(processed_scores, scores)
-    assert torch.all(replacement_processor.replacement_counts == 0)
-
-
-def test_replacement_correctness_conditional(
-    mock_tokenizer, initial_input_ids, initial_scores
-):
-    """Tests conditional replacement based on correctness callback."""
-    processor = ExploreLogitsProcessor(
-        initial_seq_len=5,
-        tokenizer=mock_tokenizer,
-        temperature=1.0,
-        explore_steps=1,
-        explore_skip=0,
-        replace_source_tokens=[11],
-        replace_target_tokens=[12, 13],
-        replace_prob=1.0,
-        replace_max_per_seq=1,
-        correctness_callback=correctness_if_contains_fail,
-    )
-    processor.current_step = 1
-    processor._initialize_state(
-        initial_input_ids.shape[0], initial_input_ids.device
-    )
-    scores = initial_scores.clone()
-    scores[:, [11, 12, 13]] = torch.tensor([5.0, 4.0, 3.0], dtype=torch.float)
-    input_ids = torch.cat(
-        [initial_input_ids, torch.tensor([[22], [9], [14]], dtype=torch.long)],
-        dim=1,
-    )
-    processed_scores = processor(input_ids, scores)
-    assert torch.isneginf(processed_scores[0, 11])
-    assert processor.replacement_counts[0] == 1
-    torch.testing.assert_close(processed_scores[1:], scores[1:])
-    assert torch.all(processor.replacement_counts[1:] == 0)
-
-
-def test_replacement_step_condition(
-    replacement_processor, initial_input_ids, initial_scores
-):
-    """Tests replacement only occurs after exploration window."""
-    replacement_processor.current_step = 0
-    replacement_processor._initialize_state(
-        initial_input_ids.shape[0], initial_input_ids.device
-    )
-    scores = initial_scores.clone()
-    processed_scores = replacement_processor(initial_input_ids, scores)
-    k = min(replacement_processor.explore_top_k, scores.shape[-1])
-    _, top_k_indices = torch.topk(scores, k=k, dim=-1)
-    for i in range(3):
-        expected_non_inf = torch.zeros_like(
-            processed_scores[i], dtype=torch.bool
+        processed_scores = replacement_processor(
+            current_input_ids, current_scores, sequence_indices=sequence_indices
         )
-        expected_non_inf[top_k_indices[i]] = True
-        assert torch.equal(
-            ~torch.isneginf(processed_scores[i]), expected_non_inf
-        )
-        assert torch.all(processed_scores[i][expected_non_inf] == 0.0)
-    assert torch.all(replacement_processor.replacement_counts == 0)
+
+        # Replacement checks should not be called
+        mock_determine.assert_not_called()
+        mock_apply.assert_not_called()
+
+        # Scores should reflect exploration, not replacement
+        assert torch.all(
+            processed_scores[0] <= 0.0
+        )  # Exploration sets to 0 or -inf
+        assert torch.isinf(processed_scores[0]).sum() > 0

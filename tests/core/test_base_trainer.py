@@ -18,6 +18,7 @@ def dummy_config():
     config.kl_loss_coef = 0.0
     config.max_steps = 1
     config.eval_interval = 1
+    config.eval_rollout_size = 4
     config.checkpoint_interval = 1
     config.sync_reference_interval = 1
     return config
@@ -88,49 +89,6 @@ def trainer_base(
         artifacts_path='/tmp/test_rl_trainer',
         train_env=MagicMock(),
         eval_env=MagicMock(),
-    )
-
-
-def test_zero3_warning(dummy_config, dummy_logger, dummy_dist_manager):
-    """Triggers warning when ZeRO-3 is enabled."""
-
-    engine = MagicMock()
-    engine.zero_optimization_stage.return_value = 3
-
-    class DummyTrainer(RLTrainer):
-        def initialize_trainer(self):
-            pass
-
-        def generate_experience(self):
-            return []
-
-        def compute_loss(self, experience_batch, **kwargs):
-            return torch.tensor(0.0), {}
-
-        def build_train_loader(self, experience):
-            return []
-
-        def evaluate_step(self):
-            pass
-
-        def train_step(self, train_dataloader):
-            pass
-
-        def sync_policy_model(self):
-            pass
-
-    DummyTrainer(
-        config=dummy_config,
-        tokenizer=MagicMock(),
-        policy_engine=engine,
-        dist_manager=dummy_dist_manager,
-        logger=dummy_logger,
-        artifacts_path='/tmp',
-        train_env=MagicMock(),
-    )
-
-    dummy_logger.warning.assert_called_once_with(
-        'Zero-3 is not fully supported'
     )
 
 

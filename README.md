@@ -43,7 +43,7 @@ Start training job
 
 ```bash
 
-PYTHONPATH=src CUDA_LAUNCH_BLOCKING=1 CUDA_VISIBLE_DEVICES=0 TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_grpo.py --config-file ./configs/grpo_config.yaml
+PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_grpo.py --config-file ./configs/grpo_config.yaml
 
 ```
 

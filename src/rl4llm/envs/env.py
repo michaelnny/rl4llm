@@ -1,5 +1,6 @@
 """Implements MDP ENV for collect samples for RL"""
 
+import functools
 import logging
 import random
 import re
@@ -11,10 +12,15 @@ import torch
 from datasets import Dataset
 from pydantic import BaseModel, Field, constr, field_validator, model_validator
 from torch.utils.data import DataLoader
-from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers import (
+    LogitsProcessorList,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.tokenization_utils_base import PaddingStrategy
 
 from rl4llm.constants import LOGGER_NAME
+from rl4llm.generation.explore_processor import ExploreLogitsProcessor
 from rl4llm.utils.dataset_utils import shard_dataset
 
 logger = logging.getLogger(LOGGER_NAME)
@@ -131,9 +137,9 @@ class BaseRewardFunction:
         )
 
 
-class LLMEnv:
+class Env:
     """
-    Environment for generating LLM training samples.
+    Environment for generating training samples with LLM  models from HuggingFace library.
 
     This environment handles the workflow of sampling prompts from a dataset,
     generating completions using a provided LLM, calculating rewards, and
@@ -162,7 +168,7 @@ class LLMEnv:
         num_workers: int = 0,
     ):
         """
-        Initializes the LLMEnv.
+        Initializes the Env.
 
         Args:
             dataset: The dataset containing prompts and ground truths.
@@ -416,7 +422,7 @@ class LLMEnv:
         sampling_params: Dict,
         state: EnvState,
         **kwargs: Optional[Dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> Tuple[List[str], List[torch.Tensor], List[int]]:
         """
         Generates completions using the LLM for the current state.
 
@@ -427,7 +433,10 @@ class LLMEnv:
             **kwargs: Additional custom arguments.
 
         Returns:
-            A tensor containing the full generated sequences (prompt + completion).
+            A tuple containing:
+            - completion_texts: List of decoded completion strings (up to, but not including, EOS).
+            - completion_tokens: List of completion token tensors (unpadded, includes EOS if present).
+            - completion_lengths: List of actual lengths for each completion (includes EOS, excludes PAD).
         """
         input_ids = state.input_ids.to(llm.device)
         attention_mask = state.attention_mask.to(llm.device)
@@ -450,7 +459,13 @@ class LLMEnv:
             attention_mask=attention_mask,
             **sampling_params,
         )
-        return output.sequences
+
+        start = state.input_ids.shape[1]
+        texts, tokens_list, lengths = self._process_completions(
+            output.sequences[:, start:]
+        )
+
+        return texts, tokens_list, lengths
 
     def _process_completions(
         self,
@@ -582,14 +597,10 @@ class LLMEnv:
                 f"Rank {self.rank}: Reset returned None; dataset exhausted."
             )
             return []
-        full_sequences = self._generate_completions(
+        texts, tokens_list, lengths = self._generate_completions(
             llm, sampling_params, state, **kwargs
         )
-        # post-processing completions
-        start = state.input_ids.shape[1]
-        texts, tokens_list, lengths = self._process_completions(
-            full_sequences[:, start:]
-        )
+
         rewards = self._calculate_rewards(texts, state.ground_truth)
         prompt_tokens = [
             state.input_ids[i][state.attention_mask[i] == 1].cpu()
@@ -608,3 +619,125 @@ class LLMEnv:
             )
             for i in range(len(texts))
         ]
+
+
+class ExploreEnv(Env):
+    """An extension of the standard LLM Env
+    where we apply some custom logits processor to the generation process
+    to encourage exploration."""
+
+    def __init__(
+        self,
+        temperature: Union[List[float], torch.Tensor],
+        explore_steps: int,
+        explore_top_k: int,
+        explore_skip_n: int,
+        explore_decay_rate: float,
+        replace_source_tokens: List[int],
+        replace_target_tokens: List[int],
+        replace_prevent_patterns: List[List[int]],
+        replace_max_per_seq: int,
+        replace_prob: float,
+        **kwargs,
+    ):
+
+        super().__init__(**kwargs)
+
+        assert len(temperature) >= 1
+
+        self.temperature = temperature
+        self.explore_steps = explore_steps
+        self.explore_top_k = explore_top_k
+        self.explore_skip_n = explore_skip_n
+        self.explore_decay_rate = explore_decay_rate
+        self.replace_source_tokens = replace_source_tokens
+        self.replace_target_tokens = replace_target_tokens
+        self.replace_prevent_patterns = replace_prevent_patterns
+        self.replace_max_per_seq = replace_max_per_seq
+        self.replace_prob = replace_prob
+
+        self.accuracy_fn = None
+        for fn in self.reward_functions:
+            if fn.name == 'accuracy_reward':
+                self.accuracy_fn = fn
+                break
+
+    def _generate_completions(
+        self,
+        llm: PreTrainedModel,
+        sampling_params: Dict,
+        state: EnvState,
+        **kwargs: Optional[Dict[str, Any]],
+    ) -> Tuple[List[str], List[torch.Tensor], List[int]]:
+        """
+        Generates completions using the LLM for the current state.
+
+        Args:
+            llm: The pre-trained language model.
+            sampling_params: Dictionary of generation arguments (e.g., max_new_tokens, do_sample).
+            state: The current EnvState containing input_ids and attention_mask.
+            **kwargs: Additional custom arguments.
+
+        Returns:
+            A tuple containing:
+            - completion_texts: List of decoded completion strings (up to, but not including, EOS).
+            - completion_tokens: List of completion token tensors (unpadded, includes EOS if present).
+            - completion_lengths: List of actual lengths for each completion (includes EOS, excludes PAD).
+        """
+
+        input_ids = state.input_ids.to(llm.device)
+        attention_mask = state.attention_mask.to(llm.device)
+        gen_args_copy = sampling_params.copy()
+        gen_args_copy.pop('input_ids', None)
+        gen_args_copy.pop('attention_mask', None)
+        gen_args_copy.pop('num_return_sequences', None)
+        gen_args_copy['return_dict_in_generate'] = True
+
+        # add explore logits processor
+        explore_prob = kwargs.get('explore_probability', 0.0)
+
+        if explore_prob > 0 and (random.random() < explore_prob):
+            correctness_callback = None
+            # Checks for outcome correctness using the accuracy function,
+            # if applied, will only apply token replacement to sequences with incorrect outcome
+            if self.accuracy_fn:
+                correctness_callback = functools.partial(
+                    self.accuracy_fn.__call__,
+                    ground_truths=(
+                        state.ground_truth[0]
+                        if self.batch_size == 1
+                        else state.ground_truth
+                    ),
+                )
+
+            explore_logits_processor = ExploreLogitsProcessor(
+                initial_seq_len=input_ids.shape[1],
+                tokenizer=self.tokenizer,
+                group_size=self.group_size,
+                temperature=self.temperature,
+                explore_steps=self.explore_steps,
+                explore_skip_n=self.explore_skip_n,
+                explore_top_k=self.explore_top_k,
+                explore_decay_rate=self.explore_decay_rate,
+                replace_source_tokens=self.replace_source_tokens,
+                replace_target_tokens=self.replace_target_tokens,
+                replace_prevent_patterns=self.replace_prevent_patterns,
+                replace_max_per_seq=self.replace_max_per_seq,
+                replace_prob=self.replace_prob,
+                correctness_callback=correctness_callback,
+            )
+            gen_args_copy['logits_processor'] = LogitsProcessorList(
+                [explore_logits_processor]
+            )
+
+        output = llm.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **gen_args_copy,
+        )
+        start = state.input_ids.shape[1]
+        texts, tokens_list, lengths = self._process_completions(
+            output.sequences[:, start:]
+        )
+
+        return texts, tokens_list, lengths

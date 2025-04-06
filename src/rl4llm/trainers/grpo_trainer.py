@@ -14,7 +14,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_trainer import RLConfig, RLTrainer
 from rl4llm.core.distributed import DistributedManager
-from rl4llm.envs import EpisodeData, LLMEnv
+from rl4llm.envs import Env, EpisodeData
 from rl4llm.logging import LoggingManager
 
 
@@ -142,8 +142,8 @@ class GRPOTrainer(RLTrainer):
         dist_manager: DistributedManager,
         logger: LoggingManager,
         artifacts_path: str,
-        train_env: LLMEnv,
-        eval_env: Optional[LLMEnv] = None,
+        train_env: Env,
+        eval_env: Optional[Env] = None,
         vllm_engine: Optional[vllm.LLM] = None,
         seed: Optional[int] = 175,
     ):
@@ -191,17 +191,35 @@ class GRPOTrainer(RLTrainer):
         # do nothing if in zero-1/zero-2
 
     def build_train_loader(
-        self, experience: List[TransitionData]
+        self, experience: List[List[EpisodeData]]
     ) -> DataLoader:
         """Creates a train loader using the collected experiences.
 
         Args:
-            experience (List[TransitionData]): Rollout transitions
+            experience (List[List[EpisodeData]]): local rollout episodes in group
         Returns:
             DataLoader: A dataloader ready for training.
         """
+        flatted_samples = []
+        for group_eps in experience:
+            # we need to process the samples from same question outcome
+            # in a single group for GRPO
+            samples = self._convert_group_episodes_to_transitions(group_eps)
+            if samples:
+                flatted_samples.extend(samples)
+
+        if not flatted_samples:
+            raise ValueError('No samples for training')
+
+        local_rollout_size = (
+            self.config.train_rollout_size // self.dist_manager.world_size
+        )
+
+        if len(flatted_samples) > local_rollout_size:
+            flatted_samples = flatted_samples[:local_rollout_size]
+
         data_loader = DataLoader(
-            experience,
+            flatted_samples,
             batch_size=self.config.train_micro_batch_size,
             shuffle=True,
             pin_memory=self.device.type == 'cuda',
@@ -380,7 +398,7 @@ class GRPOTrainer(RLTrainer):
                 )
 
     @torch.inference_mode()
-    def generate_experience(self) -> List[TransitionData]:
+    def generate_experience(self) -> List[EpisodeData]:
         """Generates samples using the current policy."""
 
         if self.is_vllm_inference_enabled():
@@ -402,7 +420,7 @@ class GRPOTrainer(RLTrainer):
                 'top_p': self.config.top_p,
                 'top_k': self.config.top_k,
                 'repetition_penalty': self.config.repetition_penalty,
-                'num_return_sequences': 1,  # we handle the group size inside the LLMEnv
+                'num_return_sequences': 1,  # we handle the group size inside the Env
                 'do_sample': True,
                 'use_cache': True,
                 'output_scores': False,
@@ -415,10 +433,11 @@ class GRPOTrainer(RLTrainer):
         local_rollout_size = (
             self.config.train_rollout_size // self.dist_manager.world_size
         )
-        collected_samples: List[TransitionData] = []
+        collected_episodes: List[List[EpisodeData]] = []
+        local_count = 0
 
         with self.unwrapped_model_for_generation() as policy_model:
-            while len(collected_samples) < local_rollout_size:
+            while local_count < local_rollout_size:
                 # control explore env custom logit
                 custom_kwargs = {
                     'explore_probability': self._get_exploration_epsilon(),
@@ -426,20 +445,45 @@ class GRPOTrainer(RLTrainer):
                 outputs = self.train_env.rollout(
                     policy_model, train_sampling_params, **custom_kwargs
                 )
-                self.log_batch_episodes(
-                    self._train_phase, outputs, self.global_step
-                )
                 self.logger.log_scalar(
                     'other/exploration_epsilon', self.explore_epsilon
                 )
-                samples = self._convert_group_episodes_to_transitions(outputs)
-                if samples:
-                    collected_samples.extend(samples)
+                if self._check_group_episodes(outputs):
+                    # IMPORTANT: do not flatten the episodes yet
+                    collected_episodes.extend([outputs])
+                    local_count += len(outputs)
 
-        if len(collected_samples) > local_rollout_size:
-            collected_samples = collected_samples[:local_rollout_size]
+                    self.log_batch_episodes(
+                        self._train_phase, outputs, self.global_step
+                    )
 
-        return collected_samples
+        return collected_episodes
+
+    def _check_group_episodes(self, episodes: List[EpisodeData]) -> bool:
+        """Checks if the group of episode is valid for training"""
+        if not episodes:
+            return False
+        if len(episodes) < 4:
+            return False
+
+        rewards = torch.tensor(
+            [ep.reward_dict['accuracy_reward'] for ep in episodes],
+            dtype=self.torch_dtype,
+        ).cpu()
+
+        # discard samples with rewards of low std, as they leads to zero advantages -> zero gradients
+        if (
+            torch.std(rewards, unbiased=False)
+            <= self.group_reward_std_threshold
+        ):
+            self.logger.warning(
+                f"Skipping group samples with rewards of low std, \
+                minimum group reward std: {self.group_reward_std_threshold:.4f}"
+            )
+            self.logger.log_scalar('other/skipped_sample_count', len(rewards))
+            return False
+
+        return True
 
     @torch.no_grad()
     def _convert_group_episodes_to_transitions(
@@ -456,25 +500,13 @@ class GRPOTrainer(RLTrainer):
 
         if not episodes:
             return []
-        if len(episodes) < 2:
-            raise ValueError('Expect group episodes to be greater than 2')
+        if len(episodes) < 4:
+            raise ValueError('Expect group episodes to be greater than 4')
 
         rewards = torch.tensor(
             [ep.reward_dict['accuracy_reward'] for ep in episodes],
             dtype=self.torch_dtype,
         ).cpu()
-
-        # discard samples as they leads to zero advantages -> zero gradients
-        if (
-            torch.std(rewards, unbiased=False)
-            <= self.group_reward_std_threshold
-        ):
-            self.logger.warning(
-                f"Skipping samples with identical rewards, \
-                    minimum group reward std: {self.group_reward_std_threshold}"
-            )
-            self.logger.log_scalar('other/skipped_sample_count', len(rewards))
-            return []
 
         # Training specific processing
         normalized_rewards = (

@@ -1,7 +1,7 @@
 # RL GRPO config
 job:
   seed: 117
-  artifacts_path: "./runs/test_vllm_grpo_qwen2.5_0.5b_gsm8k"
+  artifacts_path: "./runs/test_explore_vllm_grpo_qwen2.5_0.5b_gsm8k"
   datasets: # List of math datasets to load
     - "gsm"
     # - "math"
@@ -39,27 +39,27 @@ grpo_config:
   top_p: 0.95
   top_k: 0
 
-  # # exploration generation
-  # group_temperature: true             # group temperature where we balance exploration and exploitation
-  # min_temperature: 0.6
-  # max_temperature: 1.0
+  # exploration generation
+  group_temperature: true             # group temperature where we balance exploration and exploitation
+  min_temperature: 0.6
+  max_temperature: 1.0
 
-  # # control rate of explore
-  # explore_init_epsilon: 0.5           # exploration epsilon decay
-  # explore_min_epsilon: 0.0
-  # explore_decay_steps: 50
+  # control rate of explore
+  explore_init_epsilon: 0.9           # exploration epsilon decay
+  explore_min_epsilon: 0.0
+  explore_decay_steps: 50
 
-  # # exploring start
-  # explore_steps: 3                    # initial start steps to do random sampling
-  # explore_top_k: 20                   # Top K tokens to random sample during initial start steps
-  # explore_decay_rate: 0.7
+  # exploring start
+  explore_steps: 5                    # initial start steps to do random sampling
+  explore_top_k: 30                   # Top K tokens to random sample during initial start steps
+  explore_decay_rate: 0.8
 
-  # # exploring by token replacement
-  # replace_prob: 0.0
-  # replace_max_per_seq: 0              # max number of replacements to the same sequence
+  # exploring by token replacement
+  replace_prob: 0.5
+  replace_max_per_seq: 3              # max number of replacements to the same sequence
 
   # evaluation
-  eval_rollout_size: 512    
+  eval_rollout_size: 1024    
   eval_batch_size: 64
   eval_interval: 25
 

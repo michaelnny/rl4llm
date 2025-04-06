@@ -10,10 +10,10 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.trainers.grpo_trainer import (
+    Env,
     EpisodeData,
     GRPOConfig,
     GRPOTrainer,
-    LLMEnv,
     TransitionData,
 )
 
@@ -252,27 +252,6 @@ def test_initialize_trainer(dummy_trainer):
     assert dummy_trainer.explore_epsilon == 0.0
 
 
-# Test for build_train_loader
-
-
-def test_build_train_loader(dummy_trainer):
-    """Test that build_train_loader returns a DataLoader with correct batch size."""
-
-    td = TransitionData(
-        states=torch.tensor([[2, 3, 4]]),
-        actions=torch.tensor([[3, 4, 5]]),
-        loss_mask=torch.tensor([[True, True, True]]),
-        pi_logprobs=torch.tensor([[0.2, 0.2, 0.2]]),
-        ref_logprobs=torch.tensor([[0.2, 0.2, 0.2]]),
-        advantages=torch.tensor([[1.0, 1.0, 1.0]]),
-    )
-    data_loader = dummy_trainer.build_train_loader([td, td, td])
-    batches = list(data_loader)
-    assert len(batches) == 1
-    batch = batches[0]
-    assert batch.states.shape[0] == 2
-
-
 # Tests for compute_loss
 
 
@@ -440,21 +419,12 @@ def test_convert_group_episodes_empty(dummy_trainer):
 
 
 def test_convert_group_episodes_too_few(dummy_trainer):
-    """Test _convert_group_episodes_to_transitions raises ValueError for fewer than 2 episodes."""
+    """Test _convert_group_episodes_to_transitions raises ValueError for fewer than 4 episodes."""
     episode = DummyEpisode(0.5, [2, 3], [4, 5], 2, 2)
     with pytest.raises(ValueError):
-        dummy_trainer._convert_group_episodes_to_transitions([episode])
-
-
-def test_convert_group_episodes_low_std(dummy_trainer, dummy_logger):
-    """Test _convert_group_episodes_to_transitions returns empty list for low reward std."""
-    episode1 = DummyEpisode(1.0, [2, 3, 4], [5, 6], 3, 2)
-    episode2 = DummyEpisode(1.0, [2, 3, 4], [5, 6], 3, 2)
-    dummy_trainer.group_reward_std_threshold = 0.5
-    transitions = dummy_trainer._convert_group_episodes_to_transitions(
-        [episode1, episode2]
-    )
-    assert transitions == []
+        dummy_trainer._convert_group_episodes_to_transitions(
+            [episode, episode, episode]
+        )
 
 
 def test_convert_group_episodes_valid(dummy_trainer):
@@ -472,19 +442,34 @@ def test_convert_group_episodes_valid(dummy_trainer):
         assert trans.loss_mask.sum().item() == ep.completion_length
 
 
-def test_convert_group_episodes_invalid(dummy_trainer):
-    """Test _convert_group_episodes_to_transitions returns transitions for valid episodes."""
+def test_group_episode_invalid_limit_samples(dummy_trainer):
+    """Test _check_group_episodes for valid episodes not enough samples."""
     episode1 = DummyEpisode(0.0, [2, 3, 4], [5, 6, 7], 3, 3)
     episode2 = DummyEpisode(1.0, [8, 9, 10], [11, 12, 13], 3, 3)
     dummy_trainer.group_reward_std_threshold = 0.1
 
-    with pytest.raises(ValueError, match='group rewards must be greater than'):
-        transitions = dummy_trainer._convert_group_episodes_to_transitions(
-            [episode1, episode2]
-        )
+    result = dummy_trainer._check_group_episodes([episode1, episode2])
+    assert result is False
+
+
+def test_group_episode_invalid_low_std(dummy_trainer, dummy_logger):
+    """Test _check_group_episodes returns empty list for low reward std."""
+    episode1 = DummyEpisode(1.0, [2, 3, 4], [5, 6], 3, 2)
+    episode2 = DummyEpisode(1.0, [2, 3, 4], [5, 6], 3, 2)
+    episode3 = DummyEpisode(1.0, [2, 3, 4], [5, 6], 3, 2)
+    episode4 = DummyEpisode(1.0, [2, 3, 4], [5, 6], 3, 2)
+    episode5 = DummyEpisode(0.0, [2, 3, 4], [5, 6], 3, 2)
+    episode6 = DummyEpisode(0.0, [2, 3, 4], [5, 6], 3, 2)
+
+    dummy_trainer.group_reward_std_threshold = 0.5
+    result = dummy_trainer._check_group_episodes(
+        [episode1, episode2, episode3, episode4, episode5, episode6]
+    )
+    assert result is False
 
 
 def test_evaluate_step_without_env(dummy_trainer):
     """Test evaluate_step does nothing when eval_env is None."""
     dummy_trainer.eval_env = None
     dummy_trainer.evaluate_step()
+    pass

@@ -17,7 +17,13 @@ from datasets import Dataset
 from transformers import PreTrainedTokenizer
 
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import BaseRewardFunction, ExploreLLMEnv, LLMEnv, vLLMEnv
+from rl4llm.envs import (
+    BaseRewardFunction,
+    Env,
+    ExploreEnv,
+    vLLMEnv,
+    vLLMExploreEnv,
+)
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.logging import LoggingManager
 from rl4llm.trainers.grpo_trainer import (
@@ -99,10 +105,74 @@ class AccuracyRewardFunction(BaseRewardFunction):
         Returns:
             List[float]: A list of scalar rewards.
         """
+        if isinstance(ground_truths, str):
+            ground_truths = [ground_truths]
+        if len(ground_truths) == 1:
+            ground_truths = [ground_truths] * len(completions)
+        if len(completions) != len(ground_truths):
+            raise ValueError(
+                'Completion and ground truth have mismatch elements'
+            )
+
         return [
             math_problem_grader(full_answer=answer, ground_truth=truth)
             for answer, truth in zip(completions, ground_truths)
         ]
+
+
+def prepare_explore_processor_config(
+    tokenizer: PreTrainedTokenizer, grpo_config: GRPOConfig
+) -> Dict:
+    """Creates the exploration logits processor needed config"""
+
+    # for Explore LLM Env config
+    replace_source_tokens = []
+    # # Determine which tokens should be replaced based on format
+    if grpo_config.xml_format:
+        replace_source_tokens.append(tokenizer.encode('</think>')[0])
+        replace_source_tokens.append(tokenizer.encode(' </think>')[0])
+        replace_source_tokens.append(tokenizer.encode(':</think>')[0])
+        replace_source_tokens.append(tokenizer.encode('.</think>')[0])
+    else:
+        replace_source_tokens.append(tokenizer.eos_token_id)
+
+    replace_target_tokens = [
+        tokenizer.encode(f' {kwd}')[0]
+        for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
+    ]
+    replace_prevent_patterns = []
+    explore_skip_n = 0
+
+    if grpo_config.xml_format:
+        replace_prevent_patterns.extend(
+            [
+                tokenizer.encode('</think>'),
+                tokenizer.encode(' </think>'),
+                tokenizer.encode('<answer>'),
+            ]
+        )
+        explore_skip_n = len(tokenizer.encode('<think>'))
+
+    if grpo_config.group_temperature:
+        temperature = torch.linspace(
+            grpo_config.min_temperature,
+            grpo_config.max_temperature,
+            steps=grpo_config.group_size,
+        )
+        temperature = torch.round(temperature, decimals=2)
+
+    return {
+        'temperature': temperature,
+        'explore_steps': grpo_config.explore_steps,
+        'explore_top_k': grpo_config.explore_top_k,
+        'explore_skip_n': explore_skip_n,
+        'explore_decay_rate': grpo_config.explore_decay_rate,
+        'replace_source_tokens': replace_source_tokens,
+        'replace_target_tokens': replace_target_tokens,
+        'replace_prevent_patterns': replace_prevent_patterns,
+        'replace_max_per_seq': grpo_config.replace_max_per_seq,
+        'replace_prob': grpo_config.replace_prob,
+    }
 
 
 def main():
@@ -129,17 +199,25 @@ def main():
     model_name = config['model']['pretrained_model']
     deepspeed_config = config['deepspeed_config']
 
+    grpo_config = GRPOConfig(**config['grpo_config'])
+
     set_seed(seed)
 
     local_rank = int(os.environ.get('LOCAL_RANK'))
     device = torch.device(f"cuda:{local_rank}")
+
+    # A hacky way to pass the min and max temperatures before apply the patch
+    if grpo_config.group_temperature:
+        os.environ['VLLM_MIN_TEMPERATURE'] = str(grpo_config.min_temperature)
+        os.environ['VLLM_MAX_TEMPERATURE'] = str(grpo_config.max_temperature)
+        from rl4llm.patches import vllm_group_temperature_patch
 
     # IMPORTANT: must initialize vLLM before deepspeed
     vllm_engine = vllm.LLM(
         model=model_name,
         tensor_parallel_size=1,
         device=device,
-        gpu_memory_utilization=0.3,
+        gpu_memory_utilization=0.6,
         max_seq_len_to_capture=4096,
         enable_sleep_mode=True,
         seed=seed,
@@ -155,8 +233,6 @@ def main():
     )
 
     torch_dtype = torch.bfloat16
-
-    grpo_config = GRPOConfig(**config['grpo_config'])
 
     deepspeed_config['train_micro_batch_size_per_gpu'] = (
         grpo_config.train_micro_batch_size
@@ -193,65 +269,8 @@ def main():
         config_params=deepspeed_config,
     )
 
-    # for Explore LLM Env config
-    replace_source_tokens = []
-    # # Determine which tokens should be replaced based on format
-    if grpo_config.xml_format:
-        replace_source_tokens.append(tokenizer.encode('</think>')[0])
-        replace_source_tokens.append(tokenizer.encode(' </think>')[0])
-        replace_source_tokens.append(tokenizer.encode(':</think>')[0])
-        replace_source_tokens.append(tokenizer.encode('.</think>')[0])
-    else:
-        replace_source_tokens.append(tokenizer.eos_token_id)
-
-    replace_target_tokens = [tokenizer.encode(f' {kwd}')[0] for kwd in ['Wait']]
-    replace_prevent_patterns = []
-    explore_skip = 0
-
-    if grpo_config.xml_format:
-        replace_prevent_patterns.extend(
-            [
-                tokenizer.encode('</think>'),
-                tokenizer.encode(' </think>'),
-                tokenizer.encode('<answer>'),
-            ]
-        )
-        explore_skip = len(tokenizer.encode('<think>'))
-
-    if grpo_config.group_temperature:
-        temperature = torch.linspace(
-            grpo_config.min_temperature,
-            grpo_config.max_temperature,
-            steps=grpo_config.group_size,
-            dtype=torch_dtype,
-        )
-        temperature = torch.round(temperature, decimals=2)
-
-    # explore_env_args = {
-    #     'temperature': temperature,
-    #     'explore_steps': grpo_config.explore_steps,
-    #     'explore_top_k': grpo_config.explore_top_k,
-    #     'explore_skip': explore_skip,
-    #     'explore_decay_rate': grpo_config.explore_decay_rate,
-    #     'replace_source_tokens': replace_source_tokens,
-    #     'replace_target_tokens': replace_target_tokens,
-    #     'replace_prevent_patterns': replace_prevent_patterns,
-    #     'replace_max_per_seq': grpo_config.replace_max_per_seq,
-    #     'replace_prob': grpo_config.replace_prob,
-    # }
-
-    # train_env = ExploreLLMEnv(
-    #     dataset=train_dataset,
-    #     batch_size=1,
-    #     group_size=grpo_config.group_size,
-    #     tokenizer=tokenizer,
-    #     reward_functions=[AccuracyRewardFunction()],
-    #     rank=dist_manager.local_rank,
-    #     world_size=dist_manager.world_size,
-    #     **explore_env_args,
-    # )
-
-    train_env = vLLMEnv(
+    explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
+    train_env = vLLMExploreEnv(
         dataset=train_dataset,
         batch_size=1,
         group_size=grpo_config.group_size,
@@ -259,7 +278,18 @@ def main():
         reward_functions=[AccuracyRewardFunction()],
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
+        **explore_env_args,
     )
+
+    # train_env = vLLMEnv(
+    #     dataset=train_dataset,
+    #     batch_size=1,
+    #     group_size=grpo_config.group_size,
+    #     tokenizer=tokenizer,
+    #     reward_functions=[AccuracyRewardFunction()],
+    #     rank=dist_manager.local_rank,
+    #     world_size=dist_manager.world_size,
+    # )
     eval_env = vLLMEnv(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,

@@ -23,7 +23,7 @@ from rl4llm.constants import EVAL_PHASE, LOGGING_PHASES, TRAIN_PHASE
 from rl4llm.core.data_types import RLConfig
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.training_mixin import TrainingMixin
-from rl4llm.envs import EpisodeData, LLMEnv
+from rl4llm.envs import Env, EpisodeData
 from rl4llm.logging import LoggingManager
 
 # @contextmanager
@@ -64,8 +64,8 @@ class RLTrainer(ABC, TrainingMixin):
         dist_manager: DistributedManager,
         logger: LoggingManager,
         artifacts_path: str,
-        train_env: LLMEnv,
-        eval_env: Optional[LLMEnv] = None,
+        train_env: Env,
+        eval_env: Optional[Env] = None,
         vllm_engine: Optional[vllm.LLM] = None,
         seed: Optional[int] = 175,
     ):
@@ -134,7 +134,7 @@ class RLTrainer(ABC, TrainingMixin):
     @abstractmethod
     def build_train_loader(self, experience: List[Any]) -> DataLoader:
         """
-        Converts collected experience into training batches.
+        Converts collected experience into training samples.
         """
         pass
 
@@ -189,25 +189,54 @@ class RLTrainer(ABC, TrainingMixin):
 
     def _prepare_for_generation(self):
         """Switch models to eval mode for rollout."""
-        if self.vllm_engine is not None:
+
+        if self.reference_model:
+            self.reference_model = self.reference_model.to('cpu')
+            self.reference_model.eval()
+
+        if self.is_zero3_enabled():
+            self.policy_engine.offload_states()
+
+        if self.is_vllm_inference_enabled():
             try:
+                self.policy_engine = self.policy_engine.to('cpu')
+
                 # Load vLLM to CUDA
                 self.vllm_engine.wake_up()
             except Exception as e:
                 self.logger.warning(
                     f"Failed to wake up vLLM engine, error: {str(e)}"
                 )
+        else:
+            self.policy_engine.eval()
+
+        self.clean_up()
+
+    def _prepare_for_post_processing(self):
+        """Switch models handle post-processing (like compute logprobs) before training."""
+        if self.is_vllm_inference_enabled():
+            try:
+                # Offload vLLM and remove CUDA RAM caches
+                self.vllm_engine.sleep(1)
+
+                self.policy_engine = self.policy_engine.to(self.device)
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to offload vLLM engine, error: {str(e)}"
+                )
+
+        if self.is_zero3_enabled():
+            self.policy_engine.offload_states()
 
         self.policy_engine.eval()
-        if self.reference_model:
+        if self.reference_model and self.reference_model.device != self.device:
             self.reference_model = self.reference_model.to(self.device)
-            self.reference_model.eval()
 
         self.clean_up()
 
     def _prepare_for_training(self):
         """Switch models to train mode."""
-        if self.vllm_engine is not None:
+        if self.is_vllm_inference_enabled():
             try:
                 # Offload vLLM and remove CUDA RAM caches
                 self.vllm_engine.sleep(1)
@@ -216,12 +245,17 @@ class RLTrainer(ABC, TrainingMixin):
                     f"Failed to offload vLLM engine, error: {str(e)}"
                 )
 
-        self.policy_engine.train()
-        if self.reference_model and self.reference_model.device != self.device:
+        if self.reference_model:
             self.reference_model = self.reference_model.to('cpu')
+
+        if self.is_zero3_enabled():
+            self.policy_engine.reload_states()
+
+        self.policy_engine.train()
 
         self.clean_up()
 
+    # TODO: consider using deepspeed inference engine for the reference model
     def _sync_reference_model(self):
         """Copies current policy weights to reference model."""
         if not self.reference_model:
@@ -253,11 +287,15 @@ class RLTrainer(ABC, TrainingMixin):
         return torch.float32
 
     def _sync_vllm_weights(self, state_dict: Dict) -> None:
-        """A hacky way to update vLLM engine weights in non tensor parallel setting."""
-        if self.vllm_engine is None:
+        """A hacky way to update vLLM engine weights in a non tensor parallel setting."""
+        if not self.is_vllm_inference_enabled():
             self.logger.warning('No vLLM engine specified, skipping')
-
         # only works with vLLM V0 engine with env variable "VLLM_USE_V1 = '0'"
+        if not hasattr(self.vllm_engine.llm_engine, 'model_executor'):
+            raise ValueError(
+                "Can't find 'model_executor', try use V0 engine by set `VLLM_USE_V1 = 0` "
+            )
+
         try:
             model = (
                 self.vllm_engine.llm_engine.model_executor.driver_worker.model_runner.model
@@ -275,8 +313,10 @@ class RLTrainer(ABC, TrainingMixin):
 
     def is_vllm_inference_enabled(self) -> bool:
         """Checks if vLLM inference mode is enabled."""
-        return self.vllm_engine is not None and isinstance(
-            self.vllm_engine, vllm.LLM
+        return (
+            hasattr(self, 'vllm_engine')
+            and self.vllm_engine is not None
+            and isinstance(self.vllm_engine, vllm.LLM)
         )
 
     def log_batch_episodes(
@@ -294,7 +334,7 @@ class RLTrainer(ABC, TrainingMixin):
             )
 
         metric_key = f"objective/{phase}"
-        token_metric_key = f"Tokens/{phase}"
+        token_metric_key = f"tokens/{phase}"
 
         for ep in samples:
             data_to_log = {
@@ -348,25 +388,32 @@ class RLTrainer(ABC, TrainingMixin):
 
         while self.global_step < self.config.max_steps:
             with self.logger.timer('global_step'):
-
+                # Run rollouts on train env
                 with self.logger.timer('generation'):
                     self._prepare_for_generation()
                     local_experience = self.generate_experience()
                     self.clean_up()
                 self.dist_manager.barrier()
 
+                # Turn episode data into training samples
+                with self.logger.timer('post_processing'):
+                    self._prepare_for_post_processing()
+                    train_dataloader = self.build_train_loader(local_experience)
+                    self.clean_up()
+                self.dist_manager.barrier()
+
+                # Train the model(s)
                 with self.logger.timer('train'):
                     self._prepare_for_training()
-                    train_dataloader = self.build_train_loader(local_experience)
                     self.train_step(train_dataloader)
                     self.clean_up()
                 self.dist_manager.barrier()
 
+                # Handle post training tasks
                 with self.logger.timer('sync_policy_model'):
                     self.sync_policy_model()
                 self.dist_manager.barrier()
 
-                # Post training tasks
                 if (
                     self.reference_model
                     and self.config.sync_reference_interval > 0
@@ -397,6 +444,7 @@ class RLTrainer(ABC, TrainingMixin):
                         self.clean_up()
                     self.dist_manager.barrier()
 
+            # Aggregate metrics and logging at end of each global step
             self.logger.aggregate_and_log(self.global_step)
             del local_experience, train_dataloader
             self.clean_up()

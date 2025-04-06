@@ -21,7 +21,6 @@
                 "HTTP_PROXY": "http://127.0.0.1:1081",
                 "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
-                "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
                 "NCCL_P2P_DISABLE": "1"
             },
         },
