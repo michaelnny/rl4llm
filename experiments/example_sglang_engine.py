@@ -1,12 +1,10 @@
 import sglang as sgl
 import torch
-from PIL import Image
-from sglang.srt.conversation import chat_templates
 
 
 def main():
     model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
-    llm = sgl.Engine(model_path=model_name)
+    llm = sgl.Engine(model_path=model_name, return_token_ids=True)
     prompts = [
         'Hello, my name is',
         'The president of the United States is',
