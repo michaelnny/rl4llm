@@ -6,7 +6,10 @@ infrastructure for reinforcement learning algorithms with LLM environments,
 including training loop, checkpointing, model sync, and logging.
 """
 
+import logging
 import os
+import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from copy import deepcopy
@@ -14,7 +17,6 @@ from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import deepspeed
 import torch
-import vllm
 from deepspeed import DeepSpeedEngine
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
@@ -22,12 +24,14 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from rl4llm.constants import EVAL_PHASE, LOGGING_PHASES, TRAIN_PHASE
 from rl4llm.core.base_env import BaseEnv, EpisodeData
 from rl4llm.core.data_types import RLConfig
+from rl4llm.core.deepspeed_mixin import DeepSpeedUtilsMixin
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.training_mixin import TrainingMixin
+from rl4llm.inference.base_client import BaseInferenceClient
 from rl4llm.logging import LoggingManager
 
 
-class RLTrainer(ABC, TrainingMixin):
+class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     """
     Base class for training RL algorithms on LLM environments using DeepSpeed with Zero-1/Zero-2 only.
     """
@@ -46,11 +50,9 @@ class RLTrainer(ABC, TrainingMixin):
         artifacts_path: str,
         train_env: BaseEnv,
         eval_env: Optional[BaseEnv] = None,
-        vllm_engine: Optional[vllm.LLM] = None,
+        inference_client: Optional[BaseInferenceClient] = None,
         seed: Optional[int] = 175,
     ):
-        if policy_engine.zero_optimization_stage() == 3:
-            raise RuntimeError('Zero-3 is not supported at the moment')
         if config.train_rollout_size % dist_manager.world_size != 0:
             raise ValueError(
                 'Train rollout size must be divisible by world size'
@@ -70,7 +72,7 @@ class RLTrainer(ABC, TrainingMixin):
         self.artifacts_path = artifacts_path
         self.seed = seed
         self.device = dist_manager.device
-        self.torch_dtype = self._get_torch_dtype()
+        self.torch_dtype = self.get_torch_dtype(policy_engine)
 
         self.checkpoint_dir = os.path.join(artifacts_path, 'checkpoints')
         if dist_manager.is_master:
@@ -81,13 +83,17 @@ class RLTrainer(ABC, TrainingMixin):
             self._create_reference_model() if config.kl_loss_coef > 0 else None
         )
 
-        self.vllm_engine = vllm_engine
+        self.inference_client = inference_client
 
         self.global_step = 0
         self.policy_update_count = 0
         self.ref_update_count = 0
 
         self.initialize_trainer()
+
+        if self.is_inference_engine_enabled():
+            self.logger.info('Using inference engine client.')
+
         self.logger.info('RL Trainer initialized.')
 
     @abstractmethod
@@ -133,39 +139,19 @@ class RLTrainer(ABC, TrainingMixin):
         """
         pass
 
-    @abstractmethod
-    def sync_policy_model(self):
-        """
-        Syncs policy model across distributed ranks.
-        """
-        pass
-
     @contextmanager
     def unwrapped_model_for_generation(
         self,
-    ) -> Generator[Union[PreTrainedModel, vllm.LLM], None, None]:
+    ) -> Generator[Union[PreTrainedModel, BaseInferenceClient], None, None]:
         """
         Returns the unwrapped model for generation.
         """
-        if self.is_vllm_inference_enabled():
-            yield self.vllm_engine
+        if self.is_inference_engine_enabled():
+            yield self.inference_client
         else:
-            with self._unwrapped_deepspeed_model() as model:
+            with self.with_unwrapped_model(self.policy_engine) as model:
                 yield model
         self.clean_up()
-
-    @contextmanager
-    def _unwrapped_deepspeed_model(
-        self,
-    ) -> Generator[PreTrainedModel, None, None]:
-        """Returns the unwrapped model from the DeepSpeed engine."""
-        if self.is_zero3_enabled():
-            with deepspeed.zero.GatheredParameters(
-                self.policy_engine.parameters()
-            ):
-                yield self.policy_engine.module
-        else:
-            yield self.policy_engine.module
 
     def _prepare_for_generation(self):
         """Switch models to eval mode for rollout."""
@@ -174,18 +160,18 @@ class RLTrainer(ABC, TrainingMixin):
             self.reference_model = self.reference_model.to('cpu')
             self.reference_model.eval()
 
-        if self.is_zero3_enabled():
+        if not self.is_optimizer_offload_enabled(self.policy_engine):
             self.policy_engine.offload_states()
 
-        if self.is_vllm_inference_enabled():
+        if (
+            self.is_inference_engine_enabled()
+            and self.inference_client.is_cohost_mode()
+        ):
             try:
                 self.policy_engine = self.policy_engine.to('cpu')
-
-                # Load vLLM to CUDA
-                self.vllm_engine.wake_up()
             except Exception as e:
-                self.logger.warning(
-                    f"Failed to wake up vLLM engine, error: {str(e)}"
+                raise RuntimeError(
+                    f"Failed to offload deepspeed engine, error: {str(e)}"
                 )
         else:
             self.policy_engine.eval()
@@ -194,18 +180,21 @@ class RLTrainer(ABC, TrainingMixin):
 
     def _prepare_for_post_processing(self):
         """Switch models handle post-processing (like compute logprobs) before training."""
-        if self.is_vllm_inference_enabled():
+        if (
+            self.is_inference_engine_enabled()
+            and self.inference_client.is_cohost_mode()
+        ):
             try:
-                # Offload vLLM and remove CUDA RAM caches
-                self.vllm_engine.sleep(1)
+                # Try offload GPU RAM caches
+                self.inference_client.release_memory()
 
                 self.policy_engine = self.policy_engine.to(self.device)
             except Exception as e:
-                self.logger.warning(
-                    f"Failed to offload vLLM engine, error: {str(e)}"
+                raise RuntimeError(
+                    f"Failed to offload inference engine, error: {str(e)}"
                 )
 
-        if self.is_zero3_enabled():
+        if not self.is_optimizer_offload_enabled(self.policy_engine):
             self.policy_engine.offload_states()
 
         self.policy_engine.eval()
@@ -216,19 +205,23 @@ class RLTrainer(ABC, TrainingMixin):
 
     def _prepare_for_training(self):
         """Switch models to train mode."""
-        if self.is_vllm_inference_enabled():
+        if (
+            self.is_inference_engine_enabled()
+            and self.inference_client.is_cohost_mode()
+        ):
             try:
-                # Offload vLLM and remove CUDA RAM caches
-                self.vllm_engine.sleep(1)
+                # Try offload GPU RAM caches
+                self.inference_client.release_memory()
+
             except Exception as e:
-                self.logger.warning(
-                    f"Failed to offload vLLM engine, error: {str(e)}"
+                raise RuntimeError(
+                    f"Failed to offload inference engine, error: {str(e)}"
                 )
 
         if self.reference_model:
             self.reference_model = self.reference_model.to('cpu')
 
-        if self.is_zero3_enabled():
+        if not self.is_optimizer_offload_enabled(self.policy_engine):
             self.policy_engine.reload_states()
 
         self.policy_engine.train()
@@ -258,45 +251,105 @@ class RLTrainer(ABC, TrainingMixin):
         self.logger.info('Reference model created.')
         return ref_model
 
-    def _get_torch_dtype(self) -> torch.dtype:
-        """Determines appropriate torch dtype from policy engine config."""
-        if self.policy_engine.bfloat16_enabled():
-            return torch.bfloat16
-        elif torch.cuda.is_available() and torch.cuda.is_bf16_supported():
-            return torch.float16
-        return torch.float32
+    def sync_policy_model(self) -> None:
+        """Update policy model weights with the inference engine."""
 
-    def _sync_vllm_weights(self, state_dict: Dict) -> None:
-        """A hacky way to update vLLM engine weights in a non tensor parallel setting."""
-        if not self.is_vllm_inference_enabled():
-            self.logger.warning('No vLLM engine specified, skipping')
-        # only works with vLLM V0 engine with env variable "VLLM_USE_V1 = '0'"
-        if not hasattr(self.vllm_engine.llm_engine, 'model_executor'):
-            raise ValueError(
-                "Can't find 'model_executor', try use V0 engine by set `VLLM_USE_V1 = 0` "
+        if not self.is_inference_engine_enabled():
+            self.logger.info(
+                'Inference engine not enabled, skipping weight sync.'
             )
+            return
 
         try:
-            model = (
-                self.vllm_engine.llm_engine.model_executor.driver_worker.model_runner.model
-            )
-            model.load_weights(state_dict.items())
-            self.clean_up()
+            with tempfile.TemporaryDirectory(
+                prefix=f"ckpt_sync_{self.global_step}_", dir=self.checkpoint_dir
+            ) as temp_ckpt_path:
+                # Save full checkpoint.
+                self.logger.info(
+                    f"Attempting to save weights to {temp_ckpt_path}"
+                )
+                self.save_weights_hf_pretrained(
+                    self.policy_engine, temp_ckpt_path
+                )
+                self.logger.info(
+                    f"Successfully saved weights to {temp_ckpt_path}"
+                )
+
+                # Only the master process interacts with the inference client
+                if self.dist_manager.is_master:
+                    try:
+                        self.logger.info(
+                            f"Master process updating inference engine from {temp_ckpt_path}..."
+                        )
+                        self.inference_client.resume_memory()
+                        self.inference_client.update_weights(
+                            model_path=temp_ckpt_path
+                        )
+                        self.logger.info(
+                            'Inference engine weights updated successfully by master.'
+                        )
+                    except Exception as client_e:
+                        self.logger.error(
+                            f"Failed to update inference engine weights via client: {client_e}",
+                            exc_info=True,
+                        )
+                        raise RuntimeError(
+                            f"Failed to update inference engine weights: {client_e}"
+                        ) from client_e
+
         except Exception as e:
+            # Catch errors during saving, client update, or temp dir creation/cleanup
             self.logger.error(
-                f"Failed to update vLLM engine weights, error: {str(e)}"
+                f"Error during policy model sync: {e}", exc_info=True
             )
+            raise RuntimeError(
+                f"Failed to sync policy model weights: {e}"
+            ) from e
 
-    def is_zero3_enabled(self) -> bool:
-        """Checks if ZeRO-3 is enabled."""
-        return self.policy_engine.zero_optimization_stage() == 3
+        # Barrier to ensure all processes wait until the master (if applicable)
+        # has finished its work within the 'with' block or an error occurred.
+        self.logger.debug('Reached barrier after sync attempt.')
+        self.dist_manager.barrier()
+        self.logger.debug('Passed barrier after sync attempt.')
 
-    def is_vllm_inference_enabled(self) -> bool:
-        """Checks if vLLM inference mode is enabled."""
+        self.logger.info('Policy model sync process finished.')
+
+    # def sync_policy_model(self) -> None:
+    #     """Update policy model weights with the generator/engine"""
+
+    #     if self.is_inference_engine_enabled():
+
+    #         try:
+    #             self.logger.info('Try to inference engine weights...')
+    #             # Save full checkpoint to a local file system on master
+    #             ckpt_path = os.path.join(
+    #                 self.checkpoint_dir, f"tmp_{self.global_step}"
+    #             )
+    #             self.save_weights_hf_pretrained(self.policy_engine, ckpt_path)
+    #             if self.dist_manager.is_master:
+    #                 self.inference_client.resume_memory()
+    #                 self.inference_client.update_weights(model_path=ckpt_path)
+    #             self.clean_up()
+    #         except Exception as e:
+    #             raise RuntimeError(
+    #                 f"Failed to update inference engine weights, error: {str(e)}"
+    #             )
+    #         finally:
+    #             # clean up ckpt
+    #             if self.dist_manager.is_master:
+    #                 os.rmdir(ckpt_path)
+
+    #         self.dist_manager.barrier()
+
+    #     else:
+    #         self.logger.info('No inference engine specified, skipping')
+
+    def is_inference_engine_enabled(self) -> bool:
+        """Checks if inference engine is enabled."""
         return (
-            hasattr(self, 'vllm_engine')
-            and self.vllm_engine is not None
-            and isinstance(self.vllm_engine, vllm.LLM)
+            hasattr(self, 'inference_client')
+            and self.inference_client is not None
+            and isinstance(self.inference_client, BaseInferenceClient)
         )
 
     def log_batch_episodes(

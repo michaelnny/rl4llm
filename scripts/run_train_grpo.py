@@ -16,9 +16,11 @@ from rl4llm.envs import (
     ExploreHFEnv,
     ExploreVLLMEnv,
     HFEnv,
+    InferenceEnv,
     VLLMEnv,
 )
 from rl4llm.graders.math_grader import math_problem_grader
+from rl4llm.inference.sgl_client import SGLangClient
 from rl4llm.logging import LoggingManager
 from rl4llm.trainers.grpo_trainer import (
     DistributedManager,
@@ -203,17 +205,25 @@ def main():
     #     os.environ['VLLM_MAX_TEMPERATURE'] = str(grpo_config.max_temperature)
     #     from rl4llm.patches import vllm_group_temperature_patch
 
-    # IMPORTANT: must initialize vLLM before deepspeed
-    vllm_engine = vllm.LLM(
-        model=model_name,
-        tensor_parallel_size=1,
-        device=device,
-        gpu_memory_utilization=0.7,  # for single GPU using 0.7 seems to work
-        max_seq_len_to_capture=4096,
-        enable_sleep_mode=True,  # important to enable sleep mode
-        seed=seed,
+    # # IMPORTANT: must initialize vLLM before deepspeed
+    # vllm_engine = vllm.LLM(
+    #     model=model_name,
+    #     tensor_parallel_size=1,
+    #     device=device,
+    #     gpu_memory_utilization=0.7,  # for single GPU using 0.7 seems to work
+    #     max_seq_len_to_capture=4096,
+    #     enable_sleep_mode=True,  # important to enable sleep mode
+    #     seed=seed,
+    # )
+    # vllm_engine.sleep()
+
+    SGLANG_HOST = '127.0.0.1'
+    SGLANG_PORT = 30000
+
+    inference_client = SGLangClient(
+        host=SGLANG_HOST,
+        port=SGLANG_PORT,
     )
-    vllm_engine.sleep()
 
     # Initialize DeepSpeed distributed environment
     deepspeed.init_distributed(verbose=False)
@@ -270,7 +280,7 @@ def main():
     #     **explore_env_args,
     # )
 
-    train_env = VLLMEnv(
+    train_env = InferenceEnv(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
         group_size=grpo_config.group_size,
@@ -279,7 +289,7 @@ def main():
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
     )
-    eval_env = VLLMEnv(
+    eval_env = InferenceEnv(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
@@ -298,7 +308,7 @@ def main():
         artifacts_path=artifacts_path,
         train_env=train_env,
         eval_env=eval_env,
-        vllm_engine=vllm_engine,
+        inference_client=inference_client,
         seed=seed,
     )
 

@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_vllm_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_sgl_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -98,17 +98,17 @@ deepspeed:
   #     warmup_min_lr: 1.0e-8
   #     warmup_max_lr: 9.0e-7
   zero_optimization:
-    stage: 2
+    stage: 3
     contiguous_gradients: true
     overlap_comm: true
     allgather_partitions: true
     reduce_scatter: true
-    # offload_param:
-    #   device: cpu
-    #   pin_memory: false
-    # offload_optimizer:
-    #   device: cpu
-    #   pin_memory: false
+    offload_param:
+      device: cpu
+      pin_memory: false
+    offload_optimizer:
+      device: cpu
+      pin_memory: false
   activation_checkpointing:
     partition_activations: true
     cpu_checkpointing: true

@@ -15,6 +15,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from rl4llm.core.base_trainer import RLConfig, RLTrainer
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.envs import EpisodeData, HFEnv
+from rl4llm.inference.base_client import BaseInferenceClient
 from rl4llm.logging import LoggingManager
 
 
@@ -144,7 +145,7 @@ class GRPOTrainer(RLTrainer):
         artifacts_path: str,
         train_env: HFEnv,
         eval_env: Optional[HFEnv] = None,
-        vllm_engine: Optional[vllm.LLM] = None,
+        inference_client: Optional[BaseInferenceClient] = None,
         seed: Optional[int] = 175,
     ):
         super().__init__(
@@ -156,7 +157,7 @@ class GRPOTrainer(RLTrainer):
             artifacts_path=artifacts_path,
             train_env=train_env,
             eval_env=eval_env,
-            vllm_engine=vllm_engine,
+            inference_client=inference_client,
             seed=seed,
         )
 
@@ -177,18 +178,6 @@ class GRPOTrainer(RLTrainer):
 
         # Controls exploration
         self.explore_epsilon = 0.0
-
-    def sync_policy_model(self):
-        """Update policy model weights with the generator/engine"""
-        if self.is_vllm_inference_enabled():
-            self.vllm_engine.wake_up()  # requires vLLM model on GPU
-            with self._unwrapped_deepspeed_model() as model:
-                state_dict = model.state_dict()
-                self._sync_vllm_weights(state_dict)
-            self.vllm_engine.sleep(1)
-            self.clean_up()
-
-        # do nothing if in zero-1/zero-2
 
     def build_train_loader(
         self, experience: List[List[EpisodeData]]
@@ -365,9 +354,9 @@ class GRPOTrainer(RLTrainer):
         )
 
         # Use greedy sampling
-        if self.is_vllm_inference_enabled():
+        if self.is_inference_engine_enabled():
             eval_sampling_params = {
-                'max_tokens': self.config.max_completion_tokens,
+                'max_new_tokens': self.config.max_completion_tokens,
                 'temperature': 0.0,
             }
         else:
@@ -401,10 +390,10 @@ class GRPOTrainer(RLTrainer):
     def generate_experience(self) -> List[EpisodeData]:
         """Generates samples using the current policy."""
 
-        if self.is_vllm_inference_enabled():
+        if self.is_inference_engine_enabled():
             # vllm requires -1 to disable top_k, and 1 to disable top_p
             train_sampling_params = {
-                'max_tokens': self.config.max_completion_tokens,
+                'max_new_tokens': self.config.max_completion_tokens,
                 'temperature': self.config.temperature,
                 'top_p': 1.0 if self.config.top_p == 0 else self.config.top_p,
                 'top_k': -1 if self.config.top_k == 0 else self.config.top_k,
