@@ -35,11 +35,43 @@ pip install -r requirements.txt
 
 
 
+## Start Training
+
+### Option 1: Use SGLang inference server + DeepSpeed
+
+We can use SGLang inference server to speed up the sample generation process. To do so, we need to first launch the SGLang HTTP server. It supports co-host the inference engine and training models on the same server/GPUs. To do so, we only need to use the `--enable-memory-saver` option. Which requires using the torch memory saver package, you can install it with `pip install torch-memory-saver`
+
+```bash
+
+PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
+    --model-path Qwen/Qwen2.5-0.5B \
+    --host localhost \
+    --port 30000 \
+    --mem-fraction-static 0.5 \
+    --chunked-prefill-size 8192 \
+    --tp 1 \
+    --enable-torch-compile \
+    --enable-memory-saver
+
+```
 
 
-Start training job
+--enable-custom-logit-processor
 
 
+
+Then, we can start the training job by passing in the options to the launch script
+
+
+
+```bash
+
+PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_grpo.py --config-file ./configs/grpo_config.yaml --use-infer-server --infer-host localhost --infer-port 30000 --infer-cohost-mode
+
+```
+
+
+### Optional 2: Use DeepSpeed model for both inference and training
 
 ```bash
 

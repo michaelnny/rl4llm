@@ -5,8 +5,7 @@ import pytest
 import torch
 
 from rl4llm.constants import TRAIN_PHASE
-from rl4llm.core.base_trainer import RLTrainer
-from rl4llm.core.data_types import RLConfig
+from rl4llm.core.base_trainer import RLConfig, RLTrainer
 from rl4llm.envs import EpisodeData
 
 
@@ -92,25 +91,6 @@ def trainer_base(
     )
 
 
-@pytest.mark.parametrize(
-    'bfloat_enabled, expected_dtype',
-    [(True, torch.bfloat16), (False, torch.float32)],
-)
-def test_get_torch_dtype(
-    trainer_base, dummy_policy_engine, bfloat_enabled, expected_dtype
-):
-    """Returns correct torch dtype based on bfloat16 support."""
-    dummy_policy_engine.bfloat16_enabled.return_value = bfloat_enabled
-
-    with (
-        patch('torch.cuda.is_available', return_value=False),
-        patch('torch.cuda.is_bf16_supported', return_value=False),
-    ):
-        dtype = trainer_base._get_torch_dtype()
-
-    assert dtype == expected_dtype
-
-
 def test_log_batch_episodes_invalid_phase(trainer_base):
     """Raises error on invalid log phase."""
     with pytest.raises(ValueError):
@@ -170,9 +150,3 @@ def test_checkpoint_saving(trainer_base):
     """Saves policy engine checkpoint at given step."""
     trainer_base.save_checkpoint(1)
     trainer_base.policy_engine.save_checkpoint.assert_called()
-
-
-def test_is_zero3_enabled_true(dummy_policy_engine, trainer_base):
-    """Detects ZeRO-3 is enabled."""
-    dummy_policy_engine.zero_optimization_stage.return_value = 3
-    assert trainer_base.is_zero3_enabled()

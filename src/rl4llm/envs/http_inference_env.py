@@ -16,19 +16,19 @@ from rl4llm.core.base_env import (
     EnvState,
     EpisodeData,
 )
-from rl4llm.inference.base_client import BaseInferenceClient
+from rl4llm.core.base_inference_client import InferenceClient
 
 logger = logging.getLogger(LOGGER_NAME)
 
 
-class InferenceEnv(BaseEnv):
+class HTTPInferenceEnv(BaseEnv):
     """
     Environment for generating training samples using standard along inference engine with a custom HTTP client.
     """
 
     def _generate_completions(
         self,
-        llm: BaseInferenceClient,
+        llm: InferenceClient,
         sampling_params: Dict[str, Any],
         state: EnvState,
         **kwargs: Optional[Dict[str, Any]],
@@ -87,7 +87,7 @@ class InferenceEnv(BaseEnv):
     @torch.inference_mode()
     def rollout(
         self,
-        llm: BaseInferenceClient,
+        llm: InferenceClient,
         sampling_params: Dict[str, Any],
         **kwargs: Optional[Dict[str, Any]],
     ) -> List[EpisodeData]:
@@ -140,8 +140,8 @@ class InferenceEnv(BaseEnv):
         ]
 
 
-# class ExploreInferenceEnv(InferenceEnv):
-#     """An extension of the standard InferenceEnv
+# class ExploreHTTPInferenceEnv(HTTPInferenceEnv):
+#     """An extension of the standard HTTPInferenceEnv
 #     where we apply some custom logits processor to the generation process
 #     to encourage exploration."""
 

@@ -28,7 +28,7 @@ grpo:
   max_steps: 100
   train_rollout_size: 512
   num_updates: 1
-  train_micro_batch_size: 8
+  train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
   clip_eps: 0.2                         # PPO0-style policy clip parameter
@@ -43,10 +43,10 @@ grpo:
   max_prompt_tokens: 512                # skip sample question that's too long
   group_size: 16                        # for each sample we generate a group of answers
   max_completion_tokens: 1000
-  temperature: 1.0                      # not used if using group_temperature
+  temperature: 0.9                      # not used if using group_temperature
   repetition_penalty: 1.0
-  top_p: 0.0
-  top_k: 0
+  top_p: 0.95
+  top_k: -1                             # -1 to disable
 
   # evaluation
   eval_rollout_size: 1024    
@@ -98,20 +98,20 @@ deepspeed:
   #     warmup_min_lr: 1.0e-8
   #     warmup_max_lr: 9.0e-7
   zero_optimization:
-    stage: 3
+    stage: 2
     contiguous_gradients: true
     overlap_comm: true
     allgather_partitions: true
     reduce_scatter: true
-    offload_param:
-      device: cpu
-      pin_memory: false
-    offload_optimizer:
-      device: cpu
-      pin_memory: false
-  activation_checkpointing:
-    partition_activations: true
-    cpu_checkpointing: true
-    contiguous_memory_optimization: true
-    number_checkpoints: null
-    synchronize_checkpoint_boundary: false
+    # offload_param:
+    #   device: cpu
+    #   pin_memory: false
+    # offload_optimizer:
+    #   device: cpu
+    #   pin_memory: false
+  # activation_checkpointing:
+  #   partition_activations: true
+  #   cpu_checkpointing: true
+  #   contiguous_memory_optimization: true
+  #   number_checkpoints: null
+  #   synchronize_checkpoint_boundary: false

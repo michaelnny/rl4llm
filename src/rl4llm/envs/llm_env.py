@@ -25,7 +25,7 @@ from rl4llm.generation.explore_processor import ExploreLogitsProcessor
 logger = logging.getLogger(LOGGER_NAME)
 
 
-class HFEnv(BaseEnv):
+class LocalLLMEnv(BaseEnv):
     """
     Environment for generating training samples with LLM models from HuggingFace library.
 
@@ -203,8 +203,8 @@ class HFEnv(BaseEnv):
         ]
 
 
-class ExploreHFEnv(HFEnv):
-    """An extension of the standard HFEnv
+class ExploreLocalLLMEnv(LocalLLMEnv):
+    """An extension of the standard LocalLLMEnv
     where we apply some custom logits processor to the generation process
     to encourage exploration."""
 

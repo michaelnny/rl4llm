@@ -13,22 +13,154 @@ import tempfile
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    List,
+    Optional,
+    Tuple,
+    TypeAlias,
+    Union,
+)
 
 import deepspeed
 import torch
 from deepspeed import DeepSpeedEngine
+from pydantic import BaseModel, Field, field_validator, model_validator
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.constants import EVAL_PHASE, LOGGING_PHASES, TRAIN_PHASE
 from rl4llm.core.base_env import BaseEnv, EpisodeData
-from rl4llm.core.data_types import RLConfig
+from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.deepspeed_mixin import DeepSpeedUtilsMixin
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.training_mixin import TrainingMixin
-from rl4llm.inference.base_client import BaseInferenceClient
 from rl4llm.logging import LoggingManager
+
+
+class RLConfig(BaseModel):
+    """Basic config for RL fine-tuning for LLM"""
+
+    """For RL sample generation"""
+    max_prompt_tokens: Optional[int] = Field(
+        1024,
+        ge=256,
+        le=10240,
+        description='Skip sample with prompt length greater than this to avoid peak memory spikes',
+    )
+    max_completion_tokens: Optional[int] = Field(
+        4096, ge=50, description='Maximum number of new tokens to generate'
+    )
+    temperature: Optional[float] = Field(
+        0.9, gt=0.0, le=1.0, description='Sampling temperature for generation'
+    )
+    repetition_penalty: Optional[float] = Field(
+        1.0, gt=0.0, le=2.0, description='Repetition penalty for generation'
+    )
+    top_p: Optional[float] = Field(
+        1.0, ge=0.0, le=1.0, description='Sampling top-p for generation'
+    )
+    top_k: Optional[int] = Field(
+        50, ge=-1, le=1000, description='Sampling top-k for generation'
+    )
+    group_size: int = Field(
+        8,
+        ge=4,
+        le=256,
+        description='Number of group outcomes for single question',
+    )
+
+    """For RL PPO training"""
+    max_steps: int = Field(
+        10000, ge=1, description='How long to run the training'
+    )
+    train_rollout_size: int = Field(
+        1024,
+        ge=1,
+        le=5120,
+        description='Number of samples to collect before update policy',
+    )
+    num_updates: int = Field(
+        4,
+        ge=1,
+        le=5,
+        description='PPO update epochs for a collection of samples',
+    )
+    train_micro_batch_size: int = Field(
+        4,
+        ge=1,
+        le=1024,
+        description='Micro-batch size pre device/rank for training',
+    )
+    train_batch_size: int = Field(
+        128,
+        ge=16,
+        le=1024,
+        description='Global batch size across devices/ranks for training',
+    )
+    clip_eps: float = Field(
+        0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon'
+    )
+    gamma: float = Field(
+        1.0,
+        ge=0.0,
+        le=1.0,
+        description='Default discount factor for compute returns',
+    )
+    normalize_rewards: bool = Field(True, description='Normalized rewards')
+    normalize_advantages: bool = Field(
+        False, description='Normalized advantages before compute PG loss'
+    )
+    entropy_loss_coef: float = Field(
+        0.0, ge=0.0, le=1.0, description='Entropy loss coefficient'
+    )
+    kl_loss_coef: float = Field(
+        0.04, ge=0.0, le=1.0, description='KL penalty loss coefficient'
+    )
+    # clip_grad_norm: Optional[float] = Field(0.0, ge=0.0, le=10.0, description='Clip L2 gradient norm')
+
+    sync_reference_interval: int = Field(
+        0,
+        ge=0,
+        le=1000,
+        description='Interval to update reference model using latest policy',
+    )
+    checkpoint_interval: int = Field(
+        0, ge=0, le=1000, description='Interval to save policy model checkpoint'
+    )
+    eval_interval: int = Field(
+        100, ge=0, description='Interval to evaluate policy model'
+    )
+    eval_batch_size: int = Field(
+        8,
+        ge=0,
+        le=1024,
+        description='Batch size size pre device/rank for evaluation',
+    )
+    eval_rollout_size: int = Field(
+        1024,
+        ge=1,
+        le=5120,
+        description='Number of samples to collect for evaluation',
+    )
+
+    @model_validator(mode='after')
+    def check_batch_size(cls, values):
+        if values.train_batch_size % values.train_micro_batch_size != 0:
+            raise ValueError(
+                'Global train batch size must be divisible by mini batch size'
+            )
+        # if values.normalize_advantages and values.train_micro_batch_size < 4:
+        #     raise ValueError(
+        #         'Mini batch size must be at least 4 when normalize advantages is True'
+        #     )
+        return values
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
@@ -50,7 +182,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         artifacts_path: str,
         train_env: BaseEnv,
         eval_env: Optional[BaseEnv] = None,
-        inference_client: Optional[BaseInferenceClient] = None,
+        inference_client: Optional[InferenceClient] = None,
         seed: Optional[int] = 175,
     ):
         if config.train_rollout_size % dist_manager.world_size != 0:
@@ -142,7 +274,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     @contextmanager
     def unwrapped_model_for_generation(
         self,
-    ) -> Generator[Union[PreTrainedModel, BaseInferenceClient], None, None]:
+    ) -> Generator[Union[PreTrainedModel, InferenceClient], None, None]:
         """
         Returns the unwrapped model for generation.
         """
@@ -160,13 +292,10 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             self.reference_model = self.reference_model.to('cpu')
             self.reference_model.eval()
 
-        if not self.is_optimizer_offload_enabled(self.policy_engine):
+        if self.can_offload_state(self.policy_engine):
             self.policy_engine.offload_states()
 
-        if (
-            self.is_inference_engine_enabled()
-            and self.inference_client.is_cohost_mode()
-        ):
+        if self.is_cohost_inference_engine():
             try:
                 self.policy_engine = self.policy_engine.to('cpu')
             except Exception as e:
@@ -180,10 +309,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
     def _prepare_for_post_processing(self):
         """Switch models handle post-processing (like compute logprobs) before training."""
-        if (
-            self.is_inference_engine_enabled()
-            and self.inference_client.is_cohost_mode()
-        ):
+        if self.is_cohost_inference_engine():
             try:
                 # Try offload GPU RAM caches
                 self.inference_client.release_memory()
@@ -194,7 +320,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     f"Failed to offload inference engine, error: {str(e)}"
                 )
 
-        if not self.is_optimizer_offload_enabled(self.policy_engine):
+        if self.can_offload_state(self.policy_engine):
             self.policy_engine.offload_states()
 
         self.policy_engine.eval()
@@ -205,10 +331,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
     def _prepare_for_training(self):
         """Switch models to train mode."""
-        if (
-            self.is_inference_engine_enabled()
-            and self.inference_client.is_cohost_mode()
-        ):
+        if self.is_cohost_inference_engine():
             try:
                 # Try offload GPU RAM caches
                 self.inference_client.release_memory()
@@ -221,7 +344,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         if self.reference_model:
             self.reference_model = self.reference_model.to('cpu')
 
-        if not self.is_optimizer_offload_enabled(self.policy_engine):
+        if self.can_offload_state(self.policy_engine):
             self.policy_engine.reload_states()
 
         self.policy_engine.train()
@@ -314,42 +437,19 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
         self.logger.info('Policy model sync process finished.')
 
-    # def sync_policy_model(self) -> None:
-    #     """Update policy model weights with the generator/engine"""
-
-    #     if self.is_inference_engine_enabled():
-
-    #         try:
-    #             self.logger.info('Try to inference engine weights...')
-    #             # Save full checkpoint to a local file system on master
-    #             ckpt_path = os.path.join(
-    #                 self.checkpoint_dir, f"tmp_{self.global_step}"
-    #             )
-    #             self.save_weights_hf_pretrained(self.policy_engine, ckpt_path)
-    #             if self.dist_manager.is_master:
-    #                 self.inference_client.resume_memory()
-    #                 self.inference_client.update_weights(model_path=ckpt_path)
-    #             self.clean_up()
-    #         except Exception as e:
-    #             raise RuntimeError(
-    #                 f"Failed to update inference engine weights, error: {str(e)}"
-    #             )
-    #         finally:
-    #             # clean up ckpt
-    #             if self.dist_manager.is_master:
-    #                 os.rmdir(ckpt_path)
-
-    #         self.dist_manager.barrier()
-
-    #     else:
-    #         self.logger.info('No inference engine specified, skipping')
-
     def is_inference_engine_enabled(self) -> bool:
         """Checks if inference engine is enabled."""
         return (
             hasattr(self, 'inference_client')
             and self.inference_client is not None
-            and isinstance(self.inference_client, BaseInferenceClient)
+            and isinstance(self.inference_client, InferenceClient)
+        )
+
+    def is_cohost_inference_engine(self) -> bool:
+        """Checks should release inference server memory"""
+        return (
+            self.is_inference_engine_enabled()
+            and self.inference_client.is_cohost_mode()
         )
 
     def log_batch_episodes(

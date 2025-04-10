@@ -1,12 +1,14 @@
+"""A simple HTTP based client for SGLang inference server"""
+
 from typing import Any, Dict, List, Optional, Union
 
-from rl4llm.inference.base_client import (
-    BaseInferenceClient,
+from rl4llm.core.base_inference_client import (
+    InferenceClient,
     InferenceClientError,
 )
 
 
-class SGLangClient(BaseInferenceClient):
+class SGLangClient(InferenceClient):
     """
     A synchronous Python client for interacting with an SGLang inference server.
 

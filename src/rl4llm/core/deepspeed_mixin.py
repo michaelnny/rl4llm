@@ -1,5 +1,4 @@
 from contextlib import contextmanager
-from copy import deepcopy
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import deepspeed
@@ -42,11 +41,16 @@ class DeepSpeedUtilsMixin:
     def is_optimizer_offload_enabled(self, engine: DeepSpeedEngine) -> bool:
         """Checks if optimizer parameters offload is enabled for the specified engine."""
         offload_optimizer = engine.zero_offload_optimizer()
-        return (
-            self.is_zero3_enabled(engine)
-            and offload_optimizer is not None
-            and offload_optimizer.device in ['cpu', 'nvme']
-        )
+        return offload_optimizer is not None and offload_optimizer.device in [
+            'cpu',
+            'nvme',
+        ]
+
+    def can_offload_state(self, engine: DeepSpeedEngine) -> bool:
+        """Checks if the engine's state can be offloaded"""
+        return self.is_zero3_enabled(
+            engine
+        ) and not self.is_optimizer_offload_enabled(engine)
 
     def get_torch_dtype(self, engine: DeepSpeedEngine) -> torch.dtype:
         """Determines appropriate torch dtype from the specified engine config."""

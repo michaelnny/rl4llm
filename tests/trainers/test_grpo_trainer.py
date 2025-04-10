@@ -14,7 +14,7 @@ from rl4llm.trainers.grpo_trainer import (
     EpisodeData,
     GRPOConfig,
     GRPOTrainer,
-    HFEnv,
+    LocalLLMEnv,
     TransitionData,
 )
 

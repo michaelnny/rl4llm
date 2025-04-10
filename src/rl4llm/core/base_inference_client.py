@@ -1,3 +1,6 @@
+"""Implements a basic HTTP based inference client
+that can call standalone inference server like inference"""
+
 import json
 import logging
 import time
@@ -15,7 +18,7 @@ class InferenceClientError(Exception):
     pass
 
 
-class BaseInferenceClient(ABC):
+class InferenceClient(ABC):
     """
     Base Inference client for calling inference server using HTTP methods.
     """
@@ -34,8 +37,8 @@ class BaseInferenceClient(ABC):
         Initializes the InferenceClient.
 
         Args:
-            host: The hostname or IP address of the SGLang server.
-            port: The port number of the SGLang server.
+            host: The hostname or IP address of the inference server.
+            port: The port number of the inference server.
             api_key: Optional API key for server authentication.
             cohost_mode: Cohost inference engine with training models.
             default_timeout: Timeout for all HTTP requests made by this client.
@@ -73,7 +76,7 @@ class BaseInferenceClient(ABC):
         # Perform a quick health check on initialization
         try:
             self.health()
-            self.logger.info('Successfully connected to SGLang server.')
+            self.logger.info('Successfully connected to inference server.')
         except InferenceClientError as e:
             raise RuntimeError(f"Initial health check failed: {e}")
 
@@ -189,6 +192,7 @@ class BaseInferenceClient(ABC):
 
     @abstractmethod
     def health(self) -> bool:
+        """Checks the health status of remote inference server"""
         pass
 
     @abstractmethod
@@ -198,16 +202,20 @@ class BaseInferenceClient(ABC):
         sampling_params: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        """Calls the remote inference server for generate completion"""
         pass
 
     @abstractmethod
     def release_memory(self) -> None:
+        """Calls the remote inference server to release/offload GPU memory"""
         pass
 
     @abstractmethod
     def resume_memory(self) -> None:
+        """Calls the remote inference server to resume/load GPU memory"""
         pass
 
     @abstractmethod
     def update_weights(self, model_path: str, **kwargs) -> None:
+        """Calls the remote inference server to update weights"""
         pass
