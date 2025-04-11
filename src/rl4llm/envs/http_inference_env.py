@@ -1,4 +1,4 @@
-"""Implements MDP ENV for collect samples for RL using vLLM engine"""
+"""Implements MDP ENV for collect samples for RL using SGLang inference server with a custom HTTP client"""
 
 import functools
 import logging
@@ -23,7 +23,7 @@ logger = logging.getLogger(LOGGER_NAME)
 
 class HTTPInferenceEnv(BaseEnv):
     """
-    Environment for generating training samples using standard along inference engine with a custom HTTP client.
+    Environment for generating samples using SGLang inference server with a custom HTTP client.
     """
 
     def _generate_completions(

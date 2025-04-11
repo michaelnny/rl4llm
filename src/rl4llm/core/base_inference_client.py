@@ -216,6 +216,6 @@ class InferenceClient(ABC):
         pass
 
     @abstractmethod
-    def update_weights(self, model_path: str, **kwargs) -> None:
-        """Calls the remote inference server to update weights"""
+    def update_weights_from_file(self, model_path: str, **kwargs) -> None:
+        """Calls the remote inference server to update weights from a checkpoint file"""
         pass

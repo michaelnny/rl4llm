@@ -149,6 +149,7 @@ class GRPOTrainer(RLTrainer):
         train_env: LocalLLMEnv,
         eval_env: Optional[LocalLLMEnv] = None,
         inference_client: Optional[InferenceClient] = None,
+        ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
         reward_transform_fn: Optional[RewardTransform] = None,
         seed: Optional[int] = 175,
     ):
@@ -167,6 +168,7 @@ class GRPOTrainer(RLTrainer):
             train_env=train_env,
             eval_env=eval_env,
             inference_client=inference_client,
+            ref_model=ref_model,
             seed=seed,
         )
 

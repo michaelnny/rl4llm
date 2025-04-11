@@ -70,7 +70,7 @@ def parse_args():
 
     args = parser.parse_args()
 
-    if not args.infer_cohost_mode and args.infer_host in (
+    if args.infer_cohost_mode and args.infer_host not in (
         '0.0.0.0',
         'localhost',
     ):
@@ -233,6 +233,9 @@ def main():
     deepspeed.init_distributed(verbose=False)
 
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
+    zero3_enabled = (
+        deepspeed_config.get('zero_optimization', {}).get('stage') == 3
+    )
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
 
     dist_manager = DistributedManager()
@@ -274,6 +277,23 @@ def main():
         model_parameters=policy_model.parameters(),
         config_params=deepspeed_config,
     )
+
+    ref_model = None
+    if grpo_config.kl_loss_coef > 0:
+        ref_model, _ = build_model_and_tokenizer(model_config, torch_dtype)
+        for param in ref_model.parameters():
+            param.requires_grad = False
+        ref_model.eval()
+
+    if ref_model is not None and zero3_enabled:
+        reference_deepspeed_config = job_config.get('reference_deepspeed', {})
+
+        ref_model, *_ = deepspeed.initialize(
+            model=ref_model,
+            model_parameters=[],
+            config_params=reference_deepspeed_config,
+        )
+        ref_model.eval()
 
     inference_client = None
     env_cls = LocalLLMEnv
@@ -326,6 +346,7 @@ def main():
         train_env=train_env,
         eval_env=eval_env,
         inference_client=inference_client,
+        ref_model=ref_model,
         reward_transform_fn=reward_transform_fn,
         seed=seed,
     )

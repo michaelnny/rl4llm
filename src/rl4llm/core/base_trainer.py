@@ -182,6 +182,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         artifacts_path: str,
         train_env: BaseEnv,
         eval_env: Optional[BaseEnv] = None,
+        ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
         inference_client: Optional[InferenceClient] = None,
         seed: Optional[int] = 175,
     ):
@@ -211,9 +212,9 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             os.makedirs(self.checkpoint_dir, exist_ok=True)
         dist_manager.barrier()
 
-        self.reference_model: Optional[PreTrainedModel] = (
-            self._create_reference_model() if config.kl_loss_coef > 0 else None
-        )
+        self.reference_model: Optional[
+            Union[PreTrainedModel, DeepSpeedEngine]
+        ] = ref_model
 
         self.inference_client = inference_client
 
@@ -351,28 +352,42 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
         self.clean_up()
 
-    # TODO: consider using deepspeed inference engine for the reference model
-    def _sync_reference_model(self):
+    def sync_reference_model(self):
         """Copies current policy weights to reference model."""
         if not self.reference_model:
             return
         self.logger.info('Syncing reference model...')
-        with self.unwrapped_model_for_generation() as model:
-            self.reference_model.load_state_dict(model.state_dict())
-        self.ref_update_count += 1
-        self.logger.info('Reference model synced.')
-        self.clean_up()
+        with self.unwrapped_model_for_generation() as policy_model:
+            # the policy state is already gathered with the unwrap context
+            policy_state_dict = policy_model.state_dict()
 
-    def _create_reference_model(self) -> Optional[PreTrainedModel]:
-        """Creates a frozen copy of the current policy model."""
-        self.logger.info('Creating reference model...')
-        with self.unwrapped_model_for_generation() as model:
-            ref_model = deepcopy(model)
-            ref_model.eval()
-            for param in ref_model.parameters():
-                param.requires_grad = False
-        self.logger.info('Reference model created.')
-        return ref_model
+            if isinstance(self.reference_model, DeepSpeedEngine):
+                # For Zero-3, we need to handle parameter gathering
+                if self.is_zero3_enabled(self.reference_model):
+                    # Now update reference model with gathered parameters
+                    with deepspeed.zero.GatheredParameters(
+                        self.reference_model.parameters(), modifier_rank=0
+                    ):
+                        if self.dist_manager.is_master:
+                            self.reference_model.module.load_state_dict(
+                                policy_state_dict
+                            )
+                else:
+                    # Reference model is DeepSpeed engine but not Zero-3
+                    self.reference_model.module.load_state_dict(
+                        policy_state_dict
+                    )
+            else:
+                # Reference model is DeepSpeed engine but not Zero-3
+                self.reference_model.load_state_dict(policy_state_dict)
+
+        self.ref_update_count += 1
+
+        self.logger.debug('Reached barrier after sync attempt.')
+        self.dist_manager.barrier()
+        self.logger.debug('Passed barrier after sync attempt.')
+
+        self.logger.info('Reference model sync process finished.')
 
     def sync_policy_model(self) -> None:
         """Update policy model weights with the inference engine."""
@@ -405,7 +420,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                             f"Master process updating inference engine from {temp_ckpt_path}..."
                         )
                         self.inference_client.resume_memory()
-                        self.inference_client.update_weights(
+                        self.inference_client.update_weights_from_file(
                             model_path=temp_ckpt_path
                         )
                         self.logger.info(
@@ -554,8 +569,8 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     % self.config.sync_reference_interval
                     == 0
                 ):
-                    with self.logger.timer('_sync_reference_model'):
-                        self._sync_reference_model()
+                    with self.logger.timer('sync_reference_model'):
+                        self.sync_reference_model()
                     self.dist_manager.barrier()
 
                 if (

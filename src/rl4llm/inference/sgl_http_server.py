@@ -48,6 +48,7 @@ from sglang.srt.managers.io_struct import (
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
     UpdateWeightFromDiskReqInput,
+    UpdateWeightsFromTensorReqInput,
 )
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.metrics.func_timer import enable_func_timer
@@ -220,21 +221,21 @@ async def update_weights_from_disk(
         )
 
 
-@app.post('/init_weights_update_group')
-async def init_weights_update_group(
-    obj: InitWeightsUpdateGroupReqInput, request: Request
-):
-    """Initialize the parameter update group."""
-    success, message = (
-        await _global_state.tokenizer_manager.init_weights_update_group(
-            obj, request
-        )
-    )
-    content = {'success': success, 'message': message}
-    if success:
-        return ORJSONResponse(content, status_code=200)
-    else:
-        return ORJSONResponse(content, status_code=HTTPStatus.BAD_REQUEST)
+# @app.post('/init_weights_update_group')
+# async def init_weights_update_group(
+#     obj: InitWeightsUpdateGroupReqInput, request: Request
+# ):
+#     """Initialize the parameter update group."""
+#     success, message = (
+#         await _global_state.tokenizer_manager.init_weights_update_group(
+#             obj, request
+#         )
+#     )
+#     content = {'success': success, 'message': message}
+#     if success:
+#         return ORJSONResponse(content, status_code=200)
+#     else:
+#         return ORJSONResponse(content, status_code=HTTPStatus.BAD_REQUEST)
 
 
 # @app.post("/update_weights_from_tensor")

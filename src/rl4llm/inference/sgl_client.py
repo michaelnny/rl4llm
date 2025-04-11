@@ -114,7 +114,7 @@ class SGLangClient(InferenceClient):
         self._release_called = False
         self.logger.info(f"Memory resume request response: {result}")
 
-    def update_weights(
+    def update_weights_from_file(
         self,
         model_path: str,
         skip_tokenizer_init: bool = True,

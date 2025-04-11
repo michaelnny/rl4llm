@@ -50,7 +50,6 @@ PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
     --mem-fraction-static 0.5 \
     --chunked-prefill-size 8192 \
     --tp 1 \
-    --enable-torch-compile \
     --enable-memory-saver
 
 ```
