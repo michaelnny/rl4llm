@@ -110,7 +110,7 @@ class LoggingManager:
         self.resource_handler = ResourceHandler(
             dist_manager=self.dist_manager,
             logger=self.console_logger,
-            sampling_interval_seconds=30.0,
+            sampling_interval_seconds=10.0,
         )
 
         self._handlers: List[BaseHandler] = [

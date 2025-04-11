@@ -68,27 +68,18 @@ class DeepSpeedUtilsMixin:
         if self.is_zero3_enabled(engine):
             if torch.distributed.get_rank() == 0:
                 print('ZeRO-3: Gathering parameters for saving...')
-                # Ensure model is on CPU or has enough GPU memory on rank 0 for consolidated weights
-                # model_engine.module.cpu() # Optional: Move to CPU first if GPU memory is tight
 
-            # Gather parameters context. modifier_rank=0 specifies rank 0 gathers.
-            # requires_grad=False is important for saving, prevents unnecessary grad tracking.
-            with deepspeed.zero.GatheredParameters(
-                engine.parameters(), modifier_rank=0
-            ):
+            with deepspeed.zero.GatheredParameters(engine.parameters()):
                 if torch.distributed.get_rank() == 0:
                     print('Rank 0: Saving gathered model...')
                     model_to_save = engine.module
                     model_to_save.save_pretrained(output_dir)
                     print(f"Model saved by rank 0 to {output_dir}")
 
-            # Barrier ensures all ranks wait until rank 0 is done saving.
             torch.distributed.barrier()
 
-        # The else block for ZeRO-1/2 remains the same
         else:
             if torch.distributed.get_rank() == 0:
-                # print(f"ZeRO stage {args.zero_stage}: Saving model and tokenizer on rank 0...")
                 model_to_save = engine.module
                 model_to_save.save_pretrained(output_dir)
                 print(f"Model saved by rank 0 to {output_dir}")

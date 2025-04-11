@@ -41,7 +41,7 @@ class ResourceHandler(BaseHandler):
         self,
         dist_manager: DistributedManager,
         logger: Optional[logging.Logger] = None,
-        sampling_interval_seconds: float = 30.0,
+        sampling_interval_seconds: float = 10.0,
     ):
         super().__init__(logger)
         self.dist_manager = dist_manager

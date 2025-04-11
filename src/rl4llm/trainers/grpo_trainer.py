@@ -25,10 +25,6 @@ RewardTransform: TypeAlias = Optional[
 class GRPOConfig(RLConfig):
     """GRPO config instance for RL LLM"""
 
-    xml_format: Optional[bool] = Field(
-        False, description='Check R1 style XML format for compute reward'
-    )
-
     # enhancements to encourage exploration
     group_temperature: Optional[bool] = Field(
         False,
@@ -232,7 +228,7 @@ class GRPOTrainer(RLTrainer):
 
     def compute_loss(
         self, pi_logits: torch.Tensor, experience_batch: TransitionData
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+    ) -> torch.Tensor:
         """Compute GRPO loss for a single training batch
 
         Args:
@@ -241,8 +237,7 @@ class GRPOTrainer(RLTrainer):
             experience_batch (TransitionData): A batch of samples collected
                 during generation
         Returns:
-            Tuple[torch.Tensor, Dict]: Tuple containing the total loss tensor
-                and a dictionary of metrics
+            torch.Tensor: The total loss tensor
         """
         behavior_logprobs = experience_batch.pi_logprobs.to(self.device)
         actions = experience_batch.actions.to(self.device)
@@ -280,14 +275,13 @@ class GRPOTrainer(RLTrainer):
         entropy = entropies.mean()
         entropy_loss = self.config.entropy_loss_coef * entropy
 
-        # Initialize metrics with common values
-        metrics = {
-            'train/pg_loss': pg_loss.detach().item(),
-            'train/entropy_loss': entropy_loss.detach().item(),
-            'policy/entropy': entropy.detach().item(),
-            'policy/approxkl': approxkl.detach().item(),
-            'policy/clipfrac': clipfrac.detach().item(),
-        }
+        self.logger.log_scalar('train/pg_loss', pg_loss.detach().item())
+        self.logger.log_scalar(
+            'train/entropy_loss', entropy_loss.detach().item()
+        )
+        self.logger.log_scalar('policy/entropy', entropy.detach().item())
+        self.logger.log_scalar('policy/approxkl', approxkl.detach().item())
+        self.logger.log_scalar('policy/clipfrac', clipfrac.detach().item())
 
         # Compute KL divergence if coefficient is positive
         if self.config.kl_loss_coef > 0:
@@ -307,16 +301,12 @@ class GRPOTrainer(RLTrainer):
             kl_loss = self.config.kl_loss_coef * kl
 
             loss = pg_loss + kl_loss + entropy_loss
-            metrics.update(
-                {
-                    'train/kl_loss': kl_loss.detach().item(),
-                    'objective/kl': kl.detach().item(),
-                }
-            )
+            self.logger.log_scalar('train/kl_loss', kl_loss.detach().item())
+            self.logger.log_scalar('objective/kl', kl.detach().item())
         else:
             loss = pg_loss + entropy_loss
 
-        return loss, metrics
+        return loss
 
     def train_step(self, train_dataloader: DataLoader):
         """Performs the policy update using collected rollout."""
@@ -331,16 +321,13 @@ class GRPOTrainer(RLTrainer):
                     input_ids=input_ids, attention_mask=attention_mask
                 ).logits
 
-                loss, metrics = self.compute_loss(pi_logits, micro_batch)
+                loss = self.compute_loss(pi_logits, micro_batch)
 
                 del micro_batch, input_ids, attention_mask, pi_logits
                 self.clean_up()
 
                 self.policy_engine.backward(loss)
                 self.policy_engine.step()
-
-                for k, v in metrics.items():
-                    self.logger.log_scalar(k, v)
 
                 if self.policy_engine.is_gradient_accumulation_boundary():
                     self.policy_update_count += 1
@@ -473,7 +460,7 @@ class GRPOTrainer(RLTrainer):
             torch.std(rewards, unbiased=False)
             <= self.group_reward_std_threshold
         ):
-            self.logger.warning(
+            self.logger.debug(
                 f"Skipping group samples with rewards of low std, minimum group reward std: {self.group_reward_std_threshold:.4f}"
             )
             self.logger.log_scalar('other/skipped_sample_count', len(rewards))

@@ -297,7 +297,7 @@ def test_save_weights_hf_pretrained(
     # Check if GatheredParameters context was used only for ZeRO-3
     if stage == 3:
         mock_gathered_parameters.assert_called_once_with(
-            mock_engine.parameters(), modifier_rank=0
+            mock_engine.parameters()
         )
         mock_gathered_parameters.return_value.__enter__.assert_called_once()
         mock_gathered_parameters.return_value.__exit__.assert_called_once()

@@ -98,6 +98,16 @@ Question:
 <|im_start|>assistant
 """
 
+# PROMPT_TEMPLATE_R1 = """<|im_start|>system
+# You are a helpful assistant.<|im_end|>
+# <|im_start|>user
+# Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
+
+# Question:
+# {question}<|im_end|>
+# <|im_start|>assistant
+# """
+
 
 def apply_prompt_template(item: Dict, template: str) -> Dict:
     """Apply the prompt template for sample, assume the template has a 'question' place holder"""
@@ -152,14 +162,16 @@ def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
 
 
 def prepare_explore_processor_config(
-    tokenizer: PreTrainedTokenizer, grpo_config: GRPOConfig
+    tokenizer: PreTrainedTokenizer,
+    grpo_config: GRPOConfig,
+    xml_format: bool = False,
 ) -> Dict:
     """Creates the exploration logits processor needed config"""
 
     # for Explore LLM Env config
     replace_source_tokens = []
     # # Determine which tokens should be replaced based on format
-    if grpo_config.xml_format:
+    if xml_format:
         replace_source_tokens.append(tokenizer.encode('</think>')[0])
         replace_source_tokens.append(tokenizer.encode(' </think>')[0])
         replace_source_tokens.append(tokenizer.encode(':</think>')[0])
@@ -174,7 +186,7 @@ def prepare_explore_processor_config(
     replace_prevent_patterns = []
     explore_skip_n = 0
 
-    if grpo_config.xml_format:
+    if xml_format:
         replace_prevent_patterns.extend(
             [
                 tokenizer.encode('</think>'),
@@ -233,9 +245,9 @@ def main():
     deepspeed.init_distributed(verbose=False)
 
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
-    zero3_enabled = (
-        deepspeed_config.get('zero_optimization', {}).get('stage') == 3
-    )
+    # zero3_enabled = (
+    #     deepspeed_config.get('zero_optimization', {}).get('stage') == 3
+    # )
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
 
     dist_manager = DistributedManager()
@@ -278,6 +290,7 @@ def main():
         config_params=deepspeed_config,
     )
 
+    # Create reference model and optionally use deepspeed sharding
     ref_model = None
     if grpo_config.kl_loss_coef > 0:
         ref_model, _ = build_model_and_tokenizer(model_config, torch_dtype)
@@ -285,15 +298,19 @@ def main():
             param.requires_grad = False
         ref_model.eval()
 
-    if ref_model is not None and zero3_enabled:
-        reference_deepspeed_config = job_config.get('reference_deepspeed', {})
-
-        ref_model, *_ = deepspeed.initialize(
-            model=ref_model,
-            model_parameters=[],
-            config_params=reference_deepspeed_config,
+    reference_deepspeed_config = job_config.get('reference_deepspeed')
+    if ref_model is not None and reference_deepspeed_config is not None:
+        zero3_enabled = (
+            reference_deepspeed_config.get('zero_optimization', {}).get('stage')
+            == 3
         )
-        ref_model.eval()
+        if zero3_enabled:
+            ref_model, *_ = deepspeed.initialize(
+                model=ref_model,
+                model_parameters=[],
+                config_params=reference_deepspeed_config,
+            )
+            ref_model.eval()
 
     inference_client = None
     env_cls = LocalLLMEnv

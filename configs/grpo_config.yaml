@@ -2,12 +2,12 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_sgl_kl_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_sgl_kl-0.01_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
   log_level: 20
-  # metrics_aggregation_config:         # define custom metics aggregation config
+  # metrics_aggregation_config:         # define custom metics aggregation methods
   #   accuracy_reward: ['mean', 'std', 'min', 'max']
 
 dataset: 
@@ -34,10 +34,9 @@ grpo:
   clip_eps: 0.2                         # PPO0-style policy clip parameter
   normalize_group_rewards: true       
   normalize_advantages: false
-  kl_loss_coef: 0.04
+  kl_loss_coef: 0.01
   entropy_loss_coef: 0.0
-  # clip_grad_norm: 0.0
-  sync_reference_interval: 0            # every N iteration
+  sync_reference_interval: 50           # every N global steps
 
   # for sample generation
   max_prompt_tokens: 512                # skip sample question that's too long
@@ -51,7 +50,7 @@ grpo:
   # evaluation
   eval_rollout_size: 1024    
   eval_batch_size: 64
-  eval_interval: 20                     # every N global steps
+  eval_interval: 0                      # every N global steps
 
   # others
   checkpoint_interval: 100              # every N global steps
@@ -77,8 +76,10 @@ grpo:
 
 
 deepspeed:
-  # memory_breakdown: true  # for debugging
-  steps_per_print: 1000000 # disable default logging
+  # memory_breakdown: true              # for debugging
+  steps_per_print: 1000000              # disable default logging
+  # train_micro_batch_size_per_gpu: 1      
+  # train_batch_size: 1                    
   gradient_clipping: 0.0
   bf16:
     enabled: true
@@ -109,23 +110,28 @@ deepspeed:
     # offload_optimizer:
     #   device: cpu
     #   pin_memory: false
-  # activation_checkpointing:
-  #   partition_activations: true
-  #   cpu_checkpointing: true
-  #   contiguous_memory_optimization: true
-  #   number_checkpoints: null
-  #   synchronize_checkpoint_boundary: false
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: true
+    contiguous_memory_optimization: true
+    number_checkpoints: null
+    synchronize_checkpoint_boundary: false
 
 
 # Optional, for reference model deepspeed configuration
 reference_deepspeed:
-  steps_per_print: 1000000 # disable default logging
+  steps_per_print: 1000000               # disable default logging
+  train_micro_batch_size_per_gpu: 1      # not used but required
+  train_batch_size: 1                    # not used but required
   gradient_clipping: 0.0
   bf16:
     enabled: true
   zero_optimization:
     stage: 3
-    contiguous_gradients: true
+    contiguous_gradients: false
     overlap_comm: true
     allgather_partitions: true
     reduce_scatter: true
+    offload_param:
+      device: cpu
+      pin_memory: false
