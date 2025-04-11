@@ -18,8 +18,8 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                "HTTP_PROXY": "http://127.0.0.1:1081",
-                "HTTPS_PROXY": "http://127.0.0.1:1081",
+                // "HTTP_PROXY": "http://127.0.0.1:1081",
+                // "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "NCCL_P2P_DISABLE": "1"
             },
@@ -32,8 +32,8 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                "HTTP_PROXY": "http://127.0.0.1:1081",
-                "HTTPS_PROXY": "http://127.0.0.1:1081",
+                // "HTTP_PROXY": "http://127.0.0.1:1081",
+                // "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
             },
         },

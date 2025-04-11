@@ -14,7 +14,8 @@ help me cleaning up and improve these code by doing the following:
 
 
 help me cleaning up these test cases by doing the following:
-- keep use pytest's functional test case and avoid using class based tests when every possible
+- use pytest's functional test case and avoid using class based tests when every possible
+- keep the tests simple and only test the essential code, do not over tests
 - remove unnecessary comments in the tests, and do not add too much comments
 - add a single sentence doc string to each fixture/test
-- regroup similar tests together using parameterized tests but only if it's a really good to use them
+- regroup similar tests together using parameterized tests but only if it's a really fit

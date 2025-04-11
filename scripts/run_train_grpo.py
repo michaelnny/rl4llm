@@ -7,18 +7,17 @@ from typing import Any, Dict, List, Union
 
 import deepspeed
 import torch
-import vllm
 from transformers import PreTrainedTokenizer
 
 from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import (
-    ExploreHFEnv,
-    ExploreVLLMEnv,
-    HFEnv,
-    VLLMEnv,
+    ExploreLocalLLMEnv,
+    HTTPInferenceEnv,
+    LocalLLMEnv,
 )
 from rl4llm.graders.math_grader import math_problem_grader
+from rl4llm.inference.sgl_client import SGLangClient
 from rl4llm.logging import LoggingManager
 from rl4llm.trainers.grpo_trainer import (
     DistributedManager,
@@ -45,7 +44,41 @@ def parse_args():
         default=-1,
         help='Required by deepspeed for local rank passed from distributed launcher, not used by our script',
     )
-    return parser.parse_args()
+    # Include inference server specific configuration arguments
+    parser.add_argument(
+        '--use-infer-server',
+        action='store_true',
+        help='Connect to an inference server (default: False)',
+    )
+    parser.add_argument(
+        '--infer-host',
+        type=str,
+        default='localhost',
+        help='Inference server hostname or IP (default: localhost)',
+    )
+    parser.add_argument(
+        '--infer-port',
+        type=str,
+        default='30000',
+        help='Inference server port (default: 30000)',
+    )
+    parser.add_argument(
+        '--infer-cohost-mode',
+        action='store_true',
+        help='Enable if inference server is sharing devices with training (default: False)',
+    )
+
+    args = parser.parse_args()
+
+    if args.infer_cohost_mode and args.infer_host not in (
+        '0.0.0.0',
+        'localhost',
+    ):
+        raise ValueError(
+            f"When using host '{args.infer_host}', you must explicitly set --infer-cohost-mode"
+        )
+
+    return args
 
 
 PROMPT_TEMPLATE_EASY = """Question:
@@ -64,6 +97,16 @@ Question:
 {question}<|im_end|>
 <|im_start|>assistant
 """
+
+# PROMPT_TEMPLATE_R1 = """<|im_start|>system
+# You are a helpful assistant.<|im_end|>
+# <|im_start|>user
+# Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
+
+# Question:
+# {question}<|im_end|>
+# <|im_start|>assistant
+# """
 
 
 def apply_prompt_template(item: Dict, template: str) -> Dict:
@@ -111,15 +154,24 @@ class AccuracyRewardFunction(BaseRewardFunction):
         ]
 
 
+def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+    """Transform multiple rewards to single reward for a group of samples"""
+    accuracy_rewards = reward_dict['accuracy_reward']  # [group_size]
+
+    return accuracy_rewards
+
+
 def prepare_explore_processor_config(
-    tokenizer: PreTrainedTokenizer, grpo_config: GRPOConfig
+    tokenizer: PreTrainedTokenizer,
+    grpo_config: GRPOConfig,
+    xml_format: bool = False,
 ) -> Dict:
     """Creates the exploration logits processor needed config"""
 
     # for Explore LLM Env config
     replace_source_tokens = []
     # # Determine which tokens should be replaced based on format
-    if grpo_config.xml_format:
+    if xml_format:
         replace_source_tokens.append(tokenizer.encode('</think>')[0])
         replace_source_tokens.append(tokenizer.encode(' </think>')[0])
         replace_source_tokens.append(tokenizer.encode(':</think>')[0])
@@ -134,7 +186,7 @@ def prepare_explore_processor_config(
     replace_prevent_patterns = []
     explore_skip_n = 0
 
-    if grpo_config.xml_format:
+    if xml_format:
         replace_prevent_patterns.extend(
             [
                 tokenizer.encode('</think>'),
@@ -168,14 +220,10 @@ def prepare_explore_processor_config(
 
 def main():
     """Starts RL GRPO training loop."""
-    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
-        raise RuntimeError('This script only supports run on GPU.')
+    if not torch.cuda.is_available():
+        raise RuntimeError('This script requires supports CUDA.')
 
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-
-    # IMPORTANT: need to disable V1 engine to access the true model
-    # in order to use an easy way to update model weights with vllm 0.8.x
-    os.environ['VLLM_USE_V1'] = '0'
 
     args = parse_args()
     job_config = load_yaml_config_file(args.config_file)
@@ -193,30 +241,14 @@ def main():
 
     set_seed(seed)
 
-    local_rank = int(os.environ.get('LOCAL_RANK'))
-    device = torch.device(f"cuda:{local_rank}")
-    torch_dtype = torch.bfloat16
-
-    # # A hacky way to pass the min and max temperatures before apply the patch
-    # if grpo_config.group_temperature:
-    #     os.environ['VLLM_MIN_TEMPERATURE'] = str(grpo_config.min_temperature)
-    #     os.environ['VLLM_MAX_TEMPERATURE'] = str(grpo_config.max_temperature)
-    #     from rl4llm.patches import vllm_group_temperature_patch
-
-    # IMPORTANT: must initialize vLLM before deepspeed
-    vllm_engine = vllm.LLM(
-        model=model_name,
-        tensor_parallel_size=1,
-        device=device,
-        gpu_memory_utilization=0.7,  # for single GPU using 0.7 seems to work
-        max_seq_len_to_capture=4096,
-        enable_sleep_mode=True,  # important to enable sleep mode
-        seed=seed,
-    )
-    vllm_engine.sleep()
-
     # Initialize DeepSpeed distributed environment
     deepspeed.init_distributed(verbose=False)
+
+    bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
+    # zero3_enabled = (
+    #     deepspeed_config.get('zero_optimization', {}).get('stage') == 3
+    # )
+    torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
 
     dist_manager = DistributedManager()
     logger = LoggingManager(dist_manager, **log_config)
@@ -258,6 +290,38 @@ def main():
         config_params=deepspeed_config,
     )
 
+    # Create reference model and optionally use deepspeed sharding
+    ref_model = None
+    if grpo_config.kl_loss_coef > 0:
+        ref_model, _ = build_model_and_tokenizer(model_config, torch_dtype)
+        for param in ref_model.parameters():
+            param.requires_grad = False
+        ref_model.eval()
+
+    reference_deepspeed_config = job_config.get('reference_deepspeed')
+    if ref_model is not None and reference_deepspeed_config is not None:
+        zero3_enabled = (
+            reference_deepspeed_config.get('zero_optimization', {}).get('stage')
+            == 3
+        )
+        if zero3_enabled:
+            ref_model, *_ = deepspeed.initialize(
+                model=ref_model,
+                model_parameters=[],
+                config_params=reference_deepspeed_config,
+            )
+            ref_model.eval()
+
+    inference_client = None
+    env_cls = LocalLLMEnv
+    if args.use_infer_server:
+        inference_client = SGLangClient(
+            host=args.infer_host,
+            port=args.infer_port,
+            cohost_mode=args.infer_cohost_mode,
+        )
+        env_cls = HTTPInferenceEnv
+
     # explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
     # train_env = ExploreVLLMEnv(
     #     dataset=train_dataset,
@@ -270,7 +334,7 @@ def main():
     #     **explore_env_args,
     # )
 
-    train_env = VLLMEnv(
+    train_env = env_cls(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
         group_size=grpo_config.group_size,
@@ -279,7 +343,7 @@ def main():
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
     )
-    eval_env = VLLMEnv(
+    eval_env = env_cls(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
@@ -298,7 +362,9 @@ def main():
         artifacts_path=artifacts_path,
         train_env=train_env,
         eval_env=eval_env,
-        vllm_engine=vllm_engine,
+        inference_client=inference_client,
+        ref_model=ref_model,
+        reward_transform_fn=reward_transform_fn,
         seed=seed,
     )
 

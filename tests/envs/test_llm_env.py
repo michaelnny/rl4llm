@@ -5,11 +5,11 @@ import numpy as np
 import pytest
 import torch
 
-from rl4llm.envs.hf_env import (
+from rl4llm.envs.llm_env import (
     BaseRewardFunction,
     EnvState,
     EpisodeData,
-    HFEnv,
+    LocalLLMEnv,
 )
 
 # Dummy implementations for testing
@@ -158,8 +158,8 @@ def dummy_model():
 
 
 def test_initialization(dummy_dataset, dummy_tokenizer, dummy_reward):
-    """Tests HFEnv initializes correctly with valid parameters."""
-    env = HFEnv(
+    """Tests LocalLLMEnv initializes correctly with valid parameters."""
+    env = LocalLLMEnv(
         dataset=dummy_dataset,
         tokenizer=dummy_tokenizer,
         reward_functions=[dummy_reward],
@@ -224,9 +224,9 @@ def test_invalid_initialization(
     error_msg,
     dummy_tokenizer,
 ):
-    """Tests HFEnv initialization errors with invalid parameters."""
+    """Tests LocalLLMEnv initialization errors with invalid parameters."""
     with pytest.raises(Exception) as excinfo:
-        HFEnv(
+        LocalLLMEnv(
             dataset=dataset,
             tokenizer=dummy_tokenizer,
             reward_functions=reward_functions,
@@ -241,7 +241,7 @@ def test_setup_tokenizer(dummy_dataset, dummy_tokenizer, dummy_reward):
     dummy_tokenizer.pad_token = None
     dummy_tokenizer.eos_token = '<eos>'
     dummy_tokenizer.eos_token_id = 1
-    HFEnv(
+    LocalLLMEnv(
         dataset=dummy_dataset,
         tokenizer=dummy_tokenizer,
         reward_functions=[dummy_reward],
@@ -254,7 +254,7 @@ def test_setup_tokenizer(dummy_dataset, dummy_tokenizer, dummy_reward):
 
 def test_collate_fn(dummy_dataset, dummy_tokenizer, dummy_reward):
     """Tests collate function pads inputs correctly."""
-    env = HFEnv(
+    env = LocalLLMEnv(
         dataset=dummy_dataset,
         tokenizer=dummy_tokenizer,
         reward_functions=[dummy_reward],
@@ -282,7 +282,7 @@ def test_collate_fn(dummy_dataset, dummy_tokenizer, dummy_reward):
 
 def test_reset_and_grouped_state(dummy_dataset, dummy_tokenizer, dummy_reward):
     """Tests reset returns an EnvState with repeated prompts."""
-    env = HFEnv(
+    env = LocalLLMEnv(
         dataset=dummy_dataset,
         tokenizer=dummy_tokenizer,
         reward_functions=[dummy_reward],
@@ -298,7 +298,7 @@ def test_reset_and_grouped_state(dummy_dataset, dummy_tokenizer, dummy_reward):
 
 def test_rollout(dummy_dataset, dummy_tokenizer, dummy_reward, dummy_model):
     """Tests rollout returns valid EpisodeData objects."""
-    env = HFEnv(
+    env = LocalLLMEnv(
         dataset=dummy_dataset,
         tokenizer=dummy_tokenizer,
         reward_functions=[dummy_reward],
@@ -318,7 +318,7 @@ def test_invalid_gen_args(
     dummy_dataset, dummy_tokenizer, dummy_reward, dummy_model
 ):
     """Tests rollout raises error when using num_return_sequences > 1."""
-    env = HFEnv(
+    env = LocalLLMEnv(
         dataset=dummy_dataset,
         tokenizer=dummy_tokenizer,
         reward_functions=[dummy_reward],
@@ -335,7 +335,7 @@ def test_rollout_no_pad_tokens(
     dummy_dataset, dummy_tokenizer, dummy_reward, dummy_model
 ):
     """Tests rollout returns data with no pad tokens in prompt or completion."""
-    env = HFEnv(
+    env = LocalLLMEnv(
         dataset=dummy_dataset,
         tokenizer=dummy_tokenizer,
         reward_functions=[dummy_reward],
@@ -373,7 +373,7 @@ def test_rollout_rewards(
     dummy_dataset, dummy_tokenizer, dummy_reward, dummy_model
 ):
     """Tests rollout returns expected rewards from dummy reward function."""
-    env = HFEnv(
+    env = LocalLLMEnv(
         dataset=dummy_dataset,
         tokenizer=dummy_tokenizer,
         reward_functions=[dummy_reward],
