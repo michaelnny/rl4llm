@@ -365,65 +365,6 @@ def test_normalize_group_rewards_raises_error_for_small_group(
         grpo_trainer._normalize_group_rewards(rewards)
 
 
-def test_transform_group_rewards_single_reward(
-    grpo_trainer: GRPOTrainer, sample_group_episodes: List[EpisodeData]
-):
-    """Tests reward transformation when only one reward function is present."""
-    # Ensure only one reward function is mocked
-    grpo_trainer.train_env.reward_functions = {'reward1': Mock()}
-    grpo_trainer.reward_transform_fn = None  # Should not be needed
-
-    rewards = grpo_trainer._transform_group_rewards(sample_group_episodes)
-    expected = torch.tensor(
-        [1.5, 2.0, 1.0, 2.5], dtype=grpo_trainer.torch_dtype
-    )
-    assert torch.equal(rewards, expected)
-
-
-def test_transform_group_rewards_multiple_rewards(
-    grpo_trainer: GRPOTrainer,
-    sample_group_episodes: List[EpisodeData],
-    mock_reward_transform_fn: MagicMock,
-):
-    """Tests reward transformation with multiple reward functions using the transform function."""
-    # Add a second reward
-    for ep in sample_group_episodes:
-        ep.reward_dict['reward2'] = 0.5
-    grpo_trainer.train_env.reward_functions = {
-        'reward1': Mock(),
-        'reward2': Mock(),
-    }
-    grpo_trainer.reward_transform_fn = mock_reward_transform_fn
-
-    rewards = grpo_trainer._transform_group_rewards(sample_group_episodes)
-
-    # Check that the transform function was called correctly
-    mock_reward_transform_fn.assert_called_once()
-    call_args = mock_reward_transform_fn.call_args[0][0]
-    assert 'reward1' in call_args
-    assert 'reward2' in call_args
-    assert torch.equal(
-        call_args['reward1'],
-        torch.tensor([1.5, 2.0, 1.0, 2.5], dtype=grpo_trainer.torch_dtype),
-    )
-    assert torch.equal(
-        call_args['reward2'],
-        torch.tensor([0.5, 0.5, 0.5, 0.5], dtype=grpo_trainer.torch_dtype),
-    )
-
-    # Check the output (based on the mock's side effect: sum)
-    expected = torch.tensor(
-        [2.0, 2.5, 1.5, 3.0], dtype=grpo_trainer.torch_dtype
-    )
-    assert torch.equal(rewards, expected)
-
-
-def test_transform_group_rewards_empty_list(grpo_trainer: GRPOTrainer):
-    """Tests that transforming rewards on an empty list raises ValueError."""
-    with pytest.raises(ValueError, match='Episodes list cannot be empty'):
-        grpo_trainer._transform_group_rewards([])
-
-
 def test_check_group_episodes(
     grpo_trainer: GRPOTrainer, sample_group_episodes: List[EpisodeData]
 ):
@@ -431,7 +372,7 @@ def test_check_group_episodes(
     # Mock the transform function to return rewards with sufficient std dev
     with patch.object(
         grpo_trainer,
-        '_transform_group_rewards',
+        'transform_batch_rewards',
         return_value=torch.tensor([1.0, 2.0, 3.0, 4.0]),
     ):
         assert grpo_trainer._check_group_episodes(sample_group_episodes) is True
@@ -462,7 +403,7 @@ def test_check_group_episodes_low_std(
     )  # Ensure threshold is higher
 
     with patch.object(
-        grpo_trainer, '_transform_group_rewards', return_value=low_std_rewards
+        grpo_trainer, 'transform_batch_rewards', return_value=low_std_rewards
     ):
         assert (
             grpo_trainer._check_group_episodes(sample_group_episodes) is False

@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_sgl_kl-0.01_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_standard_run2_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -28,29 +28,30 @@ grpo:
   max_steps: 100
   train_rollout_size: 512
   num_updates: 1
-  train_micro_batch_size: 8
+  train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
   clip_eps: 0.2                         # PPO0-style policy clip parameter
   normalize_group_rewards: true       
   normalize_advantages: false
-  kl_loss_coef: 0.01
+  kl_loss_coef: 0.0
   entropy_loss_coef: 0.0
-  sync_reference_interval: 50           # every N global steps
+  sync_reference_interval: 0            # every N global steps
+  filter_low_reward_std: false
 
   # for sample generation
   max_prompt_tokens: 512                # skip sample question that's too long
-  group_size: 16                        # for each sample we generate a group of answers
+  group_size: 8                        # for each sample we generate a group of answers
   max_completion_tokens: 1000
   temperature: 0.9                      # not used if using group_temperature
-  repetition_penalty: 1.0
+  repetition_penalty: 1.1
   top_p: 0.95
   top_k: -1                             # -1 to disable
 
   # evaluation
   eval_rollout_size: 1024    
   eval_batch_size: 64
-  eval_interval: 0                      # every N global steps
+  eval_interval: 20                     # every N global steps
 
   # others
   checkpoint_interval: 100              # every N global steps
@@ -61,18 +62,18 @@ grpo:
   # max_temperature: 1.0
 
   # # control rate of explore
-  # explore_init_epsilon: 0.9           # exploration epsilon decay
+  # explore_init_epsilon: 0.8           # exploration epsilon decay
   # explore_min_epsilon: 0.0
   # explore_decay_steps: 50
 
   # # exploring start
-  # explore_steps: 5                    # initial start steps to do random sampling
-  # explore_top_k: 30                   # Top K tokens to random sample during initial start steps
-  # explore_decay_rate: 0.8
-
-  # # exploring by token replacement
-  # replace_prob: 0.5
-  # replace_max_per_seq: 3              # max number of replacements to the same sequence
+  # explore_steps: 10                    # initial start steps to do random sampling
+  # explore_top_k: 100                   # Top K tokens to random sample during initial start steps
+  # explore_decay_rate: 0.9
+  
+  # # continue generation with failed outcomes
+  # continue_prob: 0.5
+  # continue_max_retry: 1               # max number of retry by adding the special token and continue generation
 
 
 deepspeed:

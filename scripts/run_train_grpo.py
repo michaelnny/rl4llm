@@ -12,8 +12,8 @@ from transformers import PreTrainedTokenizer
 from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import (
-    ExploreLocalLLMEnv,
-    HTTPInferenceEnv,
+    ExploreInferenceEnv,
+    InferenceEnv,
     LocalLLMEnv,
 )
 from rl4llm.graders.math_grader import math_problem_grader
@@ -168,53 +168,32 @@ def prepare_explore_processor_config(
 ) -> Dict:
     """Creates the exploration logits processor needed config"""
 
-    # for Explore LLM Env config
-    replace_source_tokens = []
-    # # Determine which tokens should be replaced based on format
-    if xml_format:
-        replace_source_tokens.append(tokenizer.encode('</think>')[0])
-        replace_source_tokens.append(tokenizer.encode(' </think>')[0])
-        replace_source_tokens.append(tokenizer.encode(':</think>')[0])
-        replace_source_tokens.append(tokenizer.encode('.</think>')[0])
-    else:
-        replace_source_tokens.append(tokenizer.eos_token_id)
-
-    replace_target_tokens = [
-        tokenizer.encode(f' {kwd}')[0]
-        for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
+    special_tokens = [
+        f' {kwd}' for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
     ]
-    replace_prevent_patterns = []
-    explore_skip_n = 0
-
-    if xml_format:
-        replace_prevent_patterns.extend(
-            [
-                tokenizer.encode('</think>'),
-                tokenizer.encode(' </think>'),
-                tokenizer.encode('<answer>'),
-            ]
-        )
-        explore_skip_n = len(tokenizer.encode('<think>'))
+    explore_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
 
     if grpo_config.group_temperature:
-        temperature = torch.linspace(
+        temperatures = torch.linspace(
             grpo_config.min_temperature,
             grpo_config.max_temperature,
             steps=grpo_config.group_size,
         )
-        temperature = torch.round(temperature, decimals=2)
+        temperatures = torch.round(temperatures, decimals=2)
+    else:
+        temperatures = (
+            torch.ones((grpo_config.group_size,)) * grpo_config.temperature
+        )
 
     return {
-        'temperature': temperature,
+        'temperatures': temperatures,
         'explore_steps': grpo_config.explore_steps,
         'explore_top_k': grpo_config.explore_top_k,
         'explore_skip_n': explore_skip_n,
         'explore_decay_rate': grpo_config.explore_decay_rate,
-        'replace_source_tokens': replace_source_tokens,
-        'replace_target_tokens': replace_target_tokens,
-        'replace_prevent_patterns': replace_prevent_patterns,
-        'replace_max_per_seq': grpo_config.replace_max_per_seq,
-        'replace_prob': grpo_config.replace_prob,
+        'continue_special_tokens': special_tokens,
+        'continue_max_retry': grpo_config.continue_max_retry,
+        'continue_prob': grpo_config.continue_prob,
     }
 
 
@@ -320,10 +299,10 @@ def main():
             port=args.infer_port,
             cohost_mode=args.infer_cohost_mode,
         )
-        env_cls = HTTPInferenceEnv
+        env_cls = InferenceEnv
 
     # explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
-    # train_env = ExploreVLLMEnv(
+    # train_env = ExploreInferenceEnv(
     #     dataset=train_dataset,
     #     batch_size=1,  # always set batch size to 1 for training
     #     group_size=grpo_config.group_size,
