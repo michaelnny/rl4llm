@@ -253,49 +253,6 @@ def test_grpo_trainer_init_requires_reward_transform_for_multiple_rewards(
         )
 
 
-def test_initialize_trainer(grpo_trainer: GRPOTrainer):
-    """Tests if trainer-specific attributes are initialized correctly."""
-    assert grpo_trainer.explore_epsilon == 0.0
-    assert isinstance(grpo_trainer.group_reward_std_threshold, torch.Tensor)
-    assert (
-        grpo_trainer.group_reward_std_threshold > 0
-    )  # Should be calculated based on dummy rewards
-
-
-def test_get_exploration_epsilon_decay(grpo_trainer: GRPOTrainer):
-    """Tests the cosine decay calculation for exploration epsilon."""
-    grpo_trainer.config.explore_init_epsilon = 0.5
-    grpo_trainer.config.explore_min_epsilon = 0.1
-    grpo_trainer.config.explore_decay_steps = 100
-
-    # Start
-    grpo_trainer.global_step = 0
-    assert grpo_trainer._get_exploration_epsilon() == pytest.approx(0.5)
-
-    # Mid decay
-    grpo_trainer.global_step = 50
-    expected_mid = 0.1 + (0.5 - 0.1) * 0.5 * (1 + math.cos(math.pi * 50 / 100))
-    assert grpo_trainer._get_exploration_epsilon() == pytest.approx(
-        expected_mid
-    )  # Should be 0.3
-
-    # End
-    grpo_trainer.global_step = 100
-    assert grpo_trainer._get_exploration_epsilon() == pytest.approx(0.1)
-
-    # After decay
-    grpo_trainer.global_step = 150
-    assert grpo_trainer._get_exploration_epsilon() == pytest.approx(0.1)
-
-
-def test_get_exploration_epsilon_no_decay(grpo_trainer: GRPOTrainer):
-    """Tests exploration epsilon when decay steps are zero."""
-    grpo_trainer.config.explore_decay_steps = 0
-    grpo_trainer.config.explore_init_epsilon = 0.5
-    grpo_trainer.global_step = 50
-    assert grpo_trainer._get_exploration_epsilon() == 0.0
-
-
 @pytest.mark.parametrize(
     'rewards, zero_mean_only, expected_mean_approx, expected_std_approx',
     [
@@ -363,55 +320,6 @@ def test_normalize_group_rewards_raises_error_for_small_group(
         ValueError, match='Number of group rewards must be greater than 4'
     ):
         grpo_trainer._normalize_group_rewards(rewards)
-
-
-def test_check_group_episodes(
-    grpo_trainer: GRPOTrainer, sample_group_episodes: List[EpisodeData]
-):
-    """Tests the validity check for a group of episodes."""
-    # Mock the transform function to return rewards with sufficient std dev
-    with patch.object(
-        grpo_trainer,
-        'transform_batch_rewards',
-        return_value=torch.tensor([1.0, 2.0, 3.0, 4.0]),
-    ):
-        assert grpo_trainer._check_group_episodes(sample_group_episodes) is True
-
-
-@pytest.mark.parametrize(
-    'episodes, expected_result',
-    [
-        ([], False),  # Empty list
-        ([Mock()] * 3, False),  # List too short
-    ],
-)
-def test_check_group_episodes_invalid_size(
-    grpo_trainer: GRPOTrainer, episodes: List, expected_result: bool
-):
-    """Tests the group check fails for invalid list sizes."""
-    assert grpo_trainer._check_group_episodes(episodes) is expected_result
-
-
-def test_check_group_episodes_low_std(
-    grpo_trainer: GRPOTrainer, sample_group_episodes: List[EpisodeData]
-):
-    """Tests the group check fails for rewards with low standard deviation."""
-    # Mock transform to return rewards with very low std dev
-    low_std_rewards = torch.tensor([1.0, 1.0, 1.0, 1.01])  # Low std
-    grpo_trainer.group_reward_std_threshold = (
-        low_std_rewards.std(unbiased=False) + 0.01
-    )  # Ensure threshold is higher
-
-    with patch.object(
-        grpo_trainer, 'transform_batch_rewards', return_value=low_std_rewards
-    ):
-        assert (
-            grpo_trainer._check_group_episodes(sample_group_episodes) is False
-        )
-        grpo_trainer.logger.debug.assert_called_once()
-        grpo_trainer.logger.log_scalar.assert_called_with(
-            'other/skipped_sample_count', len(low_std_rewards)
-        )
 
 
 def test_train_collate_fn(
@@ -692,11 +600,8 @@ def test_build_train_loader_empty_experience(grpo_trainer: GRPOTrainer):
         grpo_trainer, '_convert_group_episodes_to_transitions', return_value=[]
     ):
         # Mock _check_group_episodes to allow processing empty groups initially
-        with patch.object(
-            grpo_trainer, '_check_group_episodes', return_value=True
-        ):
-            with pytest.raises(ValueError, match='No samples for training'):
-                grpo_trainer.build_train_loader([[]])  # Empty group list
+        with pytest.raises(ValueError, match='No samples for training'):
+            grpo_trainer.build_train_loader([[]])  # Empty group list
 
 
 @patch(
@@ -739,7 +644,7 @@ def test_convert_group_episodes_to_transitions(
     with patch.object(
         grpo_trainer,
         '_normalize_group_rewards',
-        side_effect=lambda x, **kwargs: x,
+        side_effect=lambda x, y, **kwargs: x,
     ):
         transitions = grpo_trainer._convert_group_episodes_to_transitions(
             sample_group_episodes

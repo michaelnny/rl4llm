@@ -347,3 +347,68 @@ class TrainingMixin:
 
         returns *= mask.float()
         return returns
+
+    @staticmethod
+    def compute_masked_gae_advantage(
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        mask: torch.Tensor,
+        gamma: float,
+        gae_lambda: float,
+    ) -> torch.Tensor:
+        """Computes masked generalized advantage estimates for a sequence length k considering only assistant turns
+
+        The advantages are computed in a backwards fashion according to the equation:
+        Âₜ = δₜ + (γλ) * δₜ₊₁ + ... + ... + (γλ)ᵏ⁻ᵗ⁺¹ * δₖ₋₁
+        where δₜ = rₜ + γ * V(sₜ₊₁) - V(sₜ).
+
+        Advantages are zeroed out for steps where mask is 0.
+
+        See Proximal Policy Optimization Algorithms, Schulman et al.:
+        https://arxiv.org/abs/1707.06347
+
+        Args:
+            rewards (torch.Tensor): Float tensor with rewards, shape [seq_len]
+            values (torch.Tensor): Float tensor with value estimate, shape [seq_len]
+            mask (torch.Tensor): Binary mask (0 for user/prompt, 1 for assistant/generation), shape [seq_len]
+            gamma (float): Discount factor
+            gae_lambda (float): GAE lambda parameter.
+
+        Returns:
+            torch.Tensor: Multi-step truncated generalized advantage estimation, shape [seq_len].
+                         Advantages are zero at positions where mask is 0.
+        """
+
+        assert (
+            rewards.dim() == values.dim() == mask.dim() == 1
+        ), 'Inputs must be 1D tensors'
+        assert (
+            rewards.shape == values.shape == mask.shape
+        ), 'Input shapes must match'
+        seq_len = rewards.shape[0]
+
+        advantages = torch.zeros_like(rewards, dtype=rewards.dtype)
+        gae_cumulative = 0.0
+
+        # Convert mask to float for multiplication
+        mask_float = mask.float()
+
+        # Iterate backwards through the sequence
+        for t in reversed(range(seq_len)):
+            # Determine V(s_{t+1}). If t is the last step, V(s_{t+1}) = 0.
+            if t == seq_len - 1:
+                next_value = 0.0
+            else:
+                next_value = values[t + 1]
+
+            # Calculate delta: δₜ = rₜ + γ * V(sₜ₊₁) - V(sₜ)
+            delta = rewards[t] + gamma * next_value - values[t]
+
+            # Calculate GAE for step t: Aₜ = δₜ + γ * λ * Aₜ₊₁
+            gae_cumulative = (
+                delta + gamma * gae_lambda * gae_cumulative * mask_float[t]
+            )
+
+            advantages[t] = gae_cumulative * mask_float[t]
+
+        return advantages

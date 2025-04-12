@@ -1,4 +1,4 @@
-"""Script to run RL GRPO fine-tuning."""
+"""Script to run RL extended GRPO fine-tuning."""
 
 import argparse
 import os
@@ -7,17 +7,23 @@ from typing import Any, Dict, List, Union
 
 import deepspeed
 import torch
+from transformers import PreTrainedTokenizer
 
 from rl4llm.core.base_env import BaseRewardFunction
+from rl4llm.core.distributed import DistributedManager
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import InferenceEnv, LocalLLMEnv
+from rl4llm.envs import (
+    ExploreInferenceEnv,
+    ExploreLocalLLMEnv,
+    InferenceEnv,
+    LocalLLMEnv,
+)
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
 from rl4llm.logging import LoggingManager
-from rl4llm.trainers.grpo_trainer import (
-    DistributedManager,
-    GRPOConfig,
-    GRPOTrainer,
+from rl4llm.trainers.extended_grpo_trainer import (
+    ExtendedGRPOConfig,
+    ExtendedGRPOTrainer,
 )
 from rl4llm.utils import load_yaml_config_file, set_seed
 from rl4llm.utils.model_utils import build_policy_model_and_tokenizer
@@ -28,7 +34,7 @@ def parse_args():
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/grpo_config.yaml',
+        default='./configs/extended_grpo_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -146,6 +152,42 @@ def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
     return accuracy_rewards
 
 
+def prepare_explore_processor_config(
+    tokenizer: PreTrainedTokenizer,
+    grpo_config: ExtendedGRPOConfig,
+    xml_format: bool = False,
+) -> Dict:
+    """Creates the exploration logits processor needed config"""
+
+    special_tokens = [
+        f' {kwd}' for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
+    ]
+    explore_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
+
+    if grpo_config.group_temperature:
+        temperatures = torch.linspace(
+            grpo_config.min_temperature,
+            grpo_config.max_temperature,
+            steps=grpo_config.group_size,
+        )
+        temperatures = torch.round(temperatures, decimals=2)
+    else:
+        temperatures = (
+            torch.ones((grpo_config.group_size,)) * grpo_config.temperature
+        )
+
+    return {
+        'temperatures': temperatures,
+        'explore_steps': grpo_config.explore_steps,
+        'explore_top_k': grpo_config.explore_top_k,
+        'explore_skip_n': explore_skip_n,
+        'explore_decay_rate': grpo_config.explore_decay_rate,
+        'continue_special_tokens': special_tokens,
+        'continue_max_retry': grpo_config.continue_max_retry,
+        'continue_prob': grpo_config.continue_prob,
+    }
+
+
 def main():
     """Starts RL GRPO training loop."""
     if not torch.cuda.is_available():
@@ -165,7 +207,7 @@ def main():
     model_config = job_config['model']
     model_name = model_config['pretrained_model']
     deepspeed_config = job_config['deepspeed']
-    grpo_config = GRPOConfig(**job_config['grpo'])
+    grpo_config = ExtendedGRPOConfig(**job_config['grpo'])
 
     set_seed(seed)
 
@@ -242,17 +284,21 @@ def main():
             )
             ref_model.eval()
 
+    explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
     inference_client = None
-    env_cls = LocalLLMEnv
+
+    eval_env_cls = LocalLLMEnv
+    train_env_cls = ExploreLocalLLMEnv
     if args.use_infer_server:
         inference_client = SGLangClient(
             host=args.infer_host,
             port=args.infer_port,
             cohost_mode=args.infer_cohost_mode,
         )
-        env_cls = InferenceEnv
+        eval_env_cls = InferenceEnv
+        train_env_cls = ExploreInferenceEnv
 
-    train_env = env_cls(
+    train_env = train_env_cls(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
         group_size=grpo_config.group_size,
@@ -260,8 +306,10 @@ def main():
         reward_functions=[AccuracyRewardFunction()],
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
+        **explore_env_args,
     )
-    eval_env = env_cls(
+
+    eval_env = eval_env_cls(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
@@ -271,7 +319,7 @@ def main():
         world_size=dist_manager.world_size,
     )
 
-    trainer = GRPOTrainer(
+    trainer = ExtendedGRPOTrainer(
         config=grpo_config,
         tokenizer=tokenizer,
         policy_engine=policy_engine,

@@ -223,6 +223,10 @@ class BaseEnv(ABC):
             tokenized_dataset, self.world_size, self.rank
         )
 
+        logger.info(
+            f"Env - Rank {self.rank} has {len(self.sharded_dataset)} samples"
+        )
+
         # Setup DataLoader
         self.loader = DataLoader(
             self.sharded_dataset,

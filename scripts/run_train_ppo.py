@@ -1,4 +1,4 @@
-"""Script to run RL GRPO fine-tuning."""
+"""Script to run RL PPO fine-tuning."""
 
 import argparse
 import os
@@ -10,25 +10,31 @@ import torch
 
 from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import InferenceEnv, LocalLLMEnv
+from rl4llm.envs import (
+    InferenceEnv,
+    LocalLLMEnv,
+)
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
 from rl4llm.logging import LoggingManager
-from rl4llm.trainers.grpo_trainer import (
+from rl4llm.trainers.ppo_trainer import (
     DistributedManager,
-    GRPOConfig,
-    GRPOTrainer,
+    PPOConfig,
+    PPOTrainer,
 )
 from rl4llm.utils import load_yaml_config_file, set_seed
-from rl4llm.utils.model_utils import build_policy_model_and_tokenizer
+from rl4llm.utils.model_utils import (
+    build_policy_model_and_tokenizer,
+    build_value_model_and_tokenizer,
+)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='RL GRPO fine-tuning')
+    parser = argparse.ArgumentParser(description='RL PPO fine-tuning')
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/grpo_config.yaml',
+        default='./configs/ppo_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -147,7 +153,7 @@ def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
 
 
 def main():
-    """Starts RL GRPO training loop."""
+    """Starts RL PPO training loop."""
     if not torch.cuda.is_available():
         raise RuntimeError('This script requires supports CUDA.')
 
@@ -162,10 +168,11 @@ def main():
     datasets_config = job_config.get('dataset')
     max_train_samples = datasets_config.get('max_train_samples', None)
     max_test_samples = datasets_config.get('max_test_samples', None)
-    model_config = job_config['model']
-    model_name = model_config['pretrained_model']
+    policy_model_config = job_config['policy_model']
+    value_model_config = job_config['value_model']
+    policy_model_name = policy_model_config['pretrained_model']
     deepspeed_config = job_config['deepspeed']
-    grpo_config = GRPOConfig(**job_config['grpo'])
+    ppo_config = PPOConfig(**job_config['ppo'])
 
     set_seed(seed)
 
@@ -182,9 +189,9 @@ def main():
     logger = LoggingManager(dist_manager, **log_config)
 
     deepspeed_config['train_micro_batch_size_per_gpu'] = (
-        grpo_config.train_micro_batch_size
+        ppo_config.train_micro_batch_size
     )
-    deepspeed_config['train_batch_size'] = grpo_config.train_batch_size
+    deepspeed_config['train_batch_size'] = ppo_config.train_batch_size
 
     train_dataset, eval_dataset = load_multiple_datasets(
         datasets_config['names']
@@ -197,11 +204,15 @@ def main():
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
     policy_model, tokenizer = build_policy_model_and_tokenizer(
-        model_config, torch_dtype
+        policy_model_config, torch_dtype
     )
     policy_model = policy_model.to(dist_manager.device)
+    value_model, _ = build_value_model_and_tokenizer(
+        value_model_config, torch_dtype
+    )
+    value_model = value_model.to(dist_manager.device)
 
-    if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
+    if any([k in policy_model_name for k in ['0.5B', '1B', '1.5B']]):
         template = PROMPT_TEMPLATE_EASY
     else:
         template = PROMPT_TEMPLATE
@@ -217,12 +228,17 @@ def main():
         model_parameters=policy_model.parameters(),
         config_params=deepspeed_config,
     )
+    value_engine, *_ = deepspeed.initialize(
+        model=value_model,
+        model_parameters=value_model.parameters(),
+        config_params=deepspeed_config,
+    )
 
     # Create reference model and optionally use deepspeed sharding
     ref_model = None
-    if grpo_config.kl_loss_coef > 0:
+    if ppo_config.kl_loss_coef > 0:
         ref_model, _ = build_policy_model_and_tokenizer(
-            model_config, torch_dtype
+            policy_model_config, torch_dtype
         )
         for param in ref_model.parameters():
             param.requires_grad = False
@@ -255,7 +271,7 @@ def main():
     train_env = env_cls(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
-        group_size=grpo_config.group_size,
+        group_size=ppo_config.group_size,
         tokenizer=tokenizer,
         reward_functions=[AccuracyRewardFunction()],
         rank=dist_manager.local_rank,
@@ -263,7 +279,7 @@ def main():
     )
     eval_env = env_cls(
         dataset=eval_dataset,
-        batch_size=grpo_config.eval_batch_size,
+        batch_size=ppo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
         tokenizer=tokenizer,
         reward_functions=[AccuracyRewardFunction()],
@@ -271,10 +287,11 @@ def main():
         world_size=dist_manager.world_size,
     )
 
-    trainer = GRPOTrainer(
-        config=grpo_config,
+    trainer = PPOTrainer(
+        config=ppo_config,
         tokenizer=tokenizer,
         policy_engine=policy_engine,
+        value_engine=value_engine,
         dist_manager=dist_manager,
         logger=logger,
         artifacts_path=artifacts_path,

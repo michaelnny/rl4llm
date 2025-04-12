@@ -2,6 +2,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import Dataset
@@ -17,6 +18,170 @@ from transformers import (
 from rl4llm.constants import LOGGER_NAME
 
 logger = logging.getLogger(LOGGER_NAME)
+
+
+from transformers.modeling_outputs import CausalLMOutputWithPast
+
+
+class ModelWrapperWithValueHead(nn.Module):
+    """
+    Wraps a pretrained Hugging Face Causal LM and adds a value head.
+    Uses composition: holds the base model internally.
+    """
+
+    def __init__(self, base_model: PreTrainedModel):
+        super().__init__()
+        self.base_model = base_model
+        # Important: Make the config easily accessible
+        self.config = base_model.config
+
+        # Define the value head
+        self.value_head = nn.Linear(
+            self.config.hidden_size, 1, bias=False
+        )  # Bias often False
+
+        # Initialize the value head (optional but good practice)
+        self._init_value_head()
+
+    def _init_value_head(self):
+        """Initialize value head weights"""
+        nn.init.normal_(self.value_head.weight, std=0.01)
+        if self.value_head.bias is not None:
+            nn.init.zeros_(self.value_head.bias)
+
+    def forward(
+        self, input_ids=None, attention_mask=None, **kwargs
+    ) -> CausalLMOutputWithPast:
+        # Call the original model's forward method
+        kwargs['output_hidden_states'] = True
+        kwargs['return_dict'] = True
+        outputs = self.base_model.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **kwargs,
+        )
+
+        # Shape: [batch_size, sequence_length, hidden_size]
+        last_hidden_state = outputs.hidden_states[-1]
+
+        # Pass the hidden state through the value head
+        # Shape: [batch_size, sequence_length]
+        values = self.value_head(last_hidden_state).squeeze(-1)
+
+        return CausalLMOutputWithPast(logits=values)
+
+
+def build_value_model_and_tokenizer(
+    model_config: Dict, torch_dtype: torch.dtype
+) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
+    """Creates the value model and tokenizer from the given configuration."""
+
+    model_name = model_config['pretrained_model']
+    checkpoint_path = model_config.get('checkpoint_path', None)
+    load_in_4bit = model_config.get('load_in_4bit', False)
+    gradient_checkpointing = model_config.get('gradient_checkpointing', False)
+    flash_attention = model_config.get('flash_attention', None)
+    model_max_length = model_config.get('model_max_length', None)
+
+    logger.info(f"Loading model and tokenizer for {model_name!r}")
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        local_files_only=True if checkpoint_path else False,
+    )
+
+    if model_max_length:
+        tokenizer.model_max_length = model_max_length
+
+    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 1
+    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
+
+    model_args = {
+        'pretrained_model_name_or_path': (
+            checkpoint_path if checkpoint_path else model_name
+        ),
+        'local_files_only': True if checkpoint_path else False,
+        'torch_dtype': torch_dtype,
+        'use_cache': False,
+        'attn_implementation': (
+            'flash_attention_2' if flash_attention else 'eager'
+        ),
+        'pad_token_id': tokenizer.pad_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
+    }
+
+    if load_in_4bit:
+        model_args['quantization_config'] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type='nf4',
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch_dtype,
+        )
+
+    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+        **model_args,
+    )
+    if gradient_checkpointing:
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={'use_reentrant': False}
+        )
+
+    wrapped_model = ModelWrapperWithValueHead(model)
+    return wrapped_model, tokenizer
+
+
+def build_policy_model_and_tokenizer(
+    model_config: Dict, torch_dtype: torch.dtype
+) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
+    """Creates the policy model and tokenizer from the given configuration."""
+
+    model_name = model_config['pretrained_model']
+    checkpoint_path = model_config.get('checkpoint_path', None)
+    load_in_4bit = model_config.get('load_in_4bit', False)
+    gradient_checkpointing = model_config.get('gradient_checkpointing', False)
+    flash_attention = model_config.get('flash_attention', None)
+    model_max_length = model_config.get('model_max_length', None)
+
+    logger.info(f"Loading model and tokenizer for {model_name!r}")
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        local_files_only=True if checkpoint_path else False,
+    )
+
+    if model_max_length:
+        tokenizer.model_max_length = model_max_length
+
+    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 1
+    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
+
+    model_args = {
+        'pretrained_model_name_or_path': (
+            checkpoint_path if checkpoint_path else model_name
+        ),
+        'local_files_only': True if checkpoint_path else False,
+        'torch_dtype': torch_dtype,
+        'use_cache': False,
+        'attn_implementation': (
+            'flash_attention_2' if flash_attention else 'eager'
+        ),
+        'pad_token_id': tokenizer.pad_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
+    }
+
+    if load_in_4bit:
+        model_args['quantization_config'] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type='nf4',
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch_dtype,
+        )
+
+    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(**model_args)
+    if gradient_checkpointing:
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={'use_reentrant': False}
+        )
+
+    return model, tokenizer
 
 
 def build_longformer_classification_model_and_tokenizer(
@@ -70,61 +235,6 @@ def build_longformer_classification_model_and_tokenizer(
         **model_args, num_labels=2, id2label=id2label, label2id=label2id
     )
 
-    if gradient_checkpointing:
-        model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={'use_reentrant': False}
-        )
-
-    return model, tokenizer
-
-
-def build_model_and_tokenizer(
-    model_config: Dict, torch_dtype: torch.dtype
-) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
-    """Creates the model and tokenizer from the given configuration."""
-
-    model_name = model_config['pretrained_model']
-    checkpoint_path = model_config.get('checkpoint_path', None)
-    load_in_4bit = model_config.get('load_in_4bit', False)
-    gradient_checkpointing = model_config.get('gradient_checkpointing', False)
-    flash_attention = model_config.get('flash_attention', None)
-    model_max_length = model_config.get('model_max_length', None)
-
-    logger.info(f"Loading model and tokenizer for {model_name!r}")
-    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        local_files_only=True if checkpoint_path else False,
-    )
-
-    if model_max_length:
-        tokenizer.model_max_length = model_max_length
-
-    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 1
-    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
-
-    model_args = {
-        'pretrained_model_name_or_path': (
-            checkpoint_path if checkpoint_path else model_name
-        ),
-        'local_files_only': True if checkpoint_path else False,
-        'torch_dtype': torch_dtype,
-        'use_cache': False,
-        'attn_implementation': (
-            'flash_attention_2' if flash_attention else 'eager'
-        ),
-        'pad_token_id': tokenizer.pad_token_id,
-        'eos_token_id': tokenizer.eos_token_id,
-    }
-
-    if load_in_4bit:
-        model_args['quantization_config'] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type='nf4',
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch_dtype,
-        )
-
-    model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(**model_args)
     if gradient_checkpointing:
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={'use_reentrant': False}

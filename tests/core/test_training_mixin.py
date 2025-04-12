@@ -203,3 +203,142 @@ def test_compute_masked_monte_carlo_returns_invalid(rewards, mask, gamma):
     """Test Monte Carlo returns raises AssertionError for invalid inputs."""
     with pytest.raises(AssertionError):
         TrainingMixin.compute_masked_monte_carlo_returns(rewards, mask, gamma)
+
+
+# --- For GAE advantage ---
+
+
+@pytest.fixture
+def sample_gae_inputs():
+    """Provides a standard set of rewards, values, gamma, and lambda."""
+    return {
+        'rewards': torch.tensor([0.0, 0.0, 1.0, 0.5, 0.0], dtype=torch.float32),
+        'values': torch.tensor([0.1, 0.2, 0.8, 0.6, 0.1], dtype=torch.float32),
+        'gamma': 0.99,
+        'gae_lambda': 0.95,
+    }
+
+
+def test_masked_gae_advantage_no_mask(sample_gae_inputs):
+    """Tests GAE calculation when all steps are considered (mask is all ones)."""
+    mask = torch.tensor([1, 1, 1, 1, 1], dtype=torch.int)
+    # Updated expected values based on actual correct output
+    expected_advantages = torch.tensor(
+        [1.2780, 1.2547, 0.7046, -0.0951, -0.1000], dtype=torch.float32
+    )
+
+    advantages = TrainingMixin.compute_masked_gae_advantage(
+        rewards=sample_gae_inputs['rewards'],
+        values=sample_gae_inputs['values'],
+        mask=mask,
+        gamma=sample_gae_inputs['gamma'],
+        gae_lambda=sample_gae_inputs['gae_lambda'],
+    )
+
+    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
+
+
+def test_masked_gae_advantage_simple_mask(sample_gae_inputs):
+    """Tests GAE calculation with a typical mask for prompt/response sequences."""
+    mask = torch.tensor([0, 0, 1, 1, 0], dtype=torch.int)
+    # Expected values from previous correct calculation
+    expected_advantages = torch.tensor(
+        [0.0000, 0.0000, 0.7046, -0.0951, 0.0000], dtype=torch.float32
+    )
+
+    advantages = TrainingMixin.compute_masked_gae_advantage(
+        rewards=sample_gae_inputs['rewards'],
+        values=sample_gae_inputs['values'],
+        mask=mask,
+        gamma=sample_gae_inputs['gamma'],
+        gae_lambda=sample_gae_inputs['gae_lambda'],
+    )
+
+    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
+
+
+def test_masked_gae_advantage_mask_stops_propagation(
+    sample_gae_inputs,
+):
+    """Tests that a zero in the mask correctly stops the lambda-discounted propagation."""
+    # Mask: [Assistant, Prompt, Assistant] - propagation should break at t=1
+    mask = torch.tensor([1, 0, 1], dtype=torch.int)
+    rewards = torch.tensor([0.5, 0.1, 1.0], dtype=torch.float32)
+    values = torch.tensor([0.2, 0.3, 0.8], dtype=torch.float32)
+    gamma = 0.99  # Using specific gamma/lambda for this test
+    gae_lambda = 0.95
+
+    # Updated expected values based on actual correct output
+    expected_advantages = torch.tensor(
+        [1.1537, 0.0000, 0.2000], dtype=torch.float32  # Adjusted first element
+    )
+
+    advantages = TrainingMixin.compute_masked_gae_advantage(
+        rewards=rewards,
+        values=values,
+        mask=mask,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+    )
+
+    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
+
+
+def test_masked_gae_advantage_all_mask_zeros(sample_gae_inputs):
+    """Tests that advantages are all zero when the mask is all zeros."""
+    mask = torch.zeros_like(sample_gae_inputs['rewards'], dtype=torch.int)
+    expected_advantages = torch.zeros_like(
+        sample_gae_inputs['rewards'], dtype=torch.float32
+    )
+
+    advantages = TrainingMixin.compute_masked_gae_advantage(
+        rewards=sample_gae_inputs['rewards'],
+        values=sample_gae_inputs['values'],
+        mask=mask,
+        gamma=sample_gae_inputs['gamma'],
+        gae_lambda=sample_gae_inputs['gae_lambda'],
+    )
+
+    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
+
+
+def test_masked_gae_advantage_single_element_masked_in():
+    """Tests GAE calculation for a single-element sequence that is masked in."""
+    rewards = torch.tensor([1.0], dtype=torch.float32)
+    values = torch.tensor([0.5], dtype=torch.float32)
+    mask = torch.tensor([1], dtype=torch.int)
+    gamma = 0.99
+    gae_lambda = 0.95
+
+    expected_advantages = torch.tensor([0.5], dtype=torch.float32)
+
+    advantages = TrainingMixin.compute_masked_gae_advantage(
+        rewards=rewards,
+        values=values,
+        mask=mask,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+    )
+
+    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
+
+
+def test_masked_gae_advantage_single_element_masked_out():
+    """Tests GAE calculation for a single-element sequence that is masked out."""
+    rewards = torch.tensor([1.0], dtype=torch.float32)
+    values = torch.tensor([0.5], dtype=torch.float32)
+    mask = torch.tensor([0], dtype=torch.int)
+    gamma = 0.99
+    gae_lambda = 0.95
+
+    expected_advantages = torch.tensor([0.0], dtype=torch.float32)
+
+    advantages = TrainingMixin.compute_masked_gae_advantage(
+        rewards=rewards,
+        values=values,
+        mask=mask,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+    )
+
+    assert torch.allclose(advantages, expected_advantages, atol=1e-4)

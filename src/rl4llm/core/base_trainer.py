@@ -188,6 +188,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         train_env: BaseEnv,
         eval_env: Optional[BaseEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
+        value_engine: Optional[DeepSpeedEngine] = None,
         reward_transform_fn: Optional[RewardTransform] = None,
         inference_client: Optional[InferenceClient] = None,
         seed: Optional[int] = 175,
@@ -208,6 +209,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.config = config
         self.tokenizer = tokenizer
         self.policy_engine = policy_engine
+        self.value_engine = value_engine
         self.dist_manager = dist_manager
         self.logger = logger
         self.train_env = train_env
@@ -231,6 +233,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
         self.global_step = 0
         self.policy_update_count = 0
+        self.value_update_count = 0
         self.ref_update_count = 0
 
         self.initialize_trainer()
@@ -249,13 +252,6 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     def generate_experience(self) -> List[Any]:
         """
         Collects experience (trajectories, rollouts) from the environment.
-        """
-        pass
-
-    @abstractmethod
-    def compute_loss(self, batch: Any, **kwargs) -> torch.Tensor:
-        """
-        Computes loss for model updates.
         """
         pass
 
@@ -296,14 +292,19 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.clean_up()
 
     def _prepare_for_generation(self):
-        """Switch models to eval mode for rollout."""
+        """Free up GPU memory and switch models to eval mode for rollout."""
 
-        if self.reference_model:
+        # Offload any possible state to free up GPU memory
+        if self.reference_model is not None:
             self.reference_model = self.reference_model.to('cpu')
             self.reference_model.eval()
 
         if self.can_offload_state(self.policy_engine):
             self.policy_engine.offload_states()
+        if self.value_engine is not None:
+            if self.can_offload_state(self.value_engine):
+                self.value_engine.offload_states()
+            self.value_engine = self.value_engine.to('cpu')
 
         if self.is_cohost_inference_engine():
             try:
@@ -319,26 +320,34 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
     def _prepare_for_pre_processing(self):
         """Switch models handle pre-processing (like compute logprobs) before training."""
+
+        # Inference engine is not needed
         if self.is_cohost_inference_engine():
             try:
                 # Try offload GPU RAM caches
                 self.inference_client.release_memory()
-
-                self.policy_engine = self.policy_engine.to(self.device)
             except Exception as e:
                 raise RuntimeError(
                     f"Failed to offload inference engine, error: {str(e)}"
                 )
 
+        self.clean_up()
+
+        # For pre-processing a need all models on CUDA
+        self.policy_engine = self.policy_engine.to(self.device)
         if self.can_offload_state(self.policy_engine):
             self.policy_engine.offload_states()
-
         self.policy_engine.eval()
-        if self.reference_model:
+
+        if self.value_engine is not None:
+            if self.can_offload_state(self.value_engine):
+                self.value_engine.offload_states()
+            self.value_engine = self.value_engine.to(self.device)
+            self.value_engine.eval()
+
+        if self.reference_model is not None:
             self.reference_model = self.reference_model.to(self.device)
             self.reference_model.eval()
-
-        self.clean_up()
 
     def _prepare_for_training(self):
         """Switch models to train mode."""
@@ -346,21 +355,27 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             try:
                 # Try offload GPU RAM caches
                 self.inference_client.release_memory()
-
             except Exception as e:
                 raise RuntimeError(
                     f"Failed to offload inference engine, error: {str(e)}"
                 )
 
-        if self.reference_model:
+        # Training phase we don't need the reference model
+        if self.reference_model is not None:
             self.reference_model = self.reference_model.to('cpu')
 
+        self.clean_up()
+
+        self.policy_engine = self.policy_engine.to(self.device)
         if self.can_offload_state(self.policy_engine):
             self.policy_engine.reload_states()
-
         self.policy_engine.train()
 
-        self.clean_up()
+        if self.value_engine is not None:
+            self.value_engine = self.value_engine.to(self.device)
+            if self.can_offload_state(self.value_engine):
+                self.value_engine.reload_states()
+            self.value_engine.train()
 
     def transform_batch_rewards(
         self, episodes: List[EpisodeData]
@@ -454,19 +469,26 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             return
 
         try:
+            # We first save the full weights to a shared file system
+            # then call the inference server to load the weights
             with tempfile.TemporaryDirectory(
                 prefix=f"ckpt_sync_{self.global_step}_", dir=self.checkpoint_dir
             ) as temp_ckpt_path:
-                # Save full checkpoint.
+
                 self.logger.debug(
                     f"Attempting to save weights to {temp_ckpt_path}"
                 )
+                # Ensure model is on CUDA
+                self.policy_engine = self.policy_engine.to(self.device)
                 self.save_weights_hf_pretrained(
                     self.policy_engine, temp_ckpt_path
                 )
                 self.logger.debug(
                     f"Successfully saved weights to {temp_ckpt_path}"
                 )
+                # Free up GPU memory
+                self.policy_engine = self.policy_engine.to('cpu')
+                self.clean_up()
 
                 # Only the master process interacts with the inference client
                 if self.dist_manager.is_master:
@@ -474,6 +496,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                         self.logger.debug(
                             f"Master process updating inference engine from {temp_ckpt_path}..."
                         )
+                        # Important, make sure inference engine is on CUDA before update the weights
                         self.inference_client.resume_memory()
                         self.inference_client.update_weights_from_file(
                             model_path=temp_ckpt_path
@@ -603,7 +626,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         while self.global_step < self.config.max_steps:
             with self.logger.timer('global_step'):
                 self.logger.info(
-                    f'Step {self.global_step}: Generating rollout on training environment...'
+                    f'Step {self.global_step}: Running rollout on training environment...'
                 )
                 with self.logger.timer('generate_experience'):
                     self._prepare_for_generation()
@@ -626,8 +649,6 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     self.train_step(train_dataloader)
                     self.clean_up()
                 self.dist_manager.barrier()
-
-                self.logger.info('Post-training tasks starting...')
 
                 self.logger.info('Synchronizing policy model...')
                 with self.logger.timer('sync_policy_model'):

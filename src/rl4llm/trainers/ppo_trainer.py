@@ -1,6 +1,7 @@
-"""Implements GRPO trainer"""
+"""Implements PPO trainer"""
 
-from typing import List, Optional, Union
+import math
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeAlias, Union
 
 import torch
 from deepspeed import DeepSpeedEngine
@@ -16,17 +17,17 @@ from rl4llm.envs import EpisodeData, LocalLLMEnv
 from rl4llm.logging import LoggingManager
 
 
-class GRPOConfig(RLConfig):
-    """GRPO config instance for RL LLM"""
+class PPOConfig(RLConfig):
+    """PPO config instance for RL LLM"""
 
-    group_reward_zero_mean: bool = Field(
-        True,
-        description='Normalized group reward to have a zero mean without standard deviation scaling',
+    gae_lambda: float = Field(0.95, gt=0.0, le=1.0, description='GAE lambda')
+    value_clip_eps: float = Field(
+        0.2, ge=0.0, le=1.0, description='PPO value loss clip epsilon'
     )
 
 
 class TransitionData(BaseModel):
-    """GPPO transition for training"""
+    """PPO transition for training"""
 
     states: torch.Tensor = Field(
         ...,
@@ -35,6 +36,10 @@ class TransitionData(BaseModel):
     actions: torch.Tensor = Field(
         ...,
         description='A long tensor for token sequences from t=1, 2, ..., T-1, T',
+    )
+    values: torch.Tensor = Field(
+        ...,
+        description='A tensor for value estimated for sequences from t=1, 2, ..., T-1, T',
     )
     loss_mask: torch.Tensor = Field(
         ...,
@@ -48,6 +53,10 @@ class TransitionData(BaseModel):
         ...,
         description='A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
+    returns: torch.Tensor = Field(
+        ...,
+        description='A float tensor for returns estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
+    )
     advantages: torch.Tensor = Field(
         ...,
         description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
@@ -58,6 +67,7 @@ class TransitionData(BaseModel):
         tensors = [
             values.states,
             values.actions,
+            values.values,
             values.loss_mask,
             values.pi_logprobs,
             values.ref_logprobs,
@@ -79,14 +89,15 @@ class TransitionData(BaseModel):
         arbitrary_types_allowed = True
 
 
-class GRPOTrainer(RLTrainer):
-    """GRPO trainer for LLM"""
+class PPOTrainer(RLTrainer):
+    """PPO trainer for LLM"""
 
     def __init__(
         self,
-        config: GRPOConfig,
+        config: PPOConfig,
         tokenizer: PreTrainedTokenizer,
         policy_engine: DeepSpeedEngine,
+        value_engine: DeepSpeedEngine,
         dist_manager: DistributedManager,
         logger: LoggingManager,
         artifacts_path: str,
@@ -108,47 +119,51 @@ class GRPOTrainer(RLTrainer):
             train_env=train_env,
             eval_env=eval_env,
             ref_model=ref_model,
+            value_engine=value_engine,
             inference_client=inference_client,
             reward_transform_fn=reward_transform_fn,
             seed=seed,
         )
 
-        self.config: GRPOConfig = config  # for better type hinting
+        self.config: PPOConfig = config  # for better type hinting
 
     def initialize_trainer(self):
-        """Initialize GRPO specific settings"""
+        """Initialize PPO specific settings"""
         pass
 
-    def build_train_loader(
-        self, experience: List[List[EpisodeData]]
-    ) -> DataLoader:
+    def build_train_loader(self, experience: List[EpisodeData]) -> DataLoader:
         """Creates a train loader using the collected experiences.
 
         Args:
-            experience (List[List[EpisodeData]]): local rollout episodes in group
+            experience (List[EpisodeData]): local rollout episodes
         Returns:
             DataLoader: A dataloader ready for training.
         """
-        flatted_samples = []
-        for group_eps in experience:
-            # we need to process the samples from same question outcome
-            # in a single group for GRPO
-            samples = self._convert_group_episodes_to_transitions(group_eps)
-            if samples:
-                flatted_samples.extend(samples)
 
-        if not flatted_samples:
+        if not experience:
+            raise ValueError('No samples for training')
+
+        samples = []
+
+        for start_idx in range(0, len(experience), self.config.group_size):
+            end_idx = start_idx + self.config.group_size
+            subsets = experience[start_idx:end_idx]
+            processed = self._convert_batch_episodes_to_transitions(subsets)
+            if processed:
+                samples.extend(processed)
+
+        if not samples:
             raise ValueError('No samples for training')
 
         local_rollout_size = (
             self.config.train_rollout_size // self.dist_manager.world_size
         )
 
-        if len(flatted_samples) > local_rollout_size:
-            flatted_samples = flatted_samples[:local_rollout_size]
+        if len(samples) > local_rollout_size:
+            samples = samples[:local_rollout_size]
 
         data_loader = DataLoader(
-            flatted_samples,
+            samples,
             batch_size=self.config.train_micro_batch_size,
             shuffle=True,
             pin_memory=self.device.type == 'cuda',
@@ -158,14 +173,16 @@ class GRPOTrainer(RLTrainer):
 
         return data_loader
 
-    def compute_loss(
-        self, pi_logits: torch.Tensor, experience_batch: TransitionData
+    def compute_policy_loss(
+        self,
+        pi_logits: torch.Tensor,
+        experience_batch: TransitionData,
     ) -> torch.Tensor:
-        """Compute GRPO loss for a single training batch
+        """Compute policy loss for a single training batch
 
         Args:
             pi_logits (torch.Tensor): Raw logits of actions computed using
-                current policy, shape [batch_size, seq_len]
+                current policy model, shape [batch_size, seq_len]
             experience_batch (TransitionData): A batch of samples collected
                 during generation
         Returns:
@@ -203,7 +220,7 @@ class GRPOTrainer(RLTrainer):
         # Compute entropy for the policy
         # Convert log probabilities to probabilities first
         probs = torch.exp(pi_logprobs)
-        entropies = -torch.sum(probs * pi_logprobs * loss_mask, dim=-1)
+        entropies = torch.sum(probs * pi_logprobs * loss_mask, dim=-1)
         entropy = entropies.mean()
         entropy_loss = -(self.config.entropy_loss_coef * entropy)
 
@@ -216,6 +233,7 @@ class GRPOTrainer(RLTrainer):
         self.logger.log_scalar('policy/clipfrac', clipfrac.detach().item())
 
         loss = pg_loss + entropy_loss
+
         # Compute KL divergence if coefficient is positive
         if self.config.kl_loss_coef > 0:
             ref_logprobs = experience_batch.ref_logprobs.to(self.device)
@@ -226,10 +244,6 @@ class GRPOTrainer(RLTrainer):
                 - 1
             )
 
-            # # Clamp for stability
-            # per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
-            # per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
-
             kl = self.masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
@@ -239,36 +253,61 @@ class GRPOTrainer(RLTrainer):
 
         return loss
 
+    def compute_value_loss(
+        self,
+        pred_values: torch.Tensor,
+        experience_batch: TransitionData,
+    ) -> torch.Tensor:
+        """Compute value loss for a single training batch
+
+        Args:
+            pred_values (torch.Tensor): Predicted state values computed using
+                current value model, shape [batch_size, seq_len]
+            experience_batch (TransitionData): A batch of samples collected
+                during generation
+        Returns:
+            torch.Tensor: The total loss tensor
+        """
+        values = experience_batch.values.to(self.device)
+        returns = experience_batch.returns.to(self.device)
+        loss_mask = experience_batch.loss_mask.to(self.device)
+
+        # Value loss
+        vpred_clipped = torch.clamp(
+            pred_values,
+            values - self.config.value_clip_eps,
+            values + self.config.value_clip_eps,
+        )
+        vf_losses1 = torch.square(pred_values - returns)
+        vf_losses2 = torch.square(vpred_clipped - returns)
+        vf_losses = 0.5 * torch.max(vf_losses1, vf_losses2)
+        vf_loss = self.masked_mean(vf_losses, loss_mask, dim=1).mean()
+
+        with torch.no_grad():
+            pred_error = self.masked_mean(
+                torch.square(pred_values.detach() - returns.detach()), loss_mask
+            )
+            clipfrac = self.masked_mean(
+                torch.gt(vf_losses2, vf_losses1), loss_mask
+            )
+
+        self.logger.log_scalar('train/vf_loss', vf_loss.detach().item())
+        self.logger.log_scalar('value/error', pred_error.detach().item())
+        self.logger.log_scalar('value/clipfrac', clipfrac.detach().item())
+
+        return vf_loss
+
     def train_step(self, train_dataloader: DataLoader):
-        """Performs the policy update using collected rollout."""
+        """Performs the policy and value models update using collected rollout."""
 
-        for _ in range(self.config.num_updates):
-            for i, micro_batch in enumerate(train_dataloader):
-                input_ids = micro_batch.states.to(self.device)
-                attention_mask = (
-                    input_ids != self.tokenizer.pad_token_id
-                ).bool()
-                pi_logits = self.policy_engine.forward(
-                    input_ids=input_ids, attention_mask=attention_mask
-                ).logits
+        self.value_engine = self.value_engine.to('cpu')
+        self.clean_up()
+        self._train_policy_step(train_dataloader)
 
-                loss = self.compute_loss(pi_logits, micro_batch)
-
-                del micro_batch, input_ids, attention_mask, pi_logits
-                self.clean_up()
-
-                self.policy_engine.backward(loss)
-                self.policy_engine.step()
-
-                if self.policy_engine.is_gradient_accumulation_boundary():
-                    self.policy_update_count += 1
-                    self.logger.log_scalar(
-                        'train/policy_update', self.policy_update_count
-                    )
-                    self.logger.log_scalar(
-                        'train/learning_rate',
-                        self.policy_engine.get_lr()[0],
-                    )
+        self.policy_engine = self.policy_engine.to('cpu')
+        self.clean_up()
+        self.value_engine = self.value_engine.to(self.device)
+        self._train_value_step(train_dataloader)
 
     @torch.inference_mode()
     def evaluate_step(self):
@@ -340,17 +379,12 @@ class GRPOTrainer(RLTrainer):
 
         with self.unwrapped_model_for_generation() as policy_model:
             while local_count < local_rollout_size:
-
                 outputs = self.train_env.rollout(
                     policy_model, train_sampling_params
                 )
-
                 if outputs:
-                    # IMPORTANT: do not flatten the episodes yet
-                    # as we need to normalize the rewards on group level
-                    collected_episodes.extend([outputs])
+                    collected_episodes.extend(outputs)
                     local_count += len(outputs)
-
                     self.log_batch_episodes(
                         self._train_phase, outputs, self.global_step
                     )
@@ -358,7 +392,7 @@ class GRPOTrainer(RLTrainer):
         return collected_episodes
 
     @torch.no_grad()
-    def _convert_group_episodes_to_transitions(
+    def _convert_batch_episodes_to_transitions(
         self,
         episodes: List[EpisodeData],
     ) -> List[TransitionData]:
@@ -372,15 +406,9 @@ class GRPOTrainer(RLTrainer):
 
         if not episodes:
             return []
-        if len(episodes) < 4:
-            raise ValueError('Expect group episodes to be greater than 4')
 
         # Training specific pre-processing
         rewards = self.transform_batch_rewards(episodes).cpu()
-
-        normalized_rewards = self._normalize_group_rewards(
-            rewards, self.config.group_reward_zero_mean
-        )
 
         # Prepare batched sequences for model forward pass
         sequences = [
@@ -438,11 +466,16 @@ class GRPOTrainer(RLTrainer):
             # Using policy logprobs ensures KL is zero if ref model not used
             batch_ref_logprobs = batch_pi_logprobs.clone()
 
+        batch_values: torch.Tensor = self.value_engine.forward(
+            input_ids=batch_states, attention_mask=batch_attention_mask
+        ).logits  # [batch_size, seq_len]
+
         del batch_attention_mask
 
         # Move results back to CPU for per-episode processing and storage
         batch_states = batch_states.cpu()
         batch_actions = batch_actions.cpu()
+        batch_values = batch_values.cpu()
         batch_pi_logprobs = batch_pi_logprobs.cpu()
         batch_ref_logprobs = batch_ref_logprobs.cpu()
 
@@ -462,6 +495,7 @@ class GRPOTrainer(RLTrainer):
 
             states = state_sequences[i]
             actions = action_sequences[i]
+            values = batch_values[i, : len(actions)]
             pi_logprobs = batch_pi_logprobs[i, : len(actions)]
             ref_logprobs = batch_ref_logprobs[i, : len(actions)]
 
@@ -478,17 +512,24 @@ class GRPOTrainer(RLTrainer):
 
             # Rewards are all zero for non-terminal step, and use the normalized reward for terminal step
             seq_rewards = torch.zeros_like(actions, dtype=self.torch_dtype)
-            seq_rewards[-1] = normalized_rewards[i]
+            seq_rewards[-1] = rewards[i]
 
-            returns = self.compute_masked_monte_carlo_returns(
-                seq_rewards, loss_mask, self.config.gamma
+            # Compute GAE advantages
+            advantages = self.compute_masked_gae_advantage(
+                seq_rewards,
+                values,
+                loss_mask,
+                self.config.gamma,
+                self.config.gae_lambda,
             )
+            returns = (advantages + values) * loss_mask
 
             assert (
                 states.shape
                 == actions.shape
                 == pi_logprobs.shape
                 == ref_logprobs.shape
+                == advantages.shape
                 == returns.shape
                 == loss_mask.shape
             )
@@ -497,41 +538,16 @@ class GRPOTrainer(RLTrainer):
                 TransitionData(
                     states=states,
                     actions=actions,
+                    values=values,
                     loss_mask=loss_mask,
-                    advantages=returns,
+                    advantages=advantages,
+                    returns=returns,
                     pi_logprobs=pi_logprobs,
                     ref_logprobs=ref_logprobs,
                 )
             )
 
         return transitions
-
-    def _normalize_group_rewards(
-        self,
-        rewards: torch.Tensor,
-        zero_mean_only: bool = True,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
-        """
-        Normalize group rewards by subtracting the mean and dividing by the standard deviation.
-
-        Args:
-            rewards (torch.Tensor): List of rewards for the group.
-            eps (float): Small value to prevent division by zero.
-        Returns:
-            torch.Tensor: Normalized rewards.
-        """
-        assert eps > 0.0, 'Epsilon must be positive'
-        assert rewards.dim() == 1, 'Rewards must be 1-dimensional'
-        if len(rewards) < 4:
-            raise ValueError('Number of group rewards must be greater than 4')
-
-        mean_reward = rewards.mean()
-        std_reward = rewards.std(unbiased=False)
-        if zero_mean_only:
-            return rewards - mean_reward
-
-        return (rewards - mean_reward) / (std_reward + eps)
 
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""
@@ -557,7 +573,25 @@ class GRPOTrainer(RLTrainer):
             padding_value=False,
         ).bool()
 
-        # Pad advantages, pi_logprobs, and ref_logprobs (float tensors)
+        # Pad values, return, advantages, pi_logprobs, and ref_logprobs (float tensors)
+        batch_values = (
+            pad_sequence(
+                [item.values for item in batch],
+                batch_first=True,
+                padding_value=0.0,
+            )
+            .float()
+            .to(torch_dtype)
+        )
+        batch_returns = (
+            pad_sequence(
+                [item.returns for item in batch],
+                batch_first=True,
+                padding_value=0.0,
+            )
+            .float()
+            .to(torch_dtype)
+        )
         batch_advantages = (
             pad_sequence(
                 [item.advantages for item in batch],
@@ -589,8 +623,70 @@ class GRPOTrainer(RLTrainer):
         return TransitionData(
             states=batch_states,
             actions=batch_actions,
+            values=batch_values,
             loss_mask=batch_loss_mask,
             pi_logprobs=batch_pi_logprobs,
             ref_logprobs=batch_ref_logprobs,
+            returns=batch_returns,
             advantages=batch_advantages,
         )
+
+    def _train_policy_step(self, train_dataloader: DataLoader):
+        """Performs the policy update using collected rollout."""
+        for _ in range(self.config.num_updates):
+            for i, micro_batch in enumerate(train_dataloader):
+                input_ids = micro_batch.states.to(self.device)
+                attention_mask = (
+                    input_ids != self.tokenizer.pad_token_id
+                ).bool()
+                pi_logits = self.policy_engine.forward(
+                    input_ids=input_ids, attention_mask=attention_mask
+                ).logits
+
+                loss = self.compute_policy_loss(pi_logits, micro_batch)
+
+                del (micro_batch, input_ids, attention_mask, pi_logits)
+                self.clean_up()
+
+                self.policy_engine.backward(loss)
+                self.policy_engine.step()
+
+                if self.policy_engine.is_gradient_accumulation_boundary():
+                    self.policy_update_count += 1
+                    self.logger.log_scalar(
+                        'train/policy_update', self.policy_update_count
+                    )
+                    self.logger.log_scalar(
+                        'train/policy_learning_rate',
+                        self.policy_engine.get_lr()[0],
+                    )
+
+    def _train_value_step(self, train_dataloader: DataLoader):
+        """Performs the value update using collected rollout."""
+        for _ in range(self.config.num_updates):
+            for i, micro_batch in enumerate(train_dataloader):
+                input_ids = micro_batch.states.to(self.device)
+                attention_mask = (
+                    input_ids != self.tokenizer.pad_token_id
+                ).bool()
+                pred_values = self.value_engine.forward(
+                    input_ids=input_ids, attention_mask=attention_mask
+                ).logits
+
+                loss = self.compute_value_loss(pred_values, micro_batch)
+
+                del (micro_batch, input_ids, attention_mask, pred_values)
+                self.clean_up()
+
+                self.value_engine.backward(loss)
+                self.value_engine.step()
+
+                if self.value_engine.is_gradient_accumulation_boundary():
+                    self.value_update_count += 1
+                    self.logger.log_scalar(
+                        'train/value_update', self.value_update_count
+                    )
+                    self.logger.log_scalar(
+                        'train/value_learning_rate',
+                        self.value_engine.get_lr()[0],
+                    )

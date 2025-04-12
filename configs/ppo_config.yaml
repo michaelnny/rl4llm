@@ -1,8 +1,8 @@
-# RL GRPO config
+# RL PPO config
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_ppo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -17,43 +17,71 @@ dataset:
   # max_train_samples: 4096             # for a quick run
   # max_test_samples: 1024        
 
-model:
+# IMPORTANT: policy and value models must from the same family/serious (the same tokenizer)
+policy_model:
   pretrained_model: "Qwen/Qwen2.5-0.5B"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
   model_max_length: 4000
 
-grpo:
-  max_steps: 200
+value_model:
+  pretrained_model: "Qwen/Qwen2.5-0.5B"
+  load_in_4bit: false
+  gradient_checkpointing: true
+  flash_attention: true
+  model_max_length: 4000
+
+ppo:
+  max_steps: 100
   train_rollout_size: 512
-  num_updates: 1
-  train_micro_batch_size: 8
+  num_updates: 2
+  train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
-  clip_eps: 0.2                         # PPO-style policy clip parameter
-  group_reward_zero_mean: true          # group reward is normalized to have a zero mean without standard deviation scaling    
+  clip_eps: 0.2                         # policy clip parameter
+  value_clip_eps: 0.2                   # value clip parameter
+  normalize_rewards: false              # not supported???
   normalize_advantages: false
   kl_loss_coef: 0.0
   entropy_loss_coef: 0.0
   sync_reference_interval: 0            # every N global steps
 
-  # for train rollout
+  # for sample generation
   max_prompt_tokens: 512                # skip sample question that's too long
-  group_size: 16                        # for each sample we generate a group of answers
-  max_completion_tokens: 800
-  temperature: 0.9                      
-  repetition_penalty: 1.0
+  group_size: 8                        # for each sample we generate a group of answers
+  max_completion_tokens: 1000
+  temperature: 0.9                      # not used if using group_temperature
+  repetition_penalty: 1.1
   top_p: 0.95
   top_k: -1                             # -1 to disable
 
   # evaluation
   eval_rollout_size: 1024    
   eval_batch_size: 64
-  eval_interval: 20                     # every N global steps
+  eval_interval: 0                     # every N global steps
 
   # others
   checkpoint_interval: 100              # every N global steps
+
+  # # exploration generation
+  # group_temperature: true             # group temperature where we balance exploration and exploitation
+  # min_temperature: 0.6
+  # max_temperature: 1.0
+
+  # # control rate of explore
+  # explore_init_epsilon: 0.8           # exploration epsilon decay
+  # explore_min_epsilon: 0.0
+  # explore_decay_steps: 50
+
+  # # exploring start
+  # explore_steps: 10                    # initial start steps to do random sampling
+  # explore_top_k: 100                   # Top K tokens to random sample during initial start steps
+  # explore_decay_rate: 0.9
+  
+  # # continue generation with failed outcomes
+  # continue_prob: 0.5
+  # continue_max_retry: 1               # max number of retry by adding the special token and continue generation
 
 
 deepspeed:

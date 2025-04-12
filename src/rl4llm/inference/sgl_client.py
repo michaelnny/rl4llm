@@ -88,7 +88,7 @@ class SGLangClient(InferenceClient):
         result = self._request('POST', '/release_memory_occupation', {})
         self._release_called = True
         self._resume_called = False
-        time.sleep(2)
+
         self.logger.info(f"Memory release request response: {result}")
         return result
 
@@ -112,7 +112,7 @@ class SGLangClient(InferenceClient):
         result = self._request('POST', '/resume_memory_occupation', {})
         self._resume_called = True
         self._release_called = False
-        time.sleep(2)
+
         self.logger.info(f"Memory resume request response: {result}")
 
     def update_weights_from_file(
