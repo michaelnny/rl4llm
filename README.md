@@ -9,7 +9,8 @@ This project provides an easy-to-use, research-friendly framework to fine-tune L
 - **Scalable Training**: Uses DeepSpeed for optimized model training.
 - **Clean Architecture**: Clearly separates low-level operations from algorithmic logic.
 
-> **Note:** Currently only tested on single-node setups with a tiny size LLM. Need support/volunteers to help with heavy testing and improvements.
+> [!IMPORTANT]
+> Currently only tested on single-node setups with a tiny size LLM. Need support/volunteers to help with heavy testing and improvements.
 
 
 
@@ -48,7 +49,8 @@ Here’s a simple diagram:
 └──────────────────────┘
 ```
 
-> **Note:** Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-host mode`.
+> [!TIP]
+> Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-host mode`.
 
 
 ## Sample Generation Environments
@@ -166,8 +168,10 @@ PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 
 ```
 
 
+> [!NOTE]
 > If running SGLang inference and deepspeed training on the same server with co-host mode, make sure use the `--enable-memory-saver`, this requires install the `pip install torch-memory-saver`.
 
+> [!NOTE]
 > We use model checkpoint file to sync the weights between training instance and the SGLang inference engine. If you run inference engine and training in separate servers, make sure you have a shared file system between them. The weights saving path is defined at the `artifacts_path` when launching the trainer.
 
 
