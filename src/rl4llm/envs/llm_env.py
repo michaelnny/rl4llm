@@ -64,14 +64,7 @@ class LocalLLMEnv(BaseEnv):
             for k, v in sampling_params.items()
             if k not in ['input_ids', 'attention_mask', 'num_return_sequences']
         }
-        sampling_params.update(
-            {
-                'return_dict_in_generate': True,
-                'output_scores': False,
-                'pad_token_id': self.pad_token_id,
-                'eos_token_id': self.eos_token_id,
-            }
-        )
+
         output = llm.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -173,6 +166,19 @@ class LocalLLMEnv(BaseEnv):
             raise ValueError(
                 'Set group_size during initialization instead of using num_return_sequences.'
             )
+
+        # Add more common generation arguments
+        sampling_params.update(
+            {
+                'eos_token_id': self.tokenizer.eos_token_id,
+                'pad_token_id': self.tokenizer.pad_token_id,
+                'use_cache': True,
+                'output_scores': False,
+                'output_logits': False,
+                'return_dict_in_generate': True,
+                'return_legacy_cache': False,
+            }
+        )
         state = self._reset()
         if state is None:
             logger.warning(

@@ -198,7 +198,7 @@ class InferenceClient(ABC):
     @abstractmethod
     def generate(
         self,
-        text: Optional[Union[str, List[str]]] = None,
+        prompts: Optional[Union[str, List[str]]] = None,
         sampling_params: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:

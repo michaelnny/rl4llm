@@ -11,19 +11,19 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_inference_client import InferenceClient
-from rl4llm.core.base_trainer import RLConfig, RLTrainer
+from rl4llm.core.base_trainer import RewardTransform, RLConfig, RLTrainer
 from rl4llm.core.distributed import DistributedManager
 from rl4llm.envs import EpisodeData, LocalLLMEnv
 from rl4llm.logging import LoggingManager
 
-# Define the custom type
-RewardTransform: TypeAlias = Optional[
-    Callable[[Dict[str, List[float]]], torch.Tensor]
-]
-
 
 class GRPOConfig(RLConfig):
     """GRPO config instance for RL LLM"""
+
+    filter_low_reward_std: Optional[bool] = Field(
+        True,
+        description='Skip using group samples with low reward std for training',
+    )
 
     # enhancements to encourage exploration
     group_temperature: Optional[bool] = Field(
@@ -63,17 +63,17 @@ class GRPOConfig(RLConfig):
     explore_decay_rate: Optional[float] = Field(
         0.8, gt=0, le=1, description='Rate to decay explore top-k'
     )
-    replace_max_per_seq: Optional[int] = Field(
+    continue_max_retry: Optional[int] = Field(
         0,
         ge=0,
         le=10,
-        description='Maximum number of token replacements to the same sequence during exploration',
+        description='Maximum number of continue generation by adding the special token and continue generation',
     )
-    replace_prob: Optional[float] = Field(
+    continue_prob: Optional[float] = Field(
         0,
         ge=0,
         le=1.0,
-        description='Probability to replace source token with target token if conditions are meet',
+        description='Probability to continue generation',
     )
 
 
@@ -144,15 +144,11 @@ class GRPOTrainer(RLTrainer):
         artifacts_path: str,
         train_env: LocalLLMEnv,
         eval_env: Optional[LocalLLMEnv] = None,
-        inference_client: Optional[InferenceClient] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
+        inference_client: Optional[InferenceClient] = None,
         reward_transform_fn: Optional[RewardTransform] = None,
         seed: Optional[int] = 175,
     ):
-        if len(train_env.reward_functions) > 1 and not reward_transform_fn:
-            raise ValueError(
-                'Reward aggregator is required when using mixed reward functions.'
-            )
 
         super().__init__(
             config=config,
@@ -163,13 +159,13 @@ class GRPOTrainer(RLTrainer):
             artifacts_path=artifacts_path,
             train_env=train_env,
             eval_env=eval_env,
-            inference_client=inference_client,
             ref_model=ref_model,
+            inference_client=inference_client,
+            reward_transform_fn=reward_transform_fn,
             seed=seed,
         )
 
-        self.config: GRPOConfig = config
-        self.reward_transform_fn = reward_transform_fn
+        self.config: GRPOConfig = config  # for better type hinting
 
     def initialize_trainer(self):
         """Initialize GRPO specific settings"""
@@ -360,20 +356,12 @@ class GRPOTrainer(RLTrainer):
             }
         else:
             eval_sampling_params = {
-                'eos_token_id': self.tokenizer.eos_token_id,
-                'pad_token_id': self.tokenizer.pad_token_id,
                 'max_new_tokens': self.config.max_completion_tokens,
                 'temperature': None,
                 'top_p': None,
                 'top_k': None,
                 'repetition_penalty': None,
-                'num_return_sequences': 1,
                 'do_sample': False,
-                'use_cache': True,
-                'output_scores': False,
-                'output_logits': False,
-                'return_dict_in_generate': True,
-                'return_legacy_cache': False,
             }
 
         with self.unwrapped_model_for_generation() as policy_model:
@@ -399,8 +387,6 @@ class GRPOTrainer(RLTrainer):
             }
         else:
             train_sampling_params = {
-                'eos_token_id': self.tokenizer.eos_token_id,
-                'pad_token_id': self.tokenizer.pad_token_id,
                 'max_new_tokens': self.config.max_completion_tokens,
                 'temperature': self.config.temperature,
                 'top_p': self.config.top_p,
@@ -408,11 +394,6 @@ class GRPOTrainer(RLTrainer):
                 'repetition_penalty': self.config.repetition_penalty,
                 'num_return_sequences': 1,  # we handle the group size inside the LocalLLMEnv
                 'do_sample': True,
-                'use_cache': True,
-                'output_scores': False,
-                'output_logits': False,
-                'return_dict_in_generate': True,
-                'return_legacy_cache': False,
             }
 
         # we always use batch size of 1 during training roll out
@@ -453,62 +434,22 @@ class GRPOTrainer(RLTrainer):
         if len(episodes) < 4:
             return False
 
-        rewards = self._transform_group_rewards(episodes).cpu()
-
-        # discard samples with rewards of low std, as they leads to zero advantages -> zero gradients
-        if (
-            torch.std(rewards, unbiased=False)
-            <= self.group_reward_std_threshold
-        ):
-            self.logger.debug(
-                f"Skipping group samples with rewards of low std, minimum group reward std: {self.group_reward_std_threshold:.4f}"
-            )
-            self.logger.log_scalar('other/skipped_sample_count', len(rewards))
-            return False
+        if self.config.filter_low_reward_std:
+            # Discard samples with rewards of low std, as they leads to zero advantages -> zero gradients
+            rewards = self.transform_batch_rewards(episodes).cpu()
+            if (
+                torch.std(rewards, unbiased=False)
+                <= self.group_reward_std_threshold
+            ):
+                self.logger.debug(
+                    f"Skipping group samples with rewards of low std, minimum group reward std: {self.group_reward_std_threshold:.4f}"
+                )
+                self.logger.log_scalar(
+                    'other/skipped_sample_count', len(rewards)
+                )
+                return False
 
         return True
-
-    def _transform_group_rewards(
-        self, episodes: List[EpisodeData]
-    ) -> torch.Tensor:
-        """
-        Aggregate and transform rewards for a group of episodes, handling multiple reward functions.
-
-        Args:
-            episodes: List of EpisodeData objects containing reward dictionaries
-
-        Returns:
-            torch.Tensor containing transformed rewards
-        """
-        if not episodes:
-            raise ValueError('Episodes list cannot be empty')
-
-        try:
-            reward_names: List[str] = episodes[0].reward_dict.keys()
-        except AttributeError:
-            raise ValueError(
-                'EpisodeData objects must have reward_dict attribute'
-            )
-
-        num_episodes = len(episodes)
-        flattened: Dict[str, torch.Tensor] = {
-            name: torch.zeros(num_episodes, dtype=self.torch_dtype)
-            for name in reward_names
-        }
-
-        for i, ep in enumerate(episodes):
-            for name in reward_names:
-                flattened[name][i] = ep.reward_dict[name]
-
-        # Early return for single reward case
-        if len(reward_names) == 1:
-            return flattened[next(iter(reward_names))]
-
-        # Apply transformation function
-        try:
-            return self.reward_transform_fn(flattened)
-        except Exception as e:
-            raise RuntimeError(f"Reward transformation failed: {str(e)}")
 
     @torch.no_grad()
     def _convert_group_episodes_to_transitions(
@@ -528,8 +469,8 @@ class GRPOTrainer(RLTrainer):
         if len(episodes) < 4:
             raise ValueError('Expect group episodes to be greater than 4')
 
-        # Training specific processing
-        rewards = self._transform_group_rewards(episodes).cpu()
+        # Training specific pre-processing
+        rewards = self.transform_batch_rewards(episodes).cpu()
 
         normalized_rewards = (
             self._normalize_group_rewards(rewards)
@@ -632,7 +573,8 @@ class GRPOTrainer(RLTrainer):
             assert loss_mask.sum().item() == ep.completion_length
 
             returns = normalized_rewards[i] * loss_mask.cpu()
-            assert torch.nonzero(returns).sum() > 0
+            if self.config.filter_low_reward_std:
+                assert torch.nonzero(returns).sum() > 0
 
             assert (
                 states.shape

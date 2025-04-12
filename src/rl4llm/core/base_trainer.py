@@ -40,6 +40,11 @@ from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.training_mixin import TrainingMixin
 from rl4llm.logging import LoggingManager
 
+# Define the custom type
+RewardTransform: TypeAlias = Optional[
+    Callable[[Dict[str, List[float]]], torch.Tensor]
+]
+
 
 class RLConfig(BaseModel):
     """Basic config for RL fine-tuning for LLM"""
@@ -183,6 +188,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         train_env: BaseEnv,
         eval_env: Optional[BaseEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
+        reward_transform_fn: Optional[RewardTransform] = None,
         inference_client: Optional[InferenceClient] = None,
         seed: Optional[int] = 175,
     ):
@@ -193,6 +199,10 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         if config.eval_rollout_size % dist_manager.world_size != 0:
             raise ValueError(
                 'Evaluation rollout size must be divisible by world size'
+            )
+        if len(train_env.reward_functions) > 1 and not reward_transform_fn:
+            raise ValueError(
+                'Reward aggregator is required when using mixed reward functions.'
             )
 
         self.config = config
@@ -217,6 +227,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         ] = ref_model
 
         self.inference_client = inference_client
+        self.reward_transform_fn = reward_transform_fn
 
         self.global_step = 0
         self.policy_update_count = 0
@@ -350,6 +361,48 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.policy_engine.train()
 
         self.clean_up()
+
+    def transform_batch_rewards(
+        self, episodes: List[EpisodeData]
+    ) -> torch.Tensor:
+        """
+        Aggregate and transform rewards for a batch of episodes, handling multiple reward functions.
+
+        Args:
+            episodes: List of EpisodeData objects containing reward dictionaries
+
+        Returns:
+            torch.Tensor containing transformed rewards
+        """
+        if not episodes:
+            raise ValueError('Episodes list cannot be empty')
+
+        try:
+            reward_names: List[str] = episodes[0].reward_dict.keys()
+        except AttributeError:
+            raise ValueError(
+                'EpisodeData objects must have reward_dict attribute'
+            )
+
+        num_episodes = len(episodes)
+        flattened: Dict[str, torch.Tensor] = {
+            name: torch.zeros(num_episodes, dtype=self.torch_dtype)
+            for name in reward_names
+        }
+
+        for i, ep in enumerate(episodes):
+            for name in reward_names:
+                flattened[name][i] = ep.reward_dict[name]
+
+        # Early return for single reward case
+        if len(reward_names) == 1:
+            return flattened[next(iter(reward_names))]
+
+        # Apply transformation function
+        try:
+            return self.reward_transform_fn(flattened)
+        except Exception as e:
+            raise RuntimeError(f"Reward transformation failed: {str(e)}")
 
     def sync_reference_model(self):
         """Copies current policy weights to reference model."""
@@ -490,11 +543,11 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             # Save data to external file
             data_to_log = {
                 'rank': self.dist_manager.global_rank,
-                'prompt_text': ep.prompt_text,
+                'timestamp': ep.timestamp,
                 'prompt_length': ep.prompt_length,
                 'completion_length': ep.completion_length,
+                'prompt_text': ep.prompt_text,
                 'completion_text': ep.completion_text,
-                'timestamp': ep.timestamp,
                 **ep.reward_dict,
             }
             if ep.raw_data and 'ground_truth' in ep.raw_data:
@@ -540,7 +593,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.dist_manager.synchronize()
 
         if self.config.eval_interval > 0 and self.eval_env:
-            self.logger.info('Performing initial evaluation before training...')
+            self.logger.info('Running initial evaluation before training...')
             with self.logger.timer('evaluate_step'):
                 self._prepare_for_generation()
                 self.evaluate_step()

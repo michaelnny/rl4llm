@@ -1,5 +1,6 @@
 """A simple HTTP based client for SGLang inference server"""
 
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from rl4llm.core.base_inference_client import (
@@ -31,7 +32,7 @@ class SGLangClient(InferenceClient):
 
     def generate(
         self,
-        text: Optional[Union[str, List[str]]] = None,
+        prompts: Optional[Union[str, List[str]]],
         sampling_params: Optional[Dict[str, Any]] = None,
         # Add other potential GenerateReqInput fields here if needed
         **kwargs: Any,  # Allow passthrough for future/uncommon params
@@ -39,10 +40,8 @@ class SGLangClient(InferenceClient):
         """
         Sends a non-streaming generation request to the SGLang server.
 
-        Provide *one* of `text`, `input_ids`, or `input_embeds`.
-
         Args:
-            text: Input prompt string or list of prompts for batching.
+            prompts: Input prompt string or list of prompts for batching.
             sampling_params: Dictionary of sampling parameters (e.g., temperature, max_new_tokens).
             **kwargs: Additional parameters allowed by GenerateReqInput.
 
@@ -53,17 +52,17 @@ class SGLangClient(InferenceClient):
             InferenceClientError: If the request fails or the server returns an error.
             ValueError: If incorrect input arguments are provided.
         """
-        if text is None or len(text) == 0:
+        if prompts is None or len(prompts) == 0:
             raise ValueError("Provide exactly valid input 'text'.")
 
         payload = {
             'sampling_params': sampling_params or {},
-            'stream': False,  # Explicitly set stream to False
-            **kwargs,  # Include any extra parameters first
+            'stream': False,
+            **kwargs,
         }
         # Overwrite/add specific params
-        if text is not None:
-            payload['text'] = text
+        if prompts is not None:
+            payload['text'] = prompts
 
         result = self._request('POST', '/generate', json_data=payload)
         # _request ensures result is a dict if no exception was raised
@@ -89,6 +88,7 @@ class SGLangClient(InferenceClient):
         result = self._request('POST', '/release_memory_occupation', {})
         self._release_called = True
         self._resume_called = False
+        time.sleep(2)
         self.logger.info(f"Memory release request response: {result}")
         return result
 
@@ -112,6 +112,7 @@ class SGLangClient(InferenceClient):
         result = self._request('POST', '/resume_memory_occupation', {})
         self._resume_called = True
         self._release_called = False
+        time.sleep(2)
         self.logger.info(f"Memory resume request response: {result}")
 
     def update_weights_from_file(
