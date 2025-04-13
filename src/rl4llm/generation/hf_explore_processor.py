@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from transformers import LogitsProcessor, PreTrainedTokenizer
 
 
-class ExploreLogitsProcessor(LogitsProcessor):
+class HfExploreLogitsProcessor(LogitsProcessor):
     """
     Processes logits for HF generation, applying temperature scaling, exploration sampling,
     and conditional token replacement based on sequence indices.
@@ -38,7 +38,7 @@ class ExploreLogitsProcessor(LogitsProcessor):
         ] = None,
     ):
         """
-        Initializes the ExploreLogitsProcessor.
+        Initializes the HfExploreLogitsProcessor.
 
         Args:
             initial_seq_len: Length of the initial prompt sequence.

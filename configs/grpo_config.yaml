@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_grpo_large_kl_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -32,9 +32,9 @@ grpo:
   train_batch_size: 128
   gamma: 1.0                            # discount
   clip_eps: 0.2                         # PPO-style policy clip parameter
-  group_reward_zero_mean: true          # group reward is normalized to have a zero mean without standard deviation scaling    
+  group_reward_zero_mean: false         # group reward is normalized to have a zero mean without standard deviation scaling    
   normalize_advantages: false
-  kl_loss_coef: 0.0
+  kl_loss_coef: 0.05
   entropy_loss_coef: 0.0
   sync_reference_interval: 0            # every N global steps
 

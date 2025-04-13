@@ -1,2 +1,2 @@
-from .explore_generator import ExploreLLMGenerator
-from .explore_processor import ExploreLogitsProcessor
+from .hf_explore_generator import HfExploreLLMGenerator
+from .hf_explore_processor import HfExploreLogitsProcessor

@@ -20,7 +20,7 @@ class GRPOConfig(RLConfig):
     """GRPO config instance for RL LLM"""
 
     group_reward_zero_mean: bool = Field(
-        True,
+        False,
         description='Normalized group reward to have a zero mean without standard deviation scaling',
     )
 

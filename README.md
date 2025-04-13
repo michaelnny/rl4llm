@@ -50,7 +50,35 @@ Here’s a simple diagram:
 ```
 
 > [!TIP]
-> Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-host mode`.
+> Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-hosting mode`.
+
+
+### Example of start GRPO training with SGLang inference on a single server:
+
+**Step 1**: Launch the SGLang inference server with `--enable-memory-saver`
+
+```bash
+PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
+    --model-path Qwen/Qwen2.5-0.5B \
+    --host localhost \
+    --port 30000 \
+    --tp 1 \
+    --chunked-prefill-size 8192 \
+    --mem-fraction-static 0.5 \
+    --enable-memory-saver
+```
+
+
+**Step 2**: Launch the training script and set the inference server arguments
+
+```bash
+PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_grpo.py \
+    --config-file ./configs/grpo_config.yaml \
+    --use-infer-server \
+    --infer-host localhost \
+    --infer-port 30000 \
+    --infer-cohost-mode
+```
 
 
 ## Sample Generation Environments
@@ -133,43 +161,16 @@ class MyCustomEnv(BaseEnv):
         # Your own sampling logic
 ```
 
+> [!TIP]
+> Checking the examples at `rl4llm.envs.explore_env.py` for a comprehensive example of custom environment using SGLang inference engine and HF model.
 
 
 ## Fast Generation with SGLang
 
 Launch an efficient inference server to accelerate sample generation. You can either run the SGLang engine on the same server, or on separate servers. We have a simplified FastAPI server adapted from the original SGLang HTTP server located at `rl4llm.inference.sgl_http_server`, which you can launch with the custom script `rl4llm.inference.launch_sgl_server`.
 
-
-### Example of start GRPO training with SGLang inference on the same server:
-
-**Step 1**: Launch the SGLang inference server
-
-```bash
-PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
-    --model-path Qwen/Qwen2.5-0.5B \
-    --host localhost \
-    --port 30000 \
-    --tp 1 \
-    --chunked-prefill-size 8192 \
-    --mem-fraction-static 0.5 \
-    --enable-memory-saver
-```
-
-
-**Step 2**: Launch the trining script
-
-```bash
-PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_grpo.py \
-    --config-file ./configs/grpo_config.yaml \
-    --use-infer-server \
-    --infer-host localhost \
-    --infer-port 30000 \
-    --infer-cohost-mode
-```
-
-
 > [!NOTE]
-> If running SGLang inference and deepspeed training on the same server with co-host mode, make sure use the `--enable-memory-saver`, this requires install the `pip install torch-memory-saver`.
+> If running SGLang inference and deepspeed training on the same server with co-hosting mode, make sure use the `--enable-memory-saver`, this requires install the `pip install torch-memory-saver`.
 
 > [!NOTE]
 > We use model checkpoint file to sync the weights between training instance and the SGLang inference engine. If you run inference engine and training in separate servers, make sure you have a shared file system between them. The weights saving path is defined at the `artifacts_path` when launching the trainer.
@@ -179,50 +180,8 @@ PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 
 
 In order to handle the communications for sample generation and weight updates, we created a simple `SGLangClient` that uses HTTP to call the inference server, and an `InferenceEnv` that can handle sample generation using the inference client.
 
-For example, here's a simplified example of how to use them.
-
-```python
-
-from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.envs import InferenceEnv
-from rl4llm.trainers.grpo_trainer import GRPOTrainer
-
-# other instance initialization ...
-
-inference_client = SGLangClient(
-            host=args.infer_host,
-            port=args.infer_port,
-            cohost_mode=args.infer_cohost_mode,
-        )
-
-train_env = InferenceEnv(
-    dataset=train_dataset,
-    batch_size=1,  # always set batch size to 1 for training
-    group_size=grpo_config.group_size,
-    tokenizer=tokenizer,
-    reward_functions=[AccuracyRewardFunction()],
-    rank=dist_manager.local_rank,
-    world_size=dist_manager.world_size,
-)
-
-trainer = GRPOTrainer(
-        config=grpo_config,
-        tokenizer=tokenizer,
-        policy_engine=policy_engine,
-        dist_manager=dist_manager,
-        logger=logger,
-        artifacts_path=artifacts_path,
-        train_env=train_env,
-        eval_env=None,
-        inference_client=inference_client,
-        ref_model=None,
-        reward_transform_fn=None,
-        seed=seed,
-    )
-
-trainer.train(job_config)
-
-```
+> [!TIP]
+> Check the example at `scripts/run_train_grpo.py` on how to use them.
 
 
 ## Centralized Logging & Monitoring
@@ -237,7 +196,7 @@ More example of the logging manager can be found at the `BaseTrainer.train` and 
 
 ## Know Issues
 
-- When running SGLang with `--enable-memory-saver`, sometimes the server will hangs when we try to release/resume the memory. It seems the issue was due to the `torch-memory-saver` package internal error.
+- When running SGLang with `--enable-memory-saver`, sometimes the server will hangs when we try to release/resume the memory. The most likely cause is due to CUDA OOM.
 
 
 ## License

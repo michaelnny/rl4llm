@@ -6,9 +6,9 @@ import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 try:
-    from rl4llm.generation.explore_generator import (
-        ExploreLLMGenerator,
+    from rl4llm.generation.hf_explore_generator import (
         GenerateDecoderOnlyOutput,
+        HfExploreLLMGenerator,
     )
 except ImportError:
     pytest.skip(
@@ -54,8 +54,8 @@ def device():
 
 @pytest.fixture
 def generator(mock_model, mock_tokenizer, device):
-    """Provide an ExploreLLMGenerator instance with mocked dependencies."""
-    llm_generator = ExploreLLMGenerator(
+    """Provide an HfExploreLLMGenerator instance with mocked dependencies."""
+    llm_generator = HfExploreLLMGenerator(
         model=mock_model,
         tokenizer=mock_tokenizer,
         device=device,
@@ -102,7 +102,7 @@ def test_initialization(
     prevent_patterns,
 ):
     """Test that the generator initializes with correct attributes."""
-    generator = ExploreLLMGenerator(
+    generator = HfExploreLLMGenerator(
         model=mock_model,
         tokenizer=mock_tokenizer,
         device=device,
@@ -206,7 +206,7 @@ def test_check_replacement_patterns(
     expected,
 ):
     """Test replacement pattern checking."""
-    generator = ExploreLLMGenerator(
+    generator = HfExploreLLMGenerator(
         model=mock_model,
         tokenizer=mock_tokenizer,
         device=device,
@@ -300,7 +300,7 @@ def test_replace_special_tokens(
     expected_mask,
 ):
     """Test token replacement under various conditions."""
-    generator = ExploreLLMGenerator(
+    generator = HfExploreLLMGenerator(
         model=mock_model,
         tokenizer=mock_tokenizer,
         device=device,
@@ -359,7 +359,7 @@ def test_determine_replacement_eligibility_no_source_tokens(
     mock_model, mock_tokenizer, device
 ):
     """Test eligibility when no source tokens are defined."""
-    generator = ExploreLLMGenerator(
+    generator = HfExploreLLMGenerator(
         model=mock_model, tokenizer=mock_tokenizer, device=device
     )
     generated_ids = torch.randint(0, 100, (2, 10), device=device)

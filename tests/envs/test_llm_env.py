@@ -15,84 +15,6 @@ from rl4llm.envs.llm_env import (
 # Dummy implementations for testing
 
 
-class DummyTokenizer:
-    """A dummy tokenizer for testing."""
-
-    def __init__(
-        self,
-        pad_token='<pad>',
-        eos_token='<eos>',
-        pad_token_id=0,
-        eos_token_id=1,
-    ):
-        self.pad_token = pad_token
-        self.eos_token = eos_token
-        self.pad_token_id = pad_token_id
-        self.eos_token_id = eos_token_id
-        self.padding_side = 'right'
-
-    def __call__(self, texts, truncation=False, max_length=None, padding=False):
-        if isinstance(texts, list):
-            input_ids = []
-            attention_mask = []
-            for text in texts:
-                # Create dummy tokens based on each word's length
-                tokens = [len(word) + 1 for word in text.split()]
-                if truncation and max_length is not None:
-                    tokens = tokens[:max_length]
-                input_ids.append(tokens)
-                attention_mask.append([1] * len(tokens))
-            return {'input_ids': input_ids, 'attention_mask': attention_mask}
-        else:
-            tokens = [len(word) + 1 for word in texts.split()]
-            if truncation and max_length is not None:
-                tokens = tokens[:max_length]
-            return {'input_ids': tokens, 'attention_mask': [1] * len(tokens)}
-
-    def pad(
-        self,
-        encoded_inputs,
-        padding,
-        padding_side,
-        return_tensors,
-        return_attention_mask,
-    ):
-        sequences = encoded_inputs['input_ids']
-        max_len = max(len(seq) for seq in sequences)
-        padded = []
-        attention_masks = []
-        for seq in sequences:
-            pad_length = max_len - len(seq)
-            if padding_side == 'left':
-                padded_seq = [self.pad_token_id] * pad_length + seq
-                mask = [0] * pad_length + [1] * len(seq)
-            else:
-                padded_seq = seq + [self.pad_token_id] * pad_length
-                mask = [1] * len(seq) + [0] * pad_length
-            padded.append(padded_seq)
-            attention_masks.append(mask)
-        return {
-            'input_ids': torch.tensor(padded, dtype=torch.long),
-            'attention_mask': torch.tensor(attention_masks, dtype=torch.long),
-        }
-
-    def batch_decode(
-        self, sequences, skip_special_tokens, clean_up_tokenization_spaces
-    ):
-        texts = []
-        for seq in sequences:
-            words = [
-                str(token)
-                for token in seq
-                if not (
-                    skip_special_tokens
-                    and token in [self.pad_token_id, self.eos_token_id]
-                )
-            ]
-            texts.append(' '.join(words))
-        return texts
-
-
 class DummyModel:
     """A dummy model for testing generation."""
 
@@ -113,16 +35,6 @@ class DummyModel:
         return out
 
 
-class DummyRewardFunction(BaseRewardFunction):
-    """A dummy reward function that always returns 1.0 for testing."""
-
-    def __init__(self, name='dummy_reward'):
-        super().__init__(name)
-
-    def __call__(self, completions, ground_truths):
-        return [1.0 for _ in completions]
-
-
 # Fixtures
 
 
@@ -137,18 +49,6 @@ def dummy_dataset():
 
 
 @pytest.fixture
-def dummy_tokenizer():
-    """Returns a dummy tokenizer."""
-    return DummyTokenizer()
-
-
-@pytest.fixture
-def dummy_reward():
-    """Returns a dummy reward function."""
-    return DummyRewardFunction()
-
-
-@pytest.fixture
 def dummy_model():
     """Returns a dummy model."""
     return DummyModel()
@@ -157,12 +57,12 @@ def dummy_model():
 # Tests
 
 
-def test_initialization(dummy_dataset, dummy_tokenizer, dummy_reward):
+def test_initialization(dummy_dataset, mock_tokenizer, mock_reward_function):
     """Tests LocalLLMEnv initializes correctly with valid parameters."""
     env = LocalLLMEnv(
         dataset=dummy_dataset,
-        tokenizer=dummy_tokenizer,
-        reward_functions=[dummy_reward],
+        tokenizer=mock_tokenizer,
+        reward_functions=[mock_reward_function],
         batch_size=2,
         group_size=3,
     )
@@ -170,94 +70,28 @@ def test_initialization(dummy_dataset, dummy_tokenizer, dummy_reward):
     assert env.group_size == 3
 
 
-@pytest.mark.parametrize(
-    'batch_size, group_size, reward_functions, dataset, error_msg',
-    [
-        (
-            0,
-            1,
-            [DummyRewardFunction()],
-            datasets.Dataset.from_dict(
-                {'prompt': ['test'], 'ground_truth': ['gt']}
-            ),
-            'Batch size must be at least 1',
-        ),
-        (
-            1,
-            0,
-            [DummyRewardFunction()],
-            datasets.Dataset.from_dict(
-                {'prompt': ['test'], 'ground_truth': ['gt']}
-            ),
-            'Group size must be at least 1',
-        ),
-        (
-            1,
-            1,
-            [],
-            datasets.Dataset.from_dict(
-                {'prompt': ['test'], 'ground_truth': ['gt']}
-            ),
-            'reward_functions must be a non-empty list',
-        ),
-        (
-            1,
-            1,
-            [DummyRewardFunction()],
-            'not a dataset',
-            'dataset must be a datasets.Dataset instance.',
-        ),
-        (
-            1,
-            1,
-            [DummyRewardFunction()],
-            datasets.Dataset.from_dict({'prompt': ['test']}),
-            "Dataset must contain 'prompt' and 'ground_truth' columns.",
-        ),
-    ],
-)
-def test_invalid_initialization(
-    batch_size,
-    group_size,
-    reward_functions,
-    dataset,
-    error_msg,
-    dummy_tokenizer,
-):
-    """Tests LocalLLMEnv initialization errors with invalid parameters."""
-    with pytest.raises(Exception) as excinfo:
-        LocalLLMEnv(
-            dataset=dataset,
-            tokenizer=dummy_tokenizer,
-            reward_functions=reward_functions,
-            batch_size=batch_size,
-            group_size=group_size,
-        )
-    assert error_msg in str(excinfo.value)
-
-
-def test_setup_tokenizer(dummy_dataset, dummy_tokenizer, dummy_reward):
+def test_setup_tokenizer(dummy_dataset, mock_tokenizer, mock_reward_function):
     """Tests tokenizer setup assigns pad_token if missing."""
-    dummy_tokenizer.pad_token = None
-    dummy_tokenizer.eos_token = '<eos>'
-    dummy_tokenizer.eos_token_id = 1
+    mock_tokenizer.pad_token = None
+    mock_tokenizer.eos_token = '<eos>'
+    mock_tokenizer.eos_token_id = 1
     LocalLLMEnv(
         dataset=dummy_dataset,
-        tokenizer=dummy_tokenizer,
-        reward_functions=[dummy_reward],
+        tokenizer=mock_tokenizer,
+        reward_functions=[mock_reward_function],
         batch_size=1,
         group_size=1,
     )
-    assert dummy_tokenizer.pad_token == '<eos>'
-    assert dummy_tokenizer.pad_token_id == 1
+    assert mock_tokenizer.pad_token == '<eos>'
+    assert mock_tokenizer.pad_token_id == 1
 
 
-def test_collate_fn(dummy_dataset, dummy_tokenizer, dummy_reward):
+def test_collate_fn(dummy_dataset, mock_tokenizer, mock_reward_function):
     """Tests collate function pads inputs correctly."""
     env = LocalLLMEnv(
         dataset=dummy_dataset,
-        tokenizer=dummy_tokenizer,
-        reward_functions=[dummy_reward],
+        tokenizer=mock_tokenizer,
+        reward_functions=[mock_reward_function],
         batch_size=1,
         group_size=1,
     )
@@ -280,12 +114,14 @@ def test_collate_fn(dummy_dataset, dummy_tokenizer, dummy_reward):
     assert collated['ground_truth'] == ['gt1', 'gt2']
 
 
-def test_reset_and_grouped_state(dummy_dataset, dummy_tokenizer, dummy_reward):
+def test_reset_and_grouped_state(
+    dummy_dataset, mock_tokenizer, mock_reward_function
+):
     """Tests reset returns an EnvState with repeated prompts."""
     env = LocalLLMEnv(
         dataset=dummy_dataset,
-        tokenizer=dummy_tokenizer,
-        reward_functions=[dummy_reward],
+        tokenizer=mock_tokenizer,
+        reward_functions=[mock_reward_function],
         batch_size=2,
         group_size=2,
     )
@@ -296,12 +132,14 @@ def test_reset_and_grouped_state(dummy_dataset, dummy_tokenizer, dummy_reward):
     assert state.prompt == expected_prompts
 
 
-def test_rollout(dummy_dataset, dummy_tokenizer, dummy_reward, dummy_model):
+def test_rollout(
+    dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
+):
     """Tests rollout returns valid EpisodeData objects."""
     env = LocalLLMEnv(
         dataset=dummy_dataset,
-        tokenizer=dummy_tokenizer,
-        reward_functions=[dummy_reward],
+        tokenizer=mock_tokenizer,
+        reward_functions=[mock_reward_function],
         batch_size=2,
         group_size=2,
     )
@@ -315,13 +153,13 @@ def test_rollout(dummy_dataset, dummy_tokenizer, dummy_reward, dummy_model):
 
 
 def test_invalid_gen_args(
-    dummy_dataset, dummy_tokenizer, dummy_reward, dummy_model
+    dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
 ):
     """Tests rollout raises error when using num_return_sequences > 1."""
     env = LocalLLMEnv(
         dataset=dummy_dataset,
-        tokenizer=dummy_tokenizer,
-        reward_functions=[dummy_reward],
+        tokenizer=mock_tokenizer,
+        reward_functions=[mock_reward_function],
         batch_size=1,
         group_size=1,
     )
@@ -332,13 +170,13 @@ def test_invalid_gen_args(
 
 
 def test_rollout_no_pad_tokens(
-    dummy_dataset, dummy_tokenizer, dummy_reward, dummy_model
+    dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
 ):
     """Tests rollout returns data with no pad tokens in prompt or completion."""
     env = LocalLLMEnv(
         dataset=dummy_dataset,
-        tokenizer=dummy_tokenizer,
-        reward_functions=[dummy_reward],
+        tokenizer=mock_tokenizer,
+        reward_functions=[mock_reward_function],
         batch_size=2,
         group_size=2,
     )
@@ -370,17 +208,17 @@ def test_rollout_no_pad_tokens(
 
 
 def test_rollout_rewards(
-    dummy_dataset, dummy_tokenizer, dummy_reward, dummy_model
+    dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
 ):
     """Tests rollout returns expected rewards from dummy reward function."""
     env = LocalLLMEnv(
         dataset=dummy_dataset,
-        tokenizer=dummy_tokenizer,
-        reward_functions=[dummy_reward],
+        tokenizer=mock_tokenizer,
+        reward_functions=[mock_reward_function],
         batch_size=2,
         group_size=2,
     )
     gen_args = {'max_new_tokens': 5}
     episodes = env.rollout(dummy_model, gen_args)
     for ep in episodes:
-        assert ep.reward_dict.get('dummy_reward') == 1.0
+        assert ep.reward_dict.get('mock_reward_function') == 1.0

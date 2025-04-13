@@ -1,9 +1,8 @@
-import sglang as sgl
 import torch
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
 
 
-class ExploreLogitProcessor(CustomLogitProcessor):
+class SglExploreLogitProcessor(CustomLogitProcessor):
     """A simple logits processor to implement group temperature and exploring start for sampling."""
 
     def __init__(
@@ -82,7 +81,7 @@ class ExploreLogitProcessor(CustomLogitProcessor):
             # Apply uniform sampling within the top-k for exploration
             _, top_k_indices = torch.topk(logits, k=k, dim=-1)
             logits.fill_(float('-inf'))
-            logits.scatter_(dim=-1, index=top_k_indices, value=0.0)
+            logits.scatter_(dim=-1, index=top_k_indices, value=100.0)
         else:
             # --- Group Temperature Logic ---
             if not self._initialized:
@@ -108,49 +107,3 @@ class ExploreLogitProcessor(CustomLogitProcessor):
 
         self.step_t += 1
         return logits
-
-
-def main():
-    model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
-    llm = sgl.Engine(
-        model_path=model_name,
-        enable_custom_logit_processor=True,
-        enable_memory_saver=True,
-    )
-    prompts = [
-        'Hello, my name is',
-        'The president of the United States is',
-        'The capital of France is',
-        'The future of AI is',
-    ]
-
-    sampling_params = {'temperature': 0.8, 'top_p': 0.95}
-
-    logit_processor = ExploreLogitProcessor(
-        temperatures=torch.tensor([0, 0.3, 0.6, 0.9]),
-        explore_steps=3,
-        explore_top_k=500,
-        explore_skip_n=0,
-        explore_decay_rate=0.8,
-    )
-
-    outputs = llm.generate(
-        prompts,
-        sampling_params,
-        custom_logit_processor=logit_processor.to_str(),
-    )
-    for prompt, output in zip(prompts, outputs):
-        print('===============================')
-        print(f"Prompt: {prompt}\nGenerated text: {output['text']}")
-
-    torch.cuda.empty_cache()
-
-    llm.release_memory_occupation()
-
-    torch.cuda.empty_cache()
-
-    print(torch.cuda.memory_allocated())
-
-
-if __name__ == '__main__':
-    main()

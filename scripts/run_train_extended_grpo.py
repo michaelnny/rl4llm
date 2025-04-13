@@ -30,7 +30,7 @@ from rl4llm.utils.model_utils import build_policy_model_and_tokenizer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='RL GRPO fine-tuning')
+    parser = argparse.ArgumentParser(description='RL extended GRPO fine-tuning')
     parser.add_argument(
         '--config-file',
         type=str,
@@ -215,9 +215,6 @@ def main():
     deepspeed.init_distributed(verbose=False)
 
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
-    # zero3_enabled = (
-    #     deepspeed_config.get('zero_optimization', {}).get('stage') == 3
-    # )
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
 
     dist_manager = DistributedManager()
@@ -287,6 +284,7 @@ def main():
     explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
     inference_client = None
 
+    env_reward_functions = [AccuracyRewardFunction()]
     eval_env_cls = LocalLLMEnv
     train_env_cls = ExploreLocalLLMEnv
     if args.use_infer_server:
@@ -303,7 +301,7 @@ def main():
         batch_size=1,  # always set batch size to 1 for training
         group_size=grpo_config.group_size,
         tokenizer=tokenizer,
-        reward_functions=[AccuracyRewardFunction()],
+        reward_functions=env_reward_functions,
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
         **explore_env_args,
@@ -314,7 +312,7 @@ def main():
         batch_size=grpo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
         tokenizer=tokenizer,
-        reward_functions=[AccuracyRewardFunction()],
+        reward_functions=env_reward_functions,
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
     )

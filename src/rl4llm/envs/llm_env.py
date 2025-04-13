@@ -20,7 +20,7 @@ from rl4llm.core.base_env import (
     EnvState,
     EpisodeData,
 )
-from rl4llm.generation.explore_processor import ExploreLogitsProcessor
+from rl4llm.generation.hf_explore_processor import HfExploreLogitsProcessor
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -298,7 +298,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
                     ),
                 )
 
-            explore_logits_processor = ExploreLogitsProcessor(
+            explore_logits_processor = HfExploreLogitsProcessor(
                 initial_seq_len=input_ids.shape[1],
                 tokenizer=self.tokenizer,
                 group_size=self.group_size,

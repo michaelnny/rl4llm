@@ -32,7 +32,7 @@ grpo:
   train_batch_size: 128
   gamma: 1.0                            # discount
   clip_eps: 0.2                         # PPO-style policy clip parameter
-  normalize_rewards: true       
+  group_reward_zero_mean: true         # group reward is normalized to have a zero mean without standard deviation scaling
   normalize_advantages: false
   kl_loss_coef: 0.0
   entropy_loss_coef: 0.0

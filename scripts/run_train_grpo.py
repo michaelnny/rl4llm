@@ -173,9 +173,6 @@ def main():
     deepspeed.init_distributed(verbose=False)
 
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
-    # zero3_enabled = (
-    #     deepspeed_config.get('zero_optimization', {}).get('stage') == 3
-    # )
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
 
     dist_manager = DistributedManager()
@@ -242,6 +239,7 @@ def main():
             )
             ref_model.eval()
 
+    env_reward_functions = [AccuracyRewardFunction()]
     inference_client = None
     env_cls = LocalLLMEnv
     if args.use_infer_server:
@@ -257,7 +255,7 @@ def main():
         batch_size=1,  # always set batch size to 1 for training
         group_size=grpo_config.group_size,
         tokenizer=tokenizer,
-        reward_functions=[AccuracyRewardFunction()],
+        reward_functions=env_reward_functions,
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
     )
@@ -266,7 +264,7 @@ def main():
         batch_size=grpo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
         tokenizer=tokenizer,
-        reward_functions=[AccuracyRewardFunction()],
+        reward_functions=env_reward_functions,
         rank=dist_manager.local_rank,
         world_size=dist_manager.world_size,
     )

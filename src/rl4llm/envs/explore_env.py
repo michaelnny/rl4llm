@@ -6,120 +6,20 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
+from transformers import LogitsProcessorList, PreTrainedModel
 
 from rl4llm.constants import LOGGER_NAME
+from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.core.base_inference_client import InferenceClient
+from rl4llm.envs.llm_env import LocalLLMEnv
 from rl4llm.envs.sgl_env import EnvState, InferenceEnv
+from rl4llm.generation.hf_explore_processor import HfExploreLogitsProcessor
+from rl4llm.generation.sgl_explore_procesor import SglExploreLogitProcessor
 
 logger = logging.getLogger(LOGGER_NAME)
 
 
-class ExploreLogitProcessor(CustomLogitProcessor):
-    """A simple logits processor to implement group temperature and exploring start for sampling."""
-
-    def __init__(
-        self,
-        temperatures: torch.Tensor,
-        explore_steps: int = 0,
-        explore_skip_n: int = 0,
-        explore_top_k: int = 20,
-        explore_decay_rate: float = 0.9,
-    ):
-        """
-        Initializes the ExploreLogitsProcessor.
-
-        Args:
-            temperatures: Temperature for logits scaling (tensor).
-            group_size: The number of sequences in the original batch request.
-            device: The torch device where tensors should be placed.
-            explore_steps: Number of steps for exploration sampling.
-            explore_skip_n: Number of initial steps to skip before exploration.
-            explore_top_k: Top-k value for exploration sampling.
-            explore_decay_rate: Decay rate for explore_top_k during exploration.
-        """
-        if not isinstance(temperatures, torch.Tensor):
-            raise ValueError('temperature must be a tensor')
-        if any(t < 0 for t in temperatures):
-            raise ValueError('temperature values cannot be negative')
-        if not isinstance(explore_steps, int) or explore_steps < 0:
-            raise ValueError('explore_steps must be a non-negative integer.')
-        if not isinstance(explore_skip_n, int) or explore_skip_n < 0:
-            raise ValueError('explore_skip_n must be a non-negative integer.')
-        if not isinstance(explore_top_k, int) or explore_top_k <= 0:
-            raise ValueError('explore_top_k must be a positive integer.')
-        if not isinstance(explore_decay_rate, float) or not (
-            0.0 < explore_decay_rate <= 1.0
-        ):
-            raise ValueError(
-                'explore_decay_rate must be a float between 0.0 (exclusive) and 1.0 (inclusive).'
-            )
-
-        self.temperatures = temperatures
-        self.explore_steps: int = explore_steps
-        self.explore_skip_n: int = explore_skip_n
-        self.explore_top_k: int = explore_top_k
-        self.explore_decay_rate: float = explore_decay_rate
-
-        self.step_t: int = 0
-        self._initialized = False
-
-    def __call__(self, logits: torch.Tensor, custom_param_list) -> torch.Tensor:
-        """Apply exploring random start and group temperature"""
-        import torch
-
-        assert logits.dim() == 2
-        bsz, vocab_size = logits.shape
-
-        device = logits.device
-
-        # --- Exploration Logic ---
-        is_explore = (
-            self.explore_steps > 0
-            and self.explore_skip_n
-            <= self.step_t
-            < self.explore_skip_n + self.explore_steps
-        )
-        if is_explore:
-            effective_steps = self.step_t - self.explore_skip_n
-            current_explore_top_k = max(
-                2,
-                int(
-                    self.explore_top_k
-                    * (self.explore_decay_rate**effective_steps)
-                ),
-            )
-            k = min(current_explore_top_k, vocab_size)
-
-            # Apply uniform sampling within the top-k for exploration
-            _, top_k_indices = torch.topk(logits, k=k, dim=-1)
-            logits.fill_(float('-inf'))
-            logits.scatter_(dim=-1, index=top_k_indices, value=100.0)
-        else:
-            # --- Group Temperature Logic ---
-            if not self._initialized:
-                self.temperatures = self.temperatures.to(device)
-
-            # Important, SGLang might dynamic batch the requests during the first few steps
-            # so the input logits not necessary have the full batch
-            curr_temps = self.temperatures[:bsz]  # Shape: (bsz,)
-
-            # Apply temperature scaling where temp > 0
-            non_zero_temp_mask = curr_temps > 0
-
-            safe_temp = torch.clamp(curr_temps, min=1e-8)
-            # Reshape temperature and mask for broadcasting with logits
-            # (bsz,) -> (bsz, 1)
-            safe_temp_reshaped = safe_temp.unsqueeze(1)
-            non_zero_temp_mask_reshaped = non_zero_temp_mask.unsqueeze(1)
-            scaled_logits = logits / safe_temp_reshaped
-
-            logits = torch.where(
-                non_zero_temp_mask_reshaped, scaled_logits, logits
-            )
-
-        self.step_t += 1
-        return logits
+# --- Using SGLang inference client ---
 
 
 class ExploreInferenceEnv(InferenceEnv):
@@ -179,7 +79,7 @@ class ExploreInferenceEnv(InferenceEnv):
         """Creates the explore logits processor string if conditions are met."""
         # This logic is self-contained setup, so keeping it separate is reasonable.
         if explore_prob > 0 and random.random() < explore_prob:
-            explore_logit_processor = ExploreLogitProcessor(
+            explore_logit_processor = SglExploreLogitProcessor(
                 temperatures=self.temperatures,
                 explore_steps=self.explore_steps,
                 explore_skip_n=self.explore_skip_n,
@@ -246,6 +146,20 @@ class ExploreInferenceEnv(InferenceEnv):
         # The final texts are already assembled
         return final_texts, completion_ids_list, completion_lengths
 
+    def _should_retry(self, is_correct: bool, retry_attempts_left: int) -> bool:
+        """Determine if an item should retry based on accuracy, retries left, and probability."""
+        # Retry if: not correct AND has attempts left AND retry mechanism enabled AND probability check passes
+        return (
+            not is_correct
+            and retry_attempts_left
+            >= 0  # Allows the last retry when attempts == 0
+            and self.continue_prob > 0.0
+            and self.accuracy_fn
+            is not None  # Ensure accuracy check is possible
+            and self.continue_special_tokens  # Ensure tokens are available
+            and random.random() < self.continue_prob
+        )
+
     def _generate_completions(
         self,
         llm: InferenceClient,
@@ -269,164 +183,301 @@ class ExploreInferenceEnv(InferenceEnv):
         """
         explore_prob = kwargs.get('explore_probability', 0.0)
         logit_processors = self._prepare_logits_processor(explore_prob)
-
         original_prompts = state.prompt
         ground_truths = state.ground_truth
         batch_size = len(original_prompts)
 
-        # --- State Tracking ---
-        # Stores the full accumulated text for each item
-        current_completions = [''] * batch_size
-        # Stores the last raw output dict from the LLM for each item
-        last_llm_outputs: List[Optional[Dict[str, Any]]] = [None] * batch_size
-        # Tracks remaining retry attempts for each item
+        # State tracking for each item in the batch
+        # Stores the full accumulated completion text, including special tokens
+        current_full_completions = [''] * batch_size
         retry_attempts_left = [self.continue_max_retry] * batch_size
-        # Indices of items that are still active (need generation or retry)
-        active_indices = list(range(batch_size))
-        # Whether an item is considered correct (stops retrying)
         is_correct = [False] * batch_size
+        # Stores the last raw output dict from the LLM for finish_reason check
+        last_llm_outputs: List[Optional[Dict[str, Any]]] = [None] * batch_size
+        # Indices of items still needing generation/retry
+        active_indices = list(range(batch_size))
 
-        # --- Generation Loop ---
         current_pass = 0
-        max_passes = 1 + self.continue_max_retry  # Initial pass + max retries
+        # Max passes = initial pass + max retries
+        max_passes = 1 + self.continue_max_retry
 
         while active_indices and current_pass < max_passes:
-            prompts_for_pass: List[str] = []
-            indices_in_pass: List[int] = []
+            logger.debug(
+                f"Starting Pass {current_pass + 1}/{max_passes}. "
+                f"Active indices: {active_indices}"
+            )
 
-            # --- 1. Prepare Prompts for the Current Pass ---
-            for original_idx in active_indices:
-                if current_pass == 0:
-                    prompt_str = original_prompts[original_idx]
-                else:
-                    # Construct retry prompt: original_prompt + previous_completion + [special_token]
-                    prompt_str = (
-                        original_prompts[original_idx]
-                        + current_completions[original_idx]
-                    )
-                    if self.continue_special_tokens:
-                        special_token = random.choice(
-                            self.continue_special_tokens
-                        )
-                        prompt_str += special_token
-                        # Also append the special token to the stored completion
-                        # so it's part of the text being evaluated for accuracy later
-                        current_completions[original_idx] += special_token
+            # Prepare prompts for the active items in this pass
+            prompts_for_pass = []
+            # Keep track of original batch indices corresponding to prompts_for_pass
+            indices_in_pass = list(active_indices)
 
-                prompts_for_pass.append(prompt_str)
-                indices_in_pass.append(original_idx)
+            for original_idx in indices_in_pass:
+                # Prompt = Original Prompt + Accumulated Completion (incl. special tokens)
+                prompt = (
+                    original_prompts[original_idx]
+                    + current_full_completions[original_idx]
+                )
+                prompts_for_pass.append(prompt)
 
-            if (
-                not prompts_for_pass
-            ):  # Should not happen if active_indices is not empty
-                logger.warning('No prompts generated for pass, breaking loop.')
+            if not prompts_for_pass:
+                logger.warning(
+                    'No prompts generated for active indices. Breaking loop.'
+                )
                 break
 
-            # --- 2. Run Batched Generation ---
-            logger.debug(
-                f"Pass {current_pass}: Generating for {len(indices_in_pass)} items."
+            # Generate completions for the active prompts
+            # Apply exploration only on the first pass
+            current_logit_processor = (
+                logit_processors if current_pass == 0 else None
             )
             output_batch = llm.generate(
                 prompts=prompts_for_pass,
                 sampling_params=sampling_params,
-                custom_logit_processor=(
-                    logit_processors if current_pass == 0 else None
-                ),
+                custom_logit_processor=current_logit_processor,
             )
 
-            # --- 3. Process Results and Update State ---
-            next_active_indices: List[int] = []
-            needs_accuracy_check_indices: List[int] = []
-            needs_accuracy_check_completions: List[str] = []
-            needs_accuracy_check_gts: List[str] = []
+            if len(output_batch) != len(prompts_for_pass):
+                # Handle potential errors if LLM output size doesn't match input size
+                logger.error(
+                    f"LLM output batch size ({len(output_batch)}) mismatch with "
+                    f"input prompt batch size ({len(prompts_for_pass)}) in pass {current_pass + 1}. "
+                    f"Indices in pass: {indices_in_pass}. Active indices: {active_indices}."
+                    'Skipping update for this pass.'
+                )
+                # Decide how to handle this: break, continue, skip updates?
+                # For now, let's break to avoid index errors.
+                break  # Or implement more robust error handling
 
+            # Process results for each item generated in this pass
+            next_active_indices = []
             for i, original_idx in enumerate(indices_in_pass):
                 output = output_batch[i]
-                generated_text = output['text']
-
-                # Append the *newly* generated text to the current completion
-                current_completions[original_idx] += generated_text
-                last_llm_outputs[original_idx] = output
-
-                # If retry is disabled globally or for this item, it's done
-                if self.continue_prob == 0.0 or not self.accuracy_fn:
-                    is_correct[original_idx] = True
-                    continue  # Move to next item in the batch
-
-                # If retry is enabled, prepare for accuracy check
-                needs_accuracy_check_indices.append(original_idx)
-                needs_accuracy_check_completions.append(
-                    current_completions[original_idx]
-                )
-                needs_accuracy_check_gts.append(ground_truths[original_idx])
-
-            # --- 4. Perform Accuracy Check (Batched if possible) ---
-            if needs_accuracy_check_indices:
-                # Assume accuracy_fn takes lists and returns a list of floats where 1.0 means correct
-                accuracy_results = self.accuracy_fn(
-                    needs_accuracy_check_completions, needs_accuracy_check_gts
+                # Newly generated text segment from this pass
+                generated_text_segment = output.get('text', '')
+                last_llm_outputs[original_idx] = (
+                    output  # Store latest output info
                 )
 
-                for i, original_idx in enumerate(needs_accuracy_check_indices):
-                    if accuracy_results[i] == 1.0:
-                        is_correct[original_idx] = True
-                        logger.debug(f"Item {original_idx} marked as correct.")
-                    else:
-                        # Incorrect: Check if it should be retried
-                        retry_attempts_left[original_idx] -= 1
-                        should_retry = (
-                            retry_attempts_left[original_idx] >= 0
-                            and random.random() < self.continue_prob
-                        )
+                # Append the *newly* generated text segment
+                current_full_completions[original_idx] += generated_text_segment
 
-                        if should_retry:
-                            logger.debug(
-                                f"Item {original_idx} incorrect, scheduling retry ({retry_attempts_left[original_idx]} left)."
+                # Check accuracy using the *full* current completion if retry is possible
+                item_is_correct = False
+                if self.accuracy_fn and self.continue_prob > 0.0:
+                    try:
+                        # Ensure ground truth exists for the index
+                        if original_idx >= len(ground_truths):
+                            raise IndexError(
+                                f"Ground truth index {original_idx} out of bounds."
                             )
-                            next_active_indices.append(original_idx)
+
+                        accuracy_result = self.accuracy_fn(
+                            [
+                                current_full_completions[original_idx]
+                            ],  # Pass as list
+                            [ground_truths[original_idx]],  # Pass as list
+                        )
+                        # Ensure result format is as expected (e.g., list of floats)
+                        if (
+                            isinstance(accuracy_result, list)
+                            and len(accuracy_result) == 1
+                        ):
+                            accuracy = accuracy_result[0]
+                            item_is_correct = accuracy == 1.0
                         else:
-                            logger.debug(
-                                f"Item {original_idx} incorrect, but stopping (max retries or probability)."
+                            logger.warning(
+                                f"Unexpected accuracy result format for index {original_idx}: {accuracy_result}. Treating as incorrect."
                             )
-                            # No more retries, it's finished (though incorrect)
-                            is_correct[original_idx] = False
+                            item_is_correct = False
 
-            # --- 5. Update Active Indices for Next Pass ---
-            active_indices.clear()
-            for idx in range(batch_size):
-                was_checked = idx in needs_accuracy_check_indices
-                is_finished = False
-                if was_checked:
-                    # If checked, it's finished if it's correct OR it wasn't added to next_active_indices
-                    is_finished = is_correct[idx] or (
-                        idx not in next_active_indices
-                    )
-                else:
-                    is_finished = (
-                        self.continue_prob == 0.0 or not self.accuracy_fn
-                    ) or is_correct[idx]
-
-                # If the item is NOT finished, add it to the list for the next pass
-                if not is_finished:
-                    if retry_attempts_left[idx] >= 0:
-                        active_indices.append(idx)
-                    else:
-                        logger.warning(
-                            f"Item {idx} detected as active but has no retries left. Forcing finish."
+                        logger.debug(
+                            f" Index {original_idx}: Pass {current_pass + 1}. Accuracy Check. Correct: {item_is_correct}. "
+                            f"Full Completion: '{current_full_completions[original_idx]}'"
                         )
+                    except Exception as e:
+                        logger.error(
+                            f"Error during accuracy check for index {original_idx} in pass {current_pass + 1}: {e}. Treating as incorrect."
+                        )
+                        item_is_correct = False
+                else:
+                    # If no accuracy function or retry disabled, consider it "correct" to stop retries
+                    item_is_correct = True
+                    logger.debug(
+                        f" Index {original_idx}: Pass {current_pass + 1}. No accuracy check needed/possible."
+                    )
 
-            current_pass += 1
-            logger.debug(
-                f"End of Pass {current_pass - 1}. Active items for next pass: {active_indices}"
-            )
-
-            # Safety break if state becomes inconsistent
-            if current_pass >= max_passes and active_indices:
-                logger.debug(
-                    f"Reached max passes ({max_passes}) but items {active_indices} still active. Forcing termination."
+                is_correct[original_idx] = (
+                    item_is_correct  # Update final correctness state
                 )
+
+                # Decide whether to retry this item
+                should_retry_item = False
+                if not item_is_correct:
+                    # Decrement attempts *before* checking if retry is possible
+                    retry_attempts_left[original_idx] -= 1
+                    logger.debug(
+                        f" Index {original_idx}: Incorrect. Retries left: {retry_attempts_left[original_idx]}"
+                    )
+
+                    if self._should_retry(
+                        item_is_correct, retry_attempts_left[original_idx]
+                    ):
+                        should_retry_item = True
+                        logger.debug(f" Index {original_idx}: Will retry.")
+                    else:
+                        logger.debug(
+                            f" Index {original_idx}: Will not retry (max attempts, probability, or config)."
+                        )
+                else:
+                    logger.debug(
+                        f" Index {original_idx}: Correct. No retry needed."
+                    )
+
+                # If retrying, append a special token and keep it active
+                if should_retry_item:
+                    # *** THE KEY FIX: Append the special token to the stored completion ***
+                    special_token = random.choice(self.continue_special_tokens)
+                    current_full_completions[original_idx] += special_token
+                    logger.debug(
+                        f" Index {original_idx}: Appended special token '{special_token}'."
+                    )
+                    next_active_indices.append(original_idx)
+                # Otherwise, the item is finished for this generation cycle
+
+            # Update the list of active indices for the next pass
+            active_indices = next_active_indices
+            current_pass += 1
+
+        logger.info(f"Generation loop finished after {current_pass} passes.")
+        logger.debug(f"Final full completions: {current_full_completions}")
+
+        # Finalize outputs using the accumulated completions (which now include special tokens)
+        return self._finalize_outputs(
+            current_full_completions, last_llm_outputs
+        )
+
+
+# --- Using local HF LLM ---
+
+
+class ExploreLocalLLMEnv(LocalLLMEnv):
+    """An extension of the standard LocalLLMEnv
+    where we apply some custom logits processor to the generation process
+    to encourage exploration."""
+
+    def __init__(
+        self,
+        temperature: Union[List[float], torch.Tensor],
+        explore_steps: int,
+        explore_top_k: int,
+        explore_skip_n: int,
+        explore_decay_rate: float,
+        replace_source_tokens: List[int],
+        replace_target_tokens: List[int],
+        replace_prevent_patterns: List[List[int]],
+        replace_max_per_seq: int,
+        replace_prob: float,
+        **kwargs,
+    ):
+
+        super().__init__(**kwargs)
+
+        assert len(temperature) >= 1
+
+        self.temperature = temperature
+        self.explore_steps = explore_steps
+        self.explore_top_k = explore_top_k
+        self.explore_skip_n = explore_skip_n
+        self.explore_decay_rate = explore_decay_rate
+        self.replace_source_tokens = replace_source_tokens
+        self.replace_target_tokens = replace_target_tokens
+        self.replace_prevent_patterns = replace_prevent_patterns
+        self.replace_max_per_seq = replace_max_per_seq
+        self.replace_prob = replace_prob
+
+        self.accuracy_fn = None
+        for fn in self.reward_functions:
+            if fn.name == 'accuracy_reward':
+                self.accuracy_fn = fn
                 break
 
-        # --- 6. Finalize Outputs ---
-        # Use the accumulated texts and the last recorded LLM output for each item
-        return self._finalize_outputs(current_completions, last_llm_outputs)
+    def _generate_completions(
+        self,
+        llm: PreTrainedModel,
+        sampling_params: Dict,
+        state: EnvState,
+        **kwargs: Optional[Dict[str, Any]],
+    ) -> Tuple[List[str], List[torch.Tensor], List[int]]:
+        """
+        Generates completions using the LLM for the current state.
+
+        Args:
+            llm: The pre-trained language model.
+            sampling_params: Dictionary of generation arguments (e.g., max_new_tokens, do_sample).
+            state: The current EnvState containing input_ids and attention_mask.
+            **kwargs: Additional custom arguments.
+
+        Returns:
+            A tuple containing:
+            - completion_texts: List of decoded completion strings (up to, but not including, EOS).
+            - completion_tokens: List of completion token tensors (unpadded, includes EOS if present).
+            - completion_lengths: List of actual lengths for each completion (includes EOS, excludes PAD).
+        """
+
+        input_ids = state.input_ids.to(llm.device)
+        attention_mask = state.attention_mask.to(llm.device)
+        gen_args_copy = sampling_params.copy()
+        gen_args_copy.pop('input_ids', None)
+        gen_args_copy.pop('attention_mask', None)
+        gen_args_copy.pop('num_return_sequences', None)
+        gen_args_copy['return_dict_in_generate'] = True
+
+        # add explore logits processor
+        explore_prob = kwargs.get('explore_probability', 0.0)
+
+        if explore_prob > 0 and (random.random() < explore_prob):
+            correctness_callback = None
+            # Checks for outcome correctness using the accuracy function,
+            # if applied, will only apply token replacement to sequences with incorrect outcome
+            if self.accuracy_fn:
+                correctness_callback = functools.partial(
+                    self.accuracy_fn.__call__,
+                    ground_truths=(
+                        state.ground_truth[0]
+                        if self.batch_size == 1
+                        else state.ground_truth
+                    ),
+                )
+
+            explore_logits_processor = HfExploreLogitsProcessor(
+                initial_seq_len=input_ids.shape[1],
+                tokenizer=self.tokenizer,
+                group_size=self.group_size,
+                temperature=self.temperature,
+                explore_steps=self.explore_steps,
+                explore_skip_n=self.explore_skip_n,
+                explore_top_k=self.explore_top_k,
+                explore_decay_rate=self.explore_decay_rate,
+                replace_source_tokens=self.replace_source_tokens,
+                replace_target_tokens=self.replace_target_tokens,
+                replace_prevent_patterns=self.replace_prevent_patterns,
+                replace_max_per_seq=self.replace_max_per_seq,
+                replace_prob=self.replace_prob,
+                correctness_callback=correctness_callback,
+            )
+            gen_args_copy['logits_processor'] = LogitsProcessorList(
+                [explore_logits_processor]
+            )
+
+        output = llm.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **gen_args_copy,
+        )
+        start = state.input_ids.shape[1]
+        texts, tokens_list, lengths = self._process_completions(
+            output.sequences[:, start:]
+        )
+
+        return texts, tokens_list, lengths

@@ -122,6 +122,15 @@ def trainer_base(
         def train_step(self, train_dataloader):
             pass
 
+        def can_offload_state(self, model):
+            return getattr(model, 'can_offload', False)
+
+        def is_cohost_inference_engine(self):
+            return False
+
+        def clean_up(self):
+            pass
+
     return DummyTrainer(
         config=dummy_config,
         tokenizer=MagicMock(),
@@ -133,6 +142,17 @@ def trainer_base(
         eval_env=MagicMock(),
         inference_client=MagicMock(),
     )
+
+
+@pytest.fixture
+def mock_model():
+    """Provides a mock PyTorch model with configurable attributes."""
+    model = MagicMock(spec=torch.nn.Module)
+    model.to.return_value = model
+    model.eval = MagicMock()
+    model.train = MagicMock()
+    model.can_offload = False
+    return model
 
 
 def test_log_batch_episodes_invalid_phase(trainer_base):
@@ -158,18 +178,145 @@ def test_log_batch_episodes_valid(trainer_base):
     trainer_base.logger.log_scalar.assert_called()
 
 
-def test_prepare_modes(trainer_base):
-    """Switches between eval and train modes."""
-    trainer_base.policy_engine.eval = MagicMock()
-    trainer_base.policy_engine.train = MagicMock()
-    trainer_base.reference_model = MagicMock()
-    trainer_base.reference_model.to.return_value = trainer_base.reference_model
+def test_configure_model(mock_model, trainer_base):
+    """Test _configure_model for device movement, mode setting, and state management."""
+    # Test with no model
+    trainer_base._configure_model(
+        None, 'cpu', state_action='offload', mode='eval'
+    )
+    mock_model.to.assert_not_called()
 
+    # Test device movement and eval mode
+    trainer_base._configure_model(mock_model, 'cuda', mode='eval')
+    mock_model.to.assert_called_once_with('cuda')
+    mock_model.eval.assert_called_once()
+    mock_model.train.assert_not_called()
+
+    # Reset mocks
+    mock_model.to.reset_mock()
+    mock_model.eval.reset_mock()
+
+    # Test training mode
+    trainer_base._configure_model(mock_model, 'cpu', mode='train')
+    mock_model.to.assert_called_once_with('cpu')
+    mock_model.train.assert_called_once()
+    mock_model.eval.assert_not_called()
+
+    # Test state offloading
+    mock_model.can_offload = True
+    mock_model.offload_states = MagicMock()
+    trainer_base._configure_model(mock_model, 'cuda', state_action='offload')
+    mock_model.offload_states.assert_called_once()
+
+    # Test state reloading
+    mock_model.reload_states = MagicMock()
+    trainer_base._configure_model(mock_model, 'cuda', state_action='reload')
+    mock_model.reload_states.assert_called_once()
+
+
+def test_release_inference_memory(trainer_base):
+    """Test _release_inference_memory for co-hosting and non-co-hosting scenarios."""
+    # Non-co-hosting: no memory release
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=False)
+    trainer_base._release_inference_memory()
+    trainer_base.inference_client.release_memory.assert_not_called()
+    assert not trainer_base.called_release_inference_memory
+
+    # Co-hosting: memory release called
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=True)
+    trainer_base._release_inference_memory()
+    trainer_base.inference_client.release_memory.assert_called_once()
+    assert trainer_base.called_release_inference_memory is True
+
+    # Co-hosting with error
+    trainer_base.called_release_inference_memory = None
+    trainer_base.inference_client.release_memory.side_effect = Exception(
+        'Memory error'
+    )
+    with pytest.raises(
+        RuntimeError,
+        match='Failed to release inference engine memory, error: Memory error',
+    ):
+        trainer_base._release_inference_memory()
+
+
+def test_prepare_for_generation(trainer_base, mock_model):
+    """Test _prepare_for_generation for model configuration and cleanup."""
+    trainer_base.reference_model = mock_model
+    trainer_base.value_engine = mock_model
+    trainer_base.policy_engine = mock_model
+    trainer_base.clean_up = MagicMock()
+    trainer_base.device = 'cuda'  # Ensure self.device is 'cuda'
+
+    # Non-co-hosting scenario
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=False)
     trainer_base._prepare_for_generation()
-    trainer_base.policy_engine.eval.assert_called()
+    calls = [
+        mock_model.to.call_args_list[0][0][0],  # reference_model to cpu
+        mock_model.to.call_args_list[1][0][0],  # policy_engine to cuda
+        mock_model.to.call_args_list[2][0][0],  # value_engine to cpu
+    ]
+    assert calls == ['cpu', 'cuda', 'cpu']
+    assert mock_model.eval.call_count == 2  # policy_engine and reference_model
+    trainer_base.clean_up.assert_called_once()
+
+    # Co-hosting scenario
+    mock_model.to.reset_mock()
+    mock_model.eval.reset_mock()
+    trainer_base.clean_up.reset_mock()
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=True)
+    trainer_base._prepare_for_generation()
+    calls = [
+        mock_model.to.call_args_list[0][0][0],  # reference_model to cpu
+        mock_model.to.call_args_list[1][0][0],  # policy_engine to cpu
+        mock_model.to.call_args_list[2][0][0],  # value_engine to cpu
+    ]
+    assert calls == ['cpu', 'cpu', 'cpu']
+    assert mock_model.eval.call_count == 1  # only reference_model
+    trainer_base.clean_up.assert_called_once()
+
+
+def test_prepare_for_pre_processing(trainer_base, mock_model):
+    """Test _prepare_for_pre_processing for model configuration and memory release."""
+    trainer_base.reference_model = mock_model
+    trainer_base.value_engine = mock_model
+    trainer_base.policy_engine = mock_model
+    trainer_base.clean_up = MagicMock()
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=True)
+    trainer_base.device = 'cuda'  # Ensure self.device is 'cuda'
+
+    trainer_base._prepare_for_pre_processing()
+    calls = [
+        mock_model.to.call_args_list[0][0][0],  # policy_engine to cuda
+        mock_model.to.call_args_list[1][0][0],  # value_engine to cuda
+        mock_model.to.call_args_list[2][0][0],  # reference_model to cuda
+    ]
+    assert calls == ['cuda', 'cuda', 'cuda']
+    assert mock_model.eval.call_count == 3  # all models
+    trainer_base.inference_client.release_memory.assert_called_once()
+    trainer_base.clean_up.assert_called_once()
+
+
+def test_prepare_for_training(trainer_base, mock_model):
+    """Test _prepare_for_training for model configuration and memory release."""
+    trainer_base.reference_model = mock_model
+    trainer_base.value_engine = mock_model
+    trainer_base.policy_engine = mock_model
+    trainer_base.clean_up = MagicMock()
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=True)
+    trainer_base.device = 'cuda'  # Ensure self.device is 'cuda'
 
     trainer_base._prepare_for_training()
-    trainer_base.policy_engine.train.assert_called()
+    calls = [
+        mock_model.to.call_args_list[0][0][0],  # reference_model to cpu
+        mock_model.to.call_args_list[1][0][0],  # policy_engine to cuda
+        mock_model.to.call_args_list[2][0][0],  # value_engine to cuda
+    ]
+    assert calls == ['cpu', 'cuda', 'cuda']
+    assert mock_model.train.call_count == 2  # policy_engine and value_engine
+    assert mock_model.eval.call_count == 0
+    trainer_base.inference_client.release_memory.assert_called_once()
+    trainer_base.clean_up.assert_called_once()
 
 
 def test_checkpoint_saving(trainer_base):

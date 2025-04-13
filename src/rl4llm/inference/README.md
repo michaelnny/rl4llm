@@ -19,7 +19,7 @@ PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
 
 ### Important for Co-hosting SGLang with Training Models
 
-If you want to co-host the inference engine and training models on the same devices, use the `--enable-memory-saver` option, which requires using the torch memory saver package. You can install it with `pip install torch-memory-saver`.
+If you want to co-hosting the inference engine and training models on the same devices, use the `--enable-memory-saver` option, which requires using the torch memory saver package. You can install it with `pip install torch-memory-saver`.
 
 ```bash
 PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \

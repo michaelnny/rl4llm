@@ -236,6 +236,8 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.value_update_count = 0
         self.ref_update_count = 0
 
+        self.called_release_inference_memory = None
+
         self.initialize_trainer()
 
         if self.is_inference_engine_enabled():
@@ -294,88 +296,173 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     def _prepare_for_generation(self):
         """Free up GPU memory and switch models to eval mode for rollout."""
 
-        # Offload any possible state to free up GPU memory
-        if self.reference_model is not None:
-            self.reference_model = self.reference_model.to('cpu')
-            self.reference_model.eval()
-
-        if self.can_offload_state(self.policy_engine):
-            self.policy_engine.offload_states()
-        if self.value_engine is not None:
-            if self.can_offload_state(self.value_engine):
-                self.value_engine.offload_states()
-            self.value_engine = self.value_engine.to('cpu')
-
+        self._configure_model(self.reference_model, 'cpu', mode='eval')
         if self.is_cohost_inference_engine():
-            try:
-                self.policy_engine = self.policy_engine.to('cpu')
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to offload deepspeed engine, error: {str(e)}"
-                )
+            self._configure_model(
+                self.policy_engine, 'cpu', state_action='offload'
+            )
         else:
-            self.policy_engine.eval()
-
+            self._configure_model(
+                self.policy_engine,
+                self.device,
+                state_action='offload',
+                mode='eval',
+            )
+        self._configure_model(self.value_engine, 'cpu', state_action='offload')
         self.clean_up()
+
+        # # Offload any possible state to free up GPU memory
+        # if self.reference_model is not None:
+        #     self.reference_model = self.reference_model.to('cpu')
+        #     self.reference_model.eval()
+
+        # if self.can_offload_state(self.policy_engine):
+        #     self.policy_engine.offload_states()
+        # if self.value_engine is not None:
+        #     if self.can_offload_state(self.value_engine):
+        #         self.value_engine.offload_states()
+        #     self.value_engine = self.value_engine.to('cpu')
+
+        # if self.is_cohost_inference_engine():
+        #     try:
+        #         self.policy_engine = self.policy_engine.to('cpu')
+        #     except Exception as e:
+        #         raise RuntimeError(
+        #             f"Failed to offload deepspeed engine, error: {str(e)}"
+        #         )
+        # else:
+        #     self.policy_engine.eval()
+
+        # self.clean_up()
 
     def _prepare_for_pre_processing(self):
         """Switch models handle pre-processing (like compute logprobs) before training."""
 
         # Inference engine is not needed
-        if self.is_cohost_inference_engine():
-            try:
-                # Try offload GPU RAM caches
-                self.inference_client.release_memory()
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to offload inference engine, error: {str(e)}"
-                )
+        self._release_inference_memory()
 
         self.clean_up()
 
-        # For pre-processing a need all models on CUDA
-        self.policy_engine = self.policy_engine.to(self.device)
-        if self.can_offload_state(self.policy_engine):
-            self.policy_engine.offload_states()
-        self.policy_engine.eval()
+        self._configure_model(
+            self.policy_engine, self.device, state_action='offload', mode='eval'
+        )
+        self._configure_model(
+            self.value_engine, self.device, state_action='offload', mode='eval'
+        )
+        self._configure_model(self.reference_model, self.device, mode='eval')
 
-        if self.value_engine is not None:
-            if self.can_offload_state(self.value_engine):
-                self.value_engine.offload_states()
-            self.value_engine = self.value_engine.to(self.device)
-            self.value_engine.eval()
+        # # For pre-processing a need all models on CUDA
+        # self.policy_engine = self.policy_engine.to(self.device)
+        # if self.can_offload_state(self.policy_engine):
+        #     self.policy_engine.offload_states()
+        # self.policy_engine.eval()
 
-        if self.reference_model is not None:
-            self.reference_model = self.reference_model.to(self.device)
-            self.reference_model.eval()
+        # if self.value_engine is not None:
+        #     if self.can_offload_state(self.value_engine):
+        #         self.value_engine.offload_states()
+        #     self.value_engine = self.value_engine.to(self.device)
+        #     self.value_engine.eval()
+
+        # if self.reference_model is not None:
+        #     self.reference_model = self.reference_model.to(self.device)
+        #     self.reference_model.eval()
 
     def _prepare_for_training(self):
         """Switch models to train mode."""
-        if self.is_cohost_inference_engine():
-            try:
-                # Try offload GPU RAM caches
-                self.inference_client.release_memory()
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to offload inference engine, error: {str(e)}"
-                )
 
-        # Training phase we don't need the reference model
-        if self.reference_model is not None:
-            self.reference_model = self.reference_model.to('cpu')
-
+        self._release_inference_memory()
+        self._configure_model(self.reference_model, 'cpu')
         self.clean_up()
+        self._configure_model(
+            self.policy_engine, self.device, state_action='reload', mode='train'
+        )
+        self._configure_model(
+            self.value_engine, self.device, state_action='reload', mode='train'
+        )
 
-        self.policy_engine = self.policy_engine.to(self.device)
-        if self.can_offload_state(self.policy_engine):
-            self.policy_engine.reload_states()
-        self.policy_engine.train()
+        # if self.is_cohost_inference_engine():
+        #     try:
+        #         # Try offload GPU RAM caches
+        #         self.inference_client.release_memory()
+        #     except Exception as e:
+        #         raise RuntimeError(
+        #             f"Failed to offload inference engine, error: {str(e)}"
+        #         )
 
-        if self.value_engine is not None:
-            self.value_engine = self.value_engine.to(self.device)
-            if self.can_offload_state(self.value_engine):
-                self.value_engine.reload_states()
-            self.value_engine.train()
+        # # Training phase we don't need the reference model
+        # if self.reference_model is not None:
+        #     self.reference_model = self.reference_model.to('cpu')
+
+        # self.clean_up()
+
+        # self.policy_engine = self.policy_engine.to(self.device)
+        # if self.can_offload_state(self.policy_engine):
+        #     self.policy_engine.reload_states()
+        # self.policy_engine.train()
+
+        # if self.value_engine is not None:
+        #     self.value_engine = self.value_engine.to(self.device)
+        #     if self.can_offload_state(self.value_engine):
+        #         self.value_engine.reload_states()
+        #     self.value_engine.train()
+
+    def _configure_model(
+        self,
+        model: Union[PreTrainedModel, DeepSpeedEngine],
+        device: torch.device,
+        state_action: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> None:
+        """
+        Configure a model by moving it to a specified device,
+        managing its optimizer states (deepspeed engine), and setting its train/eval mode.
+
+        Args:
+            model (Union[PreTrainedModel, DeepSpeedEngine]): The model to configure, or None if no configuration is needed.
+            device (str): The target device to move the model to (e.g., 'cpu', 'cuda').
+            state_action (Optional[str], optional): Action to perform on deepspeed engine states, if supported.
+                Can be 'offload' to offload states or 'reload' to reload states. Defaults to None.
+            mode (Optional[str], optional): Mode to set the model to. Can be 'eval' for evaluation
+                or 'train' for training. Defaults to None, in which case no mode is set.
+
+        Returns:
+            None
+        """
+        if state_action is not None and state_action not in [
+            'offload',
+            'reload',
+        ]:
+            raise ValueError(f"Invalid state_action {state_action}")
+        if mode is not None and mode not in ['train', 'eval']:
+            raise ValueError(f"Invalid mode {mode}")
+
+        if model is not None:
+            model = model.to(device)
+            if self.can_offload_state(model) and state_action:
+                if state_action == 'offload':
+                    model.offload_states()
+                elif state_action == 'reload':
+                    model.reload_states()
+            if mode == 'eval':
+                model.eval()
+            elif mode == 'train':
+                model.train()
+
+    def _release_inference_memory(self):
+        """Try to release inference memory in co-hosting mode"""
+        if (
+            not self.is_cohost_inference_engine()
+            or self.called_release_inference_memory
+        ):
+            return
+
+        try:
+            self.inference_client.release_memory()
+            self.called_release_inference_memory = True
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to release inference engine memory, error: {str(e)}"
+            )
 
     def transform_batch_rewards(
         self, episodes: List[EpisodeData]
@@ -478,16 +565,19 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 self.logger.debug(
                     f"Attempting to save weights to {temp_ckpt_path}"
                 )
-                # Ensure model is on CUDA
-                self.policy_engine = self.policy_engine.to(self.device)
+                # Free up model
+                self._configure_model(
+                    self.value_engine,
+                    'cpu',
+                    state_action='offload',
+                    mode='eval',
+                )
                 self.save_weights_hf_pretrained(
                     self.policy_engine, temp_ckpt_path
                 )
                 self.logger.debug(
                     f"Successfully saved weights to {temp_ckpt_path}"
                 )
-                # Free up GPU memory
-                self.policy_engine = self.policy_engine.to('cpu')
                 self.clean_up()
 
                 # Only the master process interacts with the inference client
@@ -501,6 +591,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                         self.inference_client.update_weights_from_file(
                             model_path=temp_ckpt_path
                         )
+                        self.called_release_inference_memory = False
                         self.logger.debug(
                             'Inference engine weights updated successfully by master.'
                         )
