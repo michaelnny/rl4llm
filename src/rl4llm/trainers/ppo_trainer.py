@@ -408,6 +408,9 @@ class PPOTrainer(RLTrainer):
         # Training specific pre-processing
         rewards = self.transform_batch_rewards(episodes).cpu()
 
+        if self.config.normalize_rewards:
+            rewards = self.whiten(rewards)
+
         # Prepare batched sequences for model forward pass
         sequences = [
             torch.concat([ep.prompt_tokens, ep.completion_tokens]).long()

@@ -33,15 +33,16 @@ value_model:
   model_max_length: 4000
 
 ppo:
-  max_steps: 200
-  train_rollout_size: 512
+  max_steps: 100
+  train_rollout_size: 256
   num_updates: 1
   train_micro_batch_size: 4
   train_batch_size: 64
   gamma: 1.0                            # discount
+  gae_lambda: 0.95
   clip_eps: 0.2                         # policy clip parameter
   value_clip_eps: 0.2                   # value clip parameter
-  normalize_rewards: false              # not needed as we separate KL loss
+  normalize_rewards: true               
   normalize_advantages: true
   kl_loss_coef: 0.0
   entropy_loss_coef: 0.0
@@ -95,7 +96,7 @@ deepspeed:
   optimizer:
     type: Adam
     params:
-      lr: 1.0e-6                   
+      lr: 5.0e-7                   
       betas: [0.9, 0.999]
       eps: 1.0e-8
       weight_decay: 0.0
