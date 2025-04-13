@@ -107,6 +107,7 @@ class PPOTrainer(RLTrainer):
         seed: Optional[int] = 175,
     ):
         """Initialize the PPO trainer instance"""
+        """Initialize the PPO trainer instance"""
 
         super().__init__(
             config=config,
@@ -303,7 +304,7 @@ class PPOTrainer(RLTrainer):
 
         self._configure_model(self.policy_engine, 'cpu', 'offload')
         self.clean_up()
-        self._configure_model(self.value_engine, self.device, 'load')
+        self._configure_model(self.value_engine, self.device, 'reload')
         self._train_value_step(train_dataloader)
 
     @torch.inference_mode()

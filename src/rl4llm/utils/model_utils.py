@@ -55,9 +55,24 @@ class ModelWrapperWithValueHead(nn.Module):
         if hasattr(base_model, 'output'):
             del base_model.output
 
+        # Extract just the transformer part without the LM head
+        if hasattr(base_model, 'transformer'):
+            self.model = base_model.transformer
+        elif hasattr(base_model, 'model'):
+            self.model = base_model.model
+        else:
+            raise ValueError("Base model has 'model' as torso.")
+
+        # Free memory by deleting the LM head
+        if hasattr(base_model, 'lm_head'):
+            del base_model.lm_head
+        if hasattr(base_model, 'output'):
+            del base_model.output
+
         self.config = base_model.config
 
         # Define the value head
+        self.value_head = nn.Linear(self.config.hidden_size, 1, bias=False)
         self.value_head = nn.Linear(self.config.hidden_size, 1, bias=False)
 
         self._init_value_head()
