@@ -1,6 +1,6 @@
 """Implements GRPO trainer"""
 
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from deepspeed import DeepSpeedEngine
@@ -11,7 +11,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.base_trainer import RewardTransform, RLConfig, RLTrainer
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.envs import EpisodeData, LocalLLMEnv
 from rl4llm.logging import LoggingManager
 
@@ -87,9 +87,7 @@ class GRPOTrainer(RLTrainer):
         config: GRPOConfig,
         tokenizer: PreTrainedTokenizer,
         policy_engine: DeepSpeedEngine,
-        dist_manager: DistributedManager,
-        logger: LoggingManager,
-        artifacts_path: str,
+        log_config: Dict[str, Any],
         train_env: LocalLLMEnv,
         eval_env: Optional[LocalLLMEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
@@ -97,17 +95,17 @@ class GRPOTrainer(RLTrainer):
         reward_transform_fn: Optional[RewardTransform] = None,
         seed: Optional[int] = 175,
     ):
+        """Initialize the GRPO trainer instance"""
 
         super().__init__(
             config=config,
             tokenizer=tokenizer,
             policy_engine=policy_engine,
-            dist_manager=dist_manager,
-            logger=logger,
-            artifacts_path=artifacts_path,
+            log_config=log_config,
             train_env=train_env,
             eval_env=eval_env,
             ref_model=ref_model,
+            value_engine=None,  # GRPO not using value model
             inference_client=inference_client,
             reward_transform_fn=reward_transform_fn,
             seed=seed,
@@ -141,7 +139,7 @@ class GRPOTrainer(RLTrainer):
             raise ValueError('No samples for training')
 
         local_rollout_size = (
-            self.config.train_rollout_size // self.dist_manager.world_size
+            self.config.train_rollout_size // self.dist_ops.world_size
         )
 
         if len(flatted_samples) > local_rollout_size:
@@ -177,7 +175,7 @@ class GRPOTrainer(RLTrainer):
         loss_mask = experience_batch.loss_mask.to(self.device)
 
         if self.config.normalize_advantages:
-            advantages = self.masked_whiten(advantages, loss_mask)
+            advantages = self.dist_masked_whiten(advantages, loss_mask)
 
         # PPO clipped surrogate PG loss
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
@@ -190,15 +188,15 @@ class GRPOTrainer(RLTrainer):
         pg_losses = -torch.min(pg_losses1, pg_losses2)
 
         with torch.no_grad():
-            approxkl = 0.5 * self.masked_mean(
+            approxkl = 0.5 * self.dist_masked_mean(
                 torch.square(pi_logprobs - behavior_logprobs), loss_mask
             )
-            clipfrac = self.masked_mean(
+            clipfrac = self.dist_masked_mean(
                 torch.lt(pg_losses2, pg_losses1), loss_mask
             )
 
         # First average over the sequence length, then average over the batch
-        pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
+        pg_loss = self.dist_masked_mean(pg_losses, loss_mask, dim=1).mean()
 
         # Compute entropy for the policy
         # Convert log probabilities to probabilities first
@@ -230,7 +228,7 @@ class GRPOTrainer(RLTrainer):
             # per_token_log_ratio = torch.clamp(ref_logprobs - pi_logprobs, min=-20, max=20)
             # per_token_kl = torch.exp(per_token_log_ratio) - per_token_log_ratio - 1.0
 
-            kl = self.masked_mean(per_token_kl, loss_mask, dim=1).mean()
+            kl = self.dist_masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
             loss += kl_loss
@@ -280,7 +278,7 @@ class GRPOTrainer(RLTrainer):
         local_rollout_size = (
             self.config.eval_rollout_size
             // self.config.eval_batch_size
-            // self.dist_manager.world_size
+            // self.dist_ops.world_size
         )
 
         # Use greedy sampling
@@ -333,7 +331,7 @@ class GRPOTrainer(RLTrainer):
 
         # we always use batch size of 1 during training roll out
         local_rollout_size = (
-            self.config.train_rollout_size // self.dist_manager.world_size
+            self.config.train_rollout_size // self.dist_ops.world_size
         )
         collected_episodes: List[List[EpisodeData]] = []
         local_count = 0

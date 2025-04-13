@@ -16,7 +16,7 @@ logger = logging.getLogger(LOGGER_NAME)
 T = TypeVar('T')
 
 
-class DistributedManager:
+class DistributedOps:
     """
     Handles distributed training setup and communication utilities for both
     tensors and arbitrary Python objects.
@@ -476,8 +476,8 @@ class DistributedManager:
         torch.cuda.synchronize(self.device)
 
     @classmethod
-    def get_instance(cls, **kwargs) -> 'DistributedManager':
-        """Gets the singleton instance of the DistributedManager."""
+    def get_instance(cls, **kwargs) -> 'DistributedOps':
+        """Gets the singleton instance of the DistributedOps."""
         if cls._instance is None:
             cls._instance = cls(**kwargs)
         return cls._instance
@@ -487,4 +487,4 @@ class DistributedManager:
         if dist.is_initialized():
             self.logger.info('Destroying process group.')
             dist.destroy_process_group()
-            DistributedManager._instance = None
+            DistributedOps._instance = None

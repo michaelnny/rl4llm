@@ -1,9 +1,10 @@
 import gc
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
-import numpy as np
 import torch
-import torch.nn as nn
+import torch.distributed as dist
+
+from rl4llm.core.distributed import DistributedOps
 
 
 class TrainingMixin:
@@ -11,6 +12,12 @@ class TrainingMixin:
     A mixin class providing common utility functions for training loops,
     like gradient norm computation, masked operations, and whitening.
     """
+
+    def __init__(self, dist_ops: Optional[DistributedOps] = None):
+        """
+        Initialize with DistributedOps instance.
+        """
+        self.dist_ops = dist_ops or DistributedOps.get_instance()
 
     @staticmethod
     def clean_up():
@@ -215,6 +222,283 @@ class TrainingMixin:
         output = torch.where(mask, whitened_values, values)
 
         return output
+
+    # --- Distributed operations ---
+    def dist_masked_sum(
+        self,
+        values: torch.Tensor,
+        mask: torch.Tensor,
+        dim: Optional[Union[int, Tuple]] = None,
+    ) -> torch.Tensor:
+        """
+        Computes the sum of tensor elements where the mask is True, aggregated
+        across all distributed processes.
+
+        Args:
+            values (torch.Tensor): The tensor whose elements are to be summed (local shard).
+                                Can have different shapes across ranks.
+            mask (torch.Tensor): A boolean tensor, broadcastable to `values`.
+            dim (Optional[Union[int, Tuple]]): The dimension or dimensions to reduce locally.
+                                            If None, sums all masked elements locally first.
+
+        Returns:
+            torch.Tensor: The globally summed tensor. The shape depends on the `dim` argument.
+                        Available on all ranks.
+        """
+        # Verify inputs
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert (
+            torch.is_tensor(values) and values.shape == mask.shape
+        ), 'Values and mask must have the same shape'
+
+        # Calculate local masked sum using parent method
+        local_sum = self.masked_sum(values, mask, dim=dim)
+
+        # If only one process, return the local sum
+        if self.dist_ops.world_size == 1:
+            return local_sum
+
+        # Aggregate local sums across all processes using all_reduce
+        global_sum = self.dist_ops.all_reduce_tensor(
+            local_sum, op=dist.ReduceOp.SUM
+        )
+
+        return global_sum
+
+    def dist_masked_mean(
+        self,
+        values: torch.Tensor,
+        mask: torch.Tensor,
+        dim: Optional[Union[int, Tuple]] = None,
+        epsilon: float = 1e-8,
+    ) -> torch.Tensor:
+        """
+        Computes the mean of tensor elements where the mask is True, aggregated
+        across all distributed processes. Handles varying tensor sizes.
+
+        Mean = Global Sum / Global Count
+
+        Args:
+            values (torch.Tensor): The tensor whose elements are to be averaged (local shard).
+                                   Can have different shapes across ranks.
+            mask (torch.Tensor): A boolean tensor, broadcastable to `values`.
+            dim (Optional[Union[int, Tuple]]): The dimension or dimensions to reduce locally
+                                               when calculating sum and count. If None,
+                                               averages all masked elements globally.
+            epsilon (float): Small value added to the denominator for numerical stability.
+
+        Returns:
+            torch.Tensor: The globally averaged tensor. The shape depends on the `dim` argument.
+                          Available on all ranks.
+        """
+        # Verify inputs
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert (
+            torch.is_tensor(values) and values.shape == mask.shape
+        ), 'Values and mask must have the same shape'
+
+        # Calculate local masked sum and local count
+        local_sum = self.masked_sum(values, mask, dim=dim)
+
+        # Ensure mask is broadcastable for count calculation
+        try:
+            broadcast_mask = torch.broadcast_to(mask, values.shape)
+        except RuntimeError as e:
+            raise ValueError(
+                f"Mask shape {mask.shape} cannot be broadcast to values shape {values.shape}"
+            ) from e
+        # Count needs to be float for division and reduction
+        local_count = broadcast_mask.sum(dim=dim).float()
+
+        # If only one process, calculate and return local mean
+        if self.dist_ops.world_size == 1:
+            # Use the local masked_mean method directly for consistency
+            # return self.masked_mean(values, mask, dim=dim)
+            # Or calculate from local sum/count:
+            mean = local_sum / (local_count + epsilon)
+            # Handle division by zero if local_count is 0
+            if dim is not None:
+                mean = torch.where(
+                    local_count > 0, mean, torch.zeros_like(mean)
+                )
+            elif local_count == 0:
+                mean = torch.zeros_like(mean)
+            return mean
+
+        # Aggregate local sums and counts across all processes
+        global_sum = self.dist_ops.all_reduce_tensor(
+            local_sum, op=dist.ReduceOp.SUM
+        )
+        global_count = self.dist_ops.all_reduce_tensor(
+            local_count, op=dist.ReduceOp.SUM
+        )
+
+        # Calculate global mean
+        global_mean = global_sum / (global_count + epsilon)
+
+        # Handle potential division by zero if global_count is zero
+        # If dim is specified, global_count might have zeros in some entries
+        if dim is not None:
+            # Ensure global_mean has the correct shape if keepdim=True was effectively used
+            if global_sum.shape != global_count.shape:
+                global_mean = torch.where(
+                    global_count > 0, global_mean, torch.zeros_like(global_mean)
+                )
+            else:
+                global_mean = torch.where(
+                    global_count > 0, global_mean, torch.zeros_like(global_mean)
+                )
+
+        elif global_count == 0:  # dim is None, result is scalar
+            global_mean = torch.zeros_like(global_mean)  # Return scalar zero
+
+        return global_mean
+
+    def dist_masked_whiten(
+        self,
+        values: torch.Tensor,
+        mask: torch.Tensor,
+        shift_mean: bool = True,
+        dim: int = -1,
+        epsilon: float = 1e-8,
+    ) -> torch.Tensor:
+        """
+        Whitens tensor elements where the mask is True, using statistics
+        (mean, variance) aggregated across all distributed processes from
+        masked elements only. Handles varying tensor sizes.
+
+        Elements where mask is False remain unchanged in the output tensor.
+
+        Args:
+            values (torch.Tensor): Input tensor (local shard, expected to be float or convertible).
+                                   Can have different shapes across ranks.
+            mask (torch.Tensor): A boolean tensor, broadcastable to `values`.
+            shift_mean (bool): If True (default), shift the mean of valid elements to 0 globally.
+            dim (int): The dimension along which to compute global mean/variance
+                       *using only masked elements*.
+            epsilon (float): Small value added to variance for numerical stability.
+
+        Returns:
+            torch.Tensor: The tensor with masked elements whitened using global statistics.
+                          Has the same shape as the input `values`. Available on all ranks.
+        """
+        # Verify inputs
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert (
+            torch.is_tensor(values) and values.shape == mask.shape
+        ), 'Values and mask must have the same shape'
+
+        # Ensure values is float
+        if not torch.is_floating_point(values):
+            values = values.float()
+
+        # Ensure mask is broadcastable
+        try:
+            broadcast_mask = torch.broadcast_to(mask, values.shape)
+        except RuntimeError as e:
+            raise ValueError(
+                f"Mask shape {mask.shape} cannot be broadcast to values shape {values.shape}"
+            ) from e
+
+        # Calculate local statistics using only masked values
+        num_valid_local = broadcast_mask.sum(dim=dim, keepdim=True).float()
+        # Use 0 where mask is False for sum calculations
+        masked_values_for_stats = torch.where(
+            broadcast_mask, values, torch.zeros_like(values)
+        )
+
+        sum_local = masked_values_for_stats.sum(dim=dim, keepdim=True)
+        sum_sq_local = (masked_values_for_stats**2).sum(dim=dim, keepdim=True)
+
+        # Handle single-process case
+        if self.dist_ops.world_size == 1:
+            # Use the local masked_whiten directly
+            return self.masked_whiten(
+                values,
+                broadcast_mask,
+                shift_mean=shift_mean,
+                dim=dim,
+                epsilon=epsilon,
+            )
+
+        # Aggregate local statistics across all processes
+        global_sum = self.dist_ops.all_reduce_tensor(
+            sum_local, op=dist.ReduceOp.SUM
+        )
+        global_sum_sq = self.dist_ops.all_reduce_tensor(
+            sum_sq_local, op=dist.ReduceOp.SUM
+        )
+        global_num_valid = self.dist_ops.all_reduce_tensor(
+            num_valid_local, op=dist.ReduceOp.SUM
+        )
+
+        # Calculate global mean and variance from aggregated statistics
+        global_mean = global_sum / (global_num_valid + epsilon)
+        global_var = (
+            global_sum_sq / (global_num_valid + epsilon)
+        ) - global_mean**2
+        global_var = torch.clamp(global_var, min=0.0)
+
+        # Handle cases where global_num_valid is 0 to avoid NaN
+        global_mean = torch.where(
+            global_num_valid > 0, global_mean, torch.zeros_like(global_mean)
+        )
+        # Use 0 variance where no valid data across all processes for that slice
+        global_var = torch.where(
+            global_num_valid > 0, global_var, torch.zeros_like(global_var)
+        )
+
+        # Whiten the *local* valid values using the *global* statistics
+        whitened_values = (values - global_mean) * torch.rsqrt(
+            global_var + epsilon
+        )
+
+        if not shift_mean:
+            whitened_values += global_mean
+
+        # Combine whitened valid values with original invalid values using the *local* mask
+        output = torch.where(broadcast_mask, whitened_values, values)
+
+        return output
+
+    def dist_whiten(
+        self,
+        values: torch.Tensor,
+        shift_mean: bool = True,
+        dim: int = -1,
+        epsilon: float = 1e-8,
+    ) -> torch.Tensor:
+        """
+        Whitens the input tensor along a specified dimension, using statistics
+        (mean, variance) aggregated across all distributed processes. Handles
+        varying tensor sizes.
+
+        Args:
+            values (torch.Tensor): Input tensor (local shard, expected to be float or convertible).
+                                   Can have different shapes across ranks.
+            shift_mean (bool): If True (default), shift the mean to 0 globally.
+            dim (int): The dimension along which to compute global mean/variance.
+            epsilon (float): Small value added to variance for numerical stability.
+
+        Returns:
+            torch.Tensor: The whitened tensor, using global statistics.
+                          Has the same shape as the input `values`. Available on all ranks.
+        """
+        # This is essentially dist_masked_whiten with a mask of all True.
+        mask = torch.ones_like(values).bool()
+        return self.dist_masked_whiten(
+            values=values,
+            mask=mask,
+            shift_mean=shift_mean,
+            dim=dim,
+            epsilon=epsilon,
+        )
 
     @staticmethod
     def compute_logprobs_from_logits(

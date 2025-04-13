@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Union
 import numpy as np
 import yaml
 
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.logging.handlers.base_handler import BaseHandler
 
 

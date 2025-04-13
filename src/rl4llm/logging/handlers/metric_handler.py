@@ -8,7 +8,7 @@ from typing import Callable, Dict, List, Optional, Pattern, Set, Tuple, Union
 import numpy as np
 import torch
 
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.logging.handlers.base_handler import BaseHandler
 
 
@@ -33,14 +33,17 @@ class MetricHandler(BaseHandler):
         'max': lambda x: np.max(x) if is_valid_array(x) else np.nan,
         'sum': lambda x: np.sum(x) if is_valid_array(x) else 0.0,
         'last': lambda x: x[-1] if is_valid_array(x) else np.nan,
+        'p25': lambda x: (
+            np.percentile(x.astype(float), 50) if is_valid_array(x) else np.nan
+        ),
         'p50': lambda x: (
             np.percentile(x.astype(float), 50) if is_valid_array(x) else np.nan
         ),
-        'p90': lambda x: (
+        'p75': lambda x: (
             np.percentile(x.astype(float), 90) if is_valid_array(x) else np.nan
         ),
-        'p95': lambda x: (
-            np.percentile(x.astype(float), 95) if is_valid_array(x) else np.nan
+        'p90': lambda x: (
+            np.percentile(x.astype(float), 90) if is_valid_array(x) else np.nan
         ),
         'p99': lambda x: (
             np.percentile(x.astype(float), 99) if is_valid_array(x) else np.nan
@@ -81,14 +84,14 @@ class MetricHandler(BaseHandler):
 
     def __init__(
         self,
-        dist_manager: DistributedManager,
+        dist_ops: DistributedOps,
         user_aggregation_config: Optional[Dict[str, List[str]]] = None,
         logger: Optional[logging.Logger] = None,
     ):
         super().__init__(logger)
-        self.dist_manager = dist_manager
-        self.is_master = dist_manager.is_master
-        self.world_size = dist_manager.world_size
+        self.dist_ops = dist_ops
+        self.is_master = dist_ops.is_master
+        self.world_size = dist_ops.world_size
 
         effective_config = self.BASE_DEFAULT_METRICS_AGGREGATION_CONFIG.copy()
         if user_aggregation_config:
@@ -281,8 +284,8 @@ class MetricHandler(BaseHandler):
         )
 
         if self.world_size > 1:
-            self.dist_manager.barrier()
-            gathered_data = self.dist_manager.gather_object(
+            self.dist_ops.barrier()
+            gathered_data = self.dist_ops.gather_object(
                 local_metric_buffer, dst=0
             )
             if self.is_master:
@@ -356,7 +359,7 @@ class MetricHandler(BaseHandler):
                             f"Aggregator function '{method_name}' not found for metric '{key}'. Skipping method."
                         )
 
-        self.dist_manager.barrier()
+        self.dist_ops.barrier()
 
         return final_aggregated_metrics
 

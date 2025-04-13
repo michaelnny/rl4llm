@@ -7,7 +7,7 @@ from typing import Dict, Final, List, Optional, Union
 
 import torch
 
-from rl4llm.core.distributed import DistributedManager  # Assuming this exists
+from rl4llm.core.distributed import DistributedOps  # Assuming this exists
 from rl4llm.logging.handlers.base_handler import BaseHandler
 
 # Conditional import for psutil
@@ -39,12 +39,12 @@ class ResourceHandler(BaseHandler):
 
     def __init__(
         self,
-        dist_manager: DistributedManager,
+        dist_ops: DistributedOps,
         logger: Optional[logging.Logger] = None,
         sampling_interval_seconds: float = 10.0,
     ):
         super().__init__(logger)
-        self.dist_manager = dist_manager
+        self.dist_ops = dist_ops
         self._process: Optional[psutil.Process] = None
         self._psutil_initialized: bool = False
         self._torch_gpu_available: bool = False
