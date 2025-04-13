@@ -18,7 +18,7 @@ from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
 from rl4llm.logging import LoggingManager
 from rl4llm.trainers.ppo_trainer import (
-    DistributedManager,
+    DistributedOps,
     PPOConfig,
     PPOTrainer,
 )
@@ -164,7 +164,6 @@ def main():
 
     seed = int(job_config.get('seed', 142))
     log_config = job_config.get('logging')
-    artifacts_path = log_config.get('output_dir')
     datasets_config = job_config.get('dataset')
     max_train_samples = datasets_config.get('max_train_samples', None)
     max_test_samples = datasets_config.get('max_test_samples', None)
@@ -178,12 +177,10 @@ def main():
 
     # Initialize DeepSpeed distributed environment
     deepspeed.init_distributed(verbose=False)
-
+    local_rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
-
-    dist_manager = DistributedManager()
-    logger = LoggingManager(dist_manager, **log_config)
 
     deepspeed_config['train_micro_batch_size_per_gpu'] = (
         ppo_config.train_micro_batch_size
@@ -203,11 +200,10 @@ def main():
     policy_model, tokenizer = build_policy_model_and_tokenizer(
         policy_model_config, torch_dtype
     )
-    policy_model = policy_model.to(dist_manager.device)
+
     value_model, _ = build_value_model_and_tokenizer(
         value_model_config, torch_dtype
     )
-    value_model = value_model.to(dist_manager.device)
 
     if any([k in policy_model_name for k in ['0.5B', '1B', '1.5B']]):
         template = PROMPT_TEMPLATE_EASY
@@ -272,8 +268,8 @@ def main():
         group_size=ppo_config.group_size,
         tokenizer=tokenizer,
         reward_functions=env_reward_functions,
-        rank=dist_manager.local_rank,
-        world_size=dist_manager.world_size,
+        rank=local_rank,
+        world_size=world_size,
     )
     eval_env = env_cls(
         dataset=eval_dataset,
@@ -281,8 +277,8 @@ def main():
         group_size=1,  # always set group size to 1 for evaluation
         tokenizer=tokenizer,
         reward_functions=env_reward_functions,
-        rank=dist_manager.local_rank,
-        world_size=dist_manager.world_size,
+        rank=local_rank,
+        world_size=world_size,
     )
 
     trainer = PPOTrainer(
@@ -290,9 +286,7 @@ def main():
         tokenizer=tokenizer,
         policy_engine=policy_engine,
         value_engine=value_engine,
-        dist_manager=dist_manager,
-        logger=logger,
-        artifacts_path=artifacts_path,
+        log_config=log_config,
         train_env=train_env,
         eval_env=eval_env,
         inference_client=inference_client,

@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -14,13 +15,20 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizer,
 )
+from transformers.modeling_outputs import ModelOutput
 
 from rl4llm.constants import LOGGER_NAME
 
 logger = logging.getLogger(LOGGER_NAME)
 
 
-from transformers.modeling_outputs import CausalLMOutputWithPast
+@dataclass
+class ValueOutput(ModelOutput):
+    """
+    Custom output class with just the value predictions.
+    """
+
+    values: torch.FloatTensor = None
 
 
 class ModelWrapperWithValueHead(nn.Module):
@@ -30,45 +38,56 @@ class ModelWrapperWithValueHead(nn.Module):
     """
 
     def __init__(self, base_model: PreTrainedModel):
+        """Initialize the wrapper and access the torso from the base model"""
         super().__init__()
-        self.base_model = base_model
-        # Important: Make the config easily accessible
+
+        # Extract just the transformer part without the LM head
+        if hasattr(base_model, 'transformer'):
+            self.model = base_model.transformer
+        elif hasattr(base_model, 'model'):
+            self.model = base_model.model
+        else:
+            raise ValueError("Base model has 'model' as torso.")
+
+        # Free memory by deleting the LM head
+        if hasattr(base_model, 'lm_head'):
+            del base_model.lm_head
+        if hasattr(base_model, 'output'):
+            del base_model.output
+
         self.config = base_model.config
 
         # Define the value head
-        self.value_head = nn.Linear(
-            self.config.hidden_size, 1, bias=False
-        )  # Bias often False
+        self.value_head = nn.Linear(self.config.hidden_size, 1, bias=False)
 
-        # Initialize the value head (optional but good practice)
         self._init_value_head()
 
     def _init_value_head(self):
         """Initialize value head weights"""
-        nn.init.normal_(self.value_head.weight, std=0.01)
+        nn.init.normal_(self.value_head.weight, std=0.001)
         if self.value_head.bias is not None:
             nn.init.zeros_(self.value_head.bias)
 
     def forward(
         self, input_ids=None, attention_mask=None, **kwargs
-    ) -> CausalLMOutputWithPast:
+    ) -> ValueOutput:
         # Call the original model's forward method
         kwargs['output_hidden_states'] = True
         kwargs['return_dict'] = True
-        outputs = self.base_model.forward(
+        outputs = self.model.forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             **kwargs,
         )
 
         # Shape: [batch_size, sequence_length, hidden_size]
-        last_hidden_state = outputs.hidden_states[-1]
+        # hidden_state = outputs.hidden_states[-1]
+        hidden_state = outputs.last_hidden_state
 
-        # Pass the hidden state through the value head
         # Shape: [batch_size, sequence_length]
-        values = self.value_head(last_hidden_state).squeeze(-1)
+        values = self.value_head(hidden_state).squeeze(-1)
 
-        return CausalLMOutputWithPast(logits=values)
+        return ValueOutput(values=values)
 
 
 def build_value_model_and_tokenizer(

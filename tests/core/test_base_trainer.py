@@ -12,7 +12,7 @@ from rl4llm.envs import EpisodeData
 
 
 @pytest.fixture
-def dummy_config():
+def mock_config():
     """Provides a minimal RLConfig for testing."""
     config = MagicMock(spec=RLConfig)
     config.train_rollout_size = 8
@@ -26,7 +26,7 @@ def dummy_config():
 
 
 @pytest.fixture
-def dummy_policy_engine():
+def mock_policy_engine():
     """Mocks DeepSpeed policy engine."""
     engine = MagicMock()
     engine.zero_optimization_stage.return_value = 2
@@ -35,8 +35,8 @@ def dummy_policy_engine():
 
 
 @pytest.fixture
-def dummy_dist_manager():
-    """Mocks a simple DistributedManager."""
+def mock_dist_ops():
+    """Mocks a simple DistributedOps."""
     dist = MagicMock()
     dist.world_size = 1
     dist.is_master = True
@@ -45,7 +45,7 @@ def dummy_dist_manager():
 
 
 @pytest.fixture
-def dummy_logger():
+def mock_logger():
     """Mocks LoggingManager."""
     logger = MagicMock()
     logger.timer.return_value.__enter__.return_value = None
@@ -99,7 +99,7 @@ def mock_reward_transform_fn() -> MagicMock:
 
 @pytest.fixture
 def trainer_base(
-    dummy_config, dummy_policy_engine, dummy_dist_manager, dummy_logger
+    mock_config, mock_policy_engine, mock_dist_ops, mock_logger, mocker
 ):
     """Provides a dummy RLTrainer subclass for testing."""
 
@@ -109,9 +109,6 @@ def trainer_base(
 
         def generate_experience(self):
             return ['exp']
-
-        def compute_loss(self, experience_batch, **kwargs):
-            return torch.tensor(0.0), {}
 
         def build_train_loader(self, experience):
             return ['batch']
@@ -131,17 +128,33 @@ def trainer_base(
         def clean_up(self):
             pass
 
-    return DummyTrainer(
-        config=dummy_config,
+    mocker.patch(
+        'rl4llm.core.distributed.DistributedOps.get_instance',
+        return_value=mock_dist_ops,
+        autospec=True,
+    )
+    # mocker.patch(
+    #     "rl4llm.logging.logging_manager.LoggingManager",
+    #     return_value=mock_logger,
+    #     autospec=True
+    # )
+    mocker.patch(
+        'rl4llm.core.base_trainer.LoggingManager',
+        return_value=mock_logger,
+        autospec=True,
+    )
+
+    trainer = DummyTrainer(
+        config=mock_config,
         tokenizer=MagicMock(),
-        policy_engine=dummy_policy_engine,
-        dist_manager=dummy_dist_manager,
-        logger=dummy_logger,
-        artifacts_path='/tmp/test_rl_trainer',
+        policy_engine=mock_policy_engine,
+        log_config={'output_dir': '/tmp/test_rl_trainer'},
         train_env=MagicMock(),
         eval_env=MagicMock(),
         inference_client=MagicMock(),
     )
+
+    return trainer
 
 
 @pytest.fixture
@@ -354,7 +367,7 @@ def test_sync_reference_model_standard_pytorch(trainer_base):
     mock_ref_model.to.assert_any_call(trainer_base.device)
     mock_ref_model.to.assert_any_call('cpu')
     assert trainer_base.ref_update_count == initial_count + 1
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
 def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
@@ -384,7 +397,7 @@ def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
     mock_ref_model.to.assert_any_call(trainer_base.device)
     mock_ref_model.to.assert_any_call('cpu')
     assert trainer_base.ref_update_count == initial_count + 1
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
 @patch('deepspeed.zero.GatheredParameters', autospec=True)
@@ -401,7 +414,7 @@ def test_sync_reference_model_deepspeed_zero3_master(
     mock_ref_model.to.return_value = mock_ref_model
 
     trainer_base.reference_model = mock_ref_model
-    trainer_base.dist_manager.is_master = True
+    trainer_base.dist_ops.is_master = True
 
     # Mock is_zero3_enabled to return True
     mocker.patch.object(trainer_base, 'is_zero3_enabled', return_value=True)
@@ -424,7 +437,7 @@ def test_sync_reference_model_deepspeed_zero3_master(
     mock_ref_model.to.assert_any_call(trainer_base.device)
     mock_ref_model.to.assert_any_call('cpu')
     assert trainer_base.ref_update_count == initial_count + 1
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
 def test_sync_policy_model_inference_disabled(trainer_base, mocker):
@@ -451,7 +464,7 @@ def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
     mock_tempdir.return_value.__enter__.return_value = (
         '/fake/temp/path'  # Mock the temp path
     )
-    trainer_base.dist_manager.is_master = True
+    trainer_base.dist_ops.is_master = True
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
     trainer_base.sync_policy_model()
@@ -463,7 +476,7 @@ def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
     trainer_base.inference_client.update_weights_from_file.assert_called_once_with(
         model_path='/fake/temp/path'
     )
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
 @patch('tempfile.TemporaryDirectory')
@@ -477,7 +490,7 @@ def test_sync_policy_model_success_non_master(
     )
     mock_tempdir.return_value.__enter__.return_value = '/fake/temp/path'
     trainer_base.is_inference_engine_enabled.return_value = True
-    trainer_base.dist_manager.is_master = False  # Set to non-master
+    trainer_base.dist_ops.is_master = False  # Set to non-master
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
     trainer_base.sync_policy_model()
@@ -488,7 +501,7 @@ def test_sync_policy_model_success_non_master(
     # Inference client methods should not be called on non-master
     trainer_base.inference_client.resume_memory.assert_not_called()
     trainer_base.inference_client.update_weights_from_file.assert_not_called()
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
 def test_transform_batch_rewards_single_reward(

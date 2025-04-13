@@ -99,8 +99,8 @@ def mock_ref_model(
 
 
 @pytest.fixture
-def mock_dist_manager() -> MagicMock:
-    """Provides a mock DistributedManager."""
+def mock_dist_ops() -> MagicMock:
+    """Provides a mock DistributedOps."""
     manager = MagicMock()
     manager.world_size = 1
     manager.is_main_process.return_value = True
@@ -195,11 +195,12 @@ def grpo_trainer(
     grpo_config: ExtendedGRPOConfig,
     mock_tokenizer: MagicMock,
     mock_policy_engine: MagicMock,
-    mock_dist_manager: MagicMock,
+    mock_dist_ops: MagicMock,
     mock_logger: MagicMock,
     mock_train_env: MagicMock,
     mock_ref_model: MagicMock,
     mock_reward_transform_fn: MagicMock,
+    mocker,
 ) -> ExtendedGRPOTrainer:
     """Provides a ExtendedGRPOTrainer instance with mocked dependencies."""
     # Mock the reward transform function only if needed (multiple rewards)
@@ -207,18 +208,33 @@ def grpo_trainer(
     if len(mock_train_env.reward_functions) > 1:
         reward_fn = mock_reward_transform_fn
 
+    mocker.patch(
+        'rl4llm.core.distributed.DistributedOps.get_instance',
+        return_value=mock_dist_ops,
+        autospec=True,
+    )
+    # mocker.patch(
+    #     "rl4llm.logging.logging_manager.LoggingManager",
+    #     return_value=mock_logger,
+    #     autospec=True
+    # )
+    mocker.patch(
+        'rl4llm.core.base_trainer.LoggingManager',
+        return_value=mock_logger,
+        autospec=True,
+    )
+
     trainer = ExtendedGRPOTrainer(
         config=grpo_config,
         tokenizer=mock_tokenizer,  # Pass the mock tokenizer
         policy_engine=mock_policy_engine,
-        dist_manager=mock_dist_manager,
-        logger=mock_logger,
-        artifacts_path='/tmp/test_grpo',
+        log_config={'output_dir': '/tmp/test_rl_trainer'},
         train_env=mock_train_env,
         ref_model=mock_ref_model,
         reward_transform_fn=reward_fn,
         seed=42,
     )
+
     # Manually set device and dtype for consistency in tests
     trainer.device = torch.device('cpu')
     trainer.torch_dtype = torch.float32

@@ -13,6 +13,11 @@ This project provides an easy-to-use, research-friendly framework to fine-tune L
 > Currently only tested on single-node setups with a tiny size LLM. Need support/volunteers to help with heavy testing and improvements.
 
 
+## Supported RL Algorithms
+
+- PPO
+- GRPO
+
 
 ## Framework Overview
 
@@ -48,6 +53,11 @@ Here’s a simple diagram:
 │                      │         Path             └──────────────────────┘
 └──────────────────────┘
 ```
+
+### How it works - InferenceEnv and InferenceClient
+
+> [!TIP]
+> Check the example at `scripts/run_train_grpo.py` on how to use the `SGLangClient` that uses HTTP to call the inference server, and an `InferenceEnv` that can handle sample generation.
 
 > [!TIP]
 > Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-hosting mode`.
@@ -90,7 +100,7 @@ This is especially useful in the context of LLM as we often need to handle speci
 ### Dataset Structure
 
 Each environment expects a dataset with at least two fields:
-- `prompt` (pre-formatted input for the model)
+- `prompt` (pre-formatted text for the model)
 - `ground_truth` (correct answer used for rewards)
 
 ---
@@ -176,14 +186,6 @@ Launch an efficient inference server to accelerate sample generation. You can ei
 > We use model checkpoint file to sync the weights between training instance and the SGLang inference engine. If you run inference engine and training in separate servers, make sure you have a shared file system between them. The weights saving path is defined at the `artifacts_path` when launching the trainer.
 
 
-### How it works - InferenceEnv and InferenceClient
-
-In order to handle the communications for sample generation and weight updates, we created a simple `SGLangClient` that uses HTTP to call the inference server, and an `InferenceEnv` that can handle sample generation using the inference client.
-
-> [!TIP]
-> Check the example at `scripts/run_train_grpo.py` on how to use them.
-
-
 ## Centralized Logging & Monitoring
 
 Track performance easily using the built-in logging manager. It supports:
@@ -215,7 +217,7 @@ If you reference or use our project in your research, please cite our work:
 
 
 ```bibtex
-@software{rl4llm2025github,
+@software{the_rl4llm_project,
   title = {{RL 4 LLM}: A research friendly Reinforcement Learning Framework for LLM Fine-Tuning},
   author = {Michael Hu},
   url = {https://github.com/michaelnny/rl4llm},

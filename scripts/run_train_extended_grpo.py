@@ -10,7 +10,7 @@ import torch
 from transformers import PreTrainedTokenizer
 
 from rl4llm.core.base_env import BaseRewardFunction
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import (
     ExploreInferenceEnv,
@@ -200,7 +200,6 @@ def main():
 
     seed = int(job_config.get('seed', 142))
     log_config = job_config.get('logging')
-    artifacts_path = log_config.get('output_dir')
     datasets_config = job_config.get('dataset')
     max_train_samples = datasets_config.get('max_train_samples', None)
     max_test_samples = datasets_config.get('max_test_samples', None)
@@ -213,12 +212,10 @@ def main():
 
     # Initialize DeepSpeed distributed environment
     deepspeed.init_distributed(verbose=False)
-
+    local_rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
-
-    dist_manager = DistributedManager()
-    logger = LoggingManager(dist_manager, **log_config)
 
     deepspeed_config['train_micro_batch_size_per_gpu'] = (
         grpo_config.train_micro_batch_size
@@ -238,7 +235,6 @@ def main():
     policy_model, tokenizer = build_policy_model_and_tokenizer(
         model_config, torch_dtype
     )
-    policy_model = policy_model.to(dist_manager.device)
 
     if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
         template = PROMPT_TEMPLATE_EASY
@@ -302,8 +298,8 @@ def main():
         group_size=grpo_config.group_size,
         tokenizer=tokenizer,
         reward_functions=env_reward_functions,
-        rank=dist_manager.local_rank,
-        world_size=dist_manager.world_size,
+        rank=local_rank,
+        world_size=world_size,
         **explore_env_args,
     )
 
@@ -313,17 +309,15 @@ def main():
         group_size=1,  # always set group size to 1 for evaluation
         tokenizer=tokenizer,
         reward_functions=env_reward_functions,
-        rank=dist_manager.local_rank,
-        world_size=dist_manager.world_size,
+        rank=local_rank,
+        world_size=world_size,
     )
 
     trainer = ExtendedGRPOTrainer(
         config=grpo_config,
         tokenizer=tokenizer,
         policy_engine=policy_engine,
-        dist_manager=dist_manager,
-        logger=logger,
-        artifacts_path=artifacts_path,
+        log_config=log_config,
         train_env=train_env,
         eval_env=eval_env,
         inference_client=inference_client,

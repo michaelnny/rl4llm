@@ -8,7 +8,7 @@ from rl4llm.logging.handlers.metric_handler import MetricHandler
 
 
 @pytest.fixture
-def mock_dist_manager():
+def mock_dist_ops():
     """Provides a mock distributed manager for testing."""
     mock = MagicMock()
     mock.is_master = True
@@ -19,9 +19,9 @@ def mock_dist_manager():
 
 
 @pytest.fixture
-def handler(mock_dist_manager):
+def handler(mock_dist_ops):
     """Returns a MetricHandler instance using a mock distributed manager."""
-    return MetricHandler(dist_manager=mock_dist_manager)
+    return MetricHandler(dist_ops=mock_dist_ops)
 
 
 @pytest.mark.parametrize(
@@ -76,11 +76,11 @@ def test_clear_buffer(handler):
     assert handler._metric_buffer == {}
 
 
-def test_user_config_override(mock_dist_manager):
+def test_user_config_override(mock_dist_ops):
     """Tests aggregation using a user-provided aggregation config."""
     custom_config = {'custom_metric': ['sum', 'count']}
     handler = MetricHandler(
-        dist_manager=mock_dist_manager, user_aggregation_config=custom_config
+        dist_ops=mock_dist_ops, user_aggregation_config=custom_config
     )
     handler.log_scalar('custom_metric', 10.0)
     handler.log_scalar('custom_metric', 5.0)

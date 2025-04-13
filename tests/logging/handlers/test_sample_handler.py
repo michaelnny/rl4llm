@@ -55,8 +55,8 @@ def rank(request):
 
 
 @pytest.fixture
-def mock_dist_manager(rank):
-    """Return a mocked DistributedManager instance."""
+def mock_dist_ops(rank):
+    """Return a mocked DistributedOps instance."""
     return MockDistributedManager(rank=rank, world_size=2)
 
 
@@ -152,11 +152,11 @@ def test_compression_behavior(phase_dir, rank, file_format, mock_logger):
     'file_format', ['parquet', 'jsonl', 'jsonl.gz'], indirect=True
 )
 def test_sample_handler_basic_logging(
-    log_dir, mock_dist_manager, file_format, mock_logger
+    log_dir, mock_dist_ops, file_format, mock_logger
 ):
     """Test that SampleHandler logs to correct phase files."""
     handler = SampleHandler(
-        dist_manager=mock_dist_manager,
+        dist_ops=mock_dist_ops,
         log_dir=log_dir,
         sample_file_format=file_format,
         sample_buffer_size=1,
@@ -174,7 +174,7 @@ def test_sample_handler_basic_logging(
         else:
             assert len(read_jsonl(path)) > 0
 
-    rank = mock_dist_manager.global_rank
+    rank = mock_dist_ops.global_rank
     ext = SampleFileLogger.SUPPORTED_FORMATS[file_format]['extension']
     for phase in ['train', 'eval']:
         assert_exists_and_has_data(
@@ -184,11 +184,11 @@ def test_sample_handler_basic_logging(
 
 @pytest.mark.parametrize('file_format', ['jsonl'], indirect=True)
 def test_sample_handler_flush_and_close(
-    log_dir, mock_dist_manager, file_format, mock_logger
+    log_dir, mock_dist_ops, file_format, mock_logger
 ):
     """Test flush and close of SampleHandler calls corresponding loggers."""
     handler = SampleHandler(
-        dist_manager=mock_dist_manager,
+        dist_ops=mock_dist_ops,
         log_dir=log_dir,
         sample_file_format=file_format,
         sample_buffer_size=10,
@@ -198,7 +198,7 @@ def test_sample_handler_flush_and_close(
     handler.flush()
     handler.close()
 
-    rank = mock_dist_manager.global_rank
+    rank = mock_dist_ops.global_rank
     path = os.path.join(log_dir, 'train', 'samples', f'rank{rank}.jsonl')
     assert os.path.exists(path)
     assert len(read_jsonl(path)) == 1

@@ -23,8 +23,8 @@ def try_compare_fractions_equal(input_str1: str, input_str2: str) -> bool:
         try:
             # Normalize fractions (both \frac, \dfrac, \tfrac) including negatives and decimals
             frac_str = re.sub(
-                r"\\(?:frac|dfrac|tfrac){([+-]?\d*\.?\d+)}{([+-]?\d*\.?\d+)}",
-                r"\1/\2",
+                r'\\(?:frac|dfrac|tfrac){([+-]?\d*\.?\d+)}{([+-]?\d*\.?\d+)}',
+                r'\1/\2',
                 frac_str,
             )
             return float(frac_str)
@@ -32,10 +32,10 @@ def try_compare_fractions_equal(input_str1: str, input_str2: str) -> bool:
             pass
 
         try:
-            num, denom = frac_str.split("/")
+            num, denom = frac_str.split('/')
             denom = float(denom)
             if denom == 0:
-                raise ValueError("Denominator cannot be zero.")
+                raise ValueError('Denominator cannot be zero.')
             return float(num) / denom
         except Exception:
             pass
@@ -45,7 +45,7 @@ def try_compare_fractions_equal(input_str1: str, input_str2: str) -> bool:
         frac_1 = fraction_to_float(input_str1)
         frac_2 = fraction_to_float(input_str2)
         if frac_1 is not None and frac_2 is not None:
-            return math.isclose(frac_1, frac_2, rel_tol=1e-6)
+            return math.isclose(frac_1, frac_2, rel_tol=1e-8)
     except Exception:
         pass
     return False
@@ -56,10 +56,10 @@ def _normalize_expression(expr: str) -> str:
     Normalize a mathematical expression by removing spaces and standardizing formatting.
     """
     # Remove all whitespace
-    expr = re.sub(r"\s+", "", expr)
+    expr = re.sub(r'\s+', '', expr)
 
     # Remove unnecessary parentheses around single terms
-    expr = re.sub(r"\(([^()+-/*]+)\)", r"\1", expr)
+    expr = re.sub(r'\(([^()+-/*]+)\)', r'\1', expr)
 
     return expr
 
@@ -68,7 +68,7 @@ def _split_comma_separated_values(expr: str) -> List[str]:
     """
     Split comma-separated values and normalize each value.
     """
-    parts = [part.strip() for part in expr.split(",")]
+    parts = [part.strip() for part in expr.split(',')]
     return [_normalize_expression(part) for part in parts if part.strip()]
 
 
@@ -78,13 +78,13 @@ def split_multiplicative_terms(expr: str) -> List[str]:
     """
     # Remove outer parentheses if they enclose the entire expression
     expr = expr.strip()
-    if expr.startswith("(") and expr.endswith(")"):
+    if expr.startswith('(') and expr.endswith(')'):
         count = 0
         all_enclosed = True
         for char in expr[1:-1]:
-            if char == "(":
+            if char == '(':
                 count += 1
-            elif char == ")":
+            elif char == ')':
                 count -= 1
             if count < 0:
                 all_enclosed = False
@@ -93,20 +93,20 @@ def split_multiplicative_terms(expr: str) -> List[str]:
             expr = expr[1:-1]
 
     terms = []
-    current_term = ""
+    current_term = ''
     paren_count = 0
 
     for char in expr:
-        if char == "(":
+        if char == '(':
             paren_count += 1
             current_term += char
-        elif char == ")":
+        elif char == ')':
             paren_count -= 1
             current_term += char
-        elif char in ["*", "·"] and paren_count == 0:
+        elif char in ['*', '·'] and paren_count == 0:
             if current_term:
                 terms.append(current_term)
-            current_term = ""
+            current_term = ''
         else:
             current_term += char
 
@@ -116,7 +116,7 @@ def split_multiplicative_terms(expr: str) -> List[str]:
     # Handle implicit multiplication (adjacent parentheses)
     final_terms = []
     for term in terms:
-        parts = re.findall(r"\([^()]+\)", term)
+        parts = re.findall(r'\([^()]+\)', term)
         if len(parts) > 1:
             final_terms.extend(parts)
         else:
@@ -134,7 +134,7 @@ def are_expressions_equal(expr1: str, expr2: str) -> bool:
         return True
 
     # Handle comma-separated values
-    if "," in expr1 and "," in expr2:
+    if ',' in expr1 and ',' in expr2:
         values1 = _split_comma_separated_values(expr1)
         values2 = _split_comma_separated_values(expr2)
 
@@ -194,7 +194,7 @@ def check_expressions_equivalent(
         True if the normalized forms of the two expressions are identical, False otherwise.
     """
     if expression1 is None and expression2 is None:
-        logger.warning("Both values are None")
+        logger.warning('Both values are None')
         return True
     if expression1 is None or expression2 is None:
         return False
@@ -240,7 +240,7 @@ def math_problem_grader(
     Enhanced grader that handles multiple answer formats and extraction methods.
     """
 
-    last_n = kwargs.get("last_n", 1)
+    last_n = kwargs.get('last_n', 1)
 
     if full_answer is None or ground_truth is None:
         logger.warning(

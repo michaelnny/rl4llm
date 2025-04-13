@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 
 
 @pytest.fixture(autouse=True)
@@ -108,9 +108,9 @@ def fake_cuda(monkeypatch):
 
 
 def test_init_single_process(fake_dist):
-    """Tests DistributedManager initialization in a single-process environment."""
+    """Tests DistributedOps initialization in a single-process environment."""
     os.environ['WORLD_SIZE'] = '1'
-    dm = DistributedManager()
+    dm = DistributedOps()
     assert dm.world_size == 1
     assert dm.global_rank == 0
     assert dm.device.type == 'cpu'
@@ -124,12 +124,12 @@ def test_init_single_process(fake_dist):
 
 @pytest.mark.parametrize('rank, expected', [('0', True), ('1', False)])
 def test_is_master(fake_dist, rank, expected):
-    """Tests if DistributedManager correctly identifies the master process."""
+    """Tests if DistributedOps correctly identifies the master process."""
     os.environ['WORLD_SIZE'] = '2'
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     os.environ['RANK'] = rank
-    dm = DistributedManager()
+    dm = DistributedOps()
     assert dm.is_master == expected
 
 
@@ -139,7 +139,7 @@ def test_gather_tensor(fake_dist, monkeypatch):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     os.environ['RANK'] = '0'
-    dm = DistributedManager()
+    dm = DistributedOps()
     tensor = torch.tensor([1])
 
     def fake_gather(tensor, gather_list, dst):
@@ -158,7 +158,7 @@ def test_all_reduce_tensor(fake_dist):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     os.environ['RANK'] = '0'
-    dm = DistributedManager()
+    dm = DistributedOps()
     tensor = torch.tensor([1.0])
     ret = dm.all_reduce_tensor(tensor, op=dist.ReduceOp.SUM)
     assert torch.equal(ret, tensor)
@@ -170,7 +170,7 @@ def test_broadcast_tensor(fake_dist, monkeypatch):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     os.environ['RANK'] = '1'
-    dm = DistributedManager()
+    dm = DistributedOps()
     tensor = torch.tensor([0])
 
     def fake_broadcast(tensor, src):
@@ -187,7 +187,7 @@ def test_gather_object(fake_dist):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     os.environ['RANK'] = '0'
-    dm = DistributedManager()
+    dm = DistributedOps()
     obj = {'key': 'value'}
     gathered = dm.gather_object(obj, dst=0)
     assert gathered[0] == obj
@@ -199,7 +199,7 @@ def test_all_gather_object(fake_dist):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     os.environ['RANK'] = '0'
-    dm = DistributedManager()
+    dm = DistributedOps()
     obj = 'test'
     gathered = dm.all_gather_object(obj)
     assert gathered == ['test', 'test']
@@ -214,7 +214,7 @@ def test_broadcast_object(fake_dist, rank, input_obj, expected):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     os.environ['RANK'] = rank
-    dm = DistributedManager()
+    dm = DistributedOps()
     broadcasted = dm.broadcast_object(input_obj, src=0)
     assert broadcasted == expected
 
@@ -232,7 +232,7 @@ def test_scatter_object(fake_dist, world_size, rank, scatter_list, expected):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     os.environ['RANK'] = rank
-    dm = DistributedManager()
+    dm = DistributedOps()
     if world_size == '1' and not scatter_list:
         with pytest.raises(ValueError):
             dm.scatter_object([], src=0)
@@ -242,13 +242,13 @@ def test_scatter_object(fake_dist, world_size, rank, scatter_list, expected):
 
 
 def test_teardown_and_singleton(fake_dist):
-    """Tests DistributedManager singleton behavior and teardown."""
+    """Tests DistributedOps singleton behavior and teardown."""
     os.environ['WORLD_SIZE'] = '1'
     os.environ['RANK'] = '0'
-    dm1 = DistributedManager.get_instance()
-    dm2 = DistributedManager.get_instance()
+    dm1 = DistributedOps.get_instance()
+    dm2 = DistributedOps.get_instance()
     assert dm1 is dm2
     dm1.teardown()
     assert 'destroy_process_group' in fake_dist['calls']
-    dm3 = DistributedManager.get_instance()
+    dm3 = DistributedOps.get_instance()
     assert dm1 is not dm3

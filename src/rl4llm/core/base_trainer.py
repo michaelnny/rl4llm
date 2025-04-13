@@ -22,6 +22,7 @@ from typing import (
     Optional,
     Tuple,
     TypeAlias,
+    TypedDict,
     Union,
 )
 
@@ -36,7 +37,7 @@ from rl4llm.constants import EVAL_PHASE, LOGGING_PHASES, TRAIN_PHASE
 from rl4llm.core.base_env import BaseEnv, EpisodeData
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.deepspeed_mixin import DeepSpeedUtilsMixin
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.core.training_mixin import TrainingMixin
 from rl4llm.logging import LoggingManager
 
@@ -170,7 +171,7 @@ class RLConfig(BaseModel):
 
 class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     """
-    Base class for training RL algorithms on LLM environments using DeepSpeed with Zero-1/Zero-2 only.
+    Base class for training RL algorithms on LLM environments using DeepSpeed.
     """
 
     _train_phase: str = TRAIN_PHASE
@@ -182,9 +183,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         config: RLConfig,
         tokenizer: PreTrainedTokenizer,
         policy_engine: DeepSpeedEngine,
-        dist_manager: DistributedManager,
-        logger: LoggingManager,
-        artifacts_path: str,
+        log_config: Dict[str, Any],
         train_env: BaseEnv,
         eval_env: Optional[BaseEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
@@ -192,12 +191,17 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         reward_transform_fn: Optional[RewardTransform] = None,
         inference_client: Optional[InferenceClient] = None,
         seed: Optional[int] = 175,
+        **kwargs: Any,
     ):
-        if config.train_rollout_size % dist_manager.world_size != 0:
+        """Initialize the base trainer with DistributedOps instance"""
+
+        TrainingMixin.__init__(self)
+
+        if config.train_rollout_size % self.dist_ops.world_size != 0:
             raise ValueError(
                 'Train rollout size must be divisible by world size'
             )
-        if config.eval_rollout_size % dist_manager.world_size != 0:
+        if config.eval_rollout_size % self.dist_ops.world_size != 0:
             raise ValueError(
                 'Evaluation rollout size must be divisible by world size'
             )
@@ -210,19 +214,21 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.tokenizer = tokenizer
         self.policy_engine = policy_engine
         self.value_engine = value_engine
-        self.dist_manager = dist_manager
-        self.logger = logger
+        self.logger = LoggingManager(self.dist_ops, **log_config)
         self.train_env = train_env
         self.eval_env = eval_env
-        self.artifacts_path = artifacts_path
+        self.output_dir = log_config.get('output_dir')
         self.seed = seed
-        self.device = dist_manager.device
+        self.device = self.dist_ops.device
         self.torch_dtype = self.get_torch_dtype(policy_engine)
 
-        self.checkpoint_dir = os.path.join(artifacts_path, 'checkpoints')
-        if dist_manager.is_master:
+        if not self.output_dir:
+            raise ValueError('Invalid output_dir for logging')
+
+        self.checkpoint_dir = os.path.join(self.output_dir, 'checkpoints')
+        if self.dist_ops.is_master:
             os.makedirs(self.checkpoint_dir, exist_ok=True)
-        dist_manager.barrier()
+        self.dist_ops.barrier()
 
         self.reference_model: Optional[
             Union[PreTrainedModel, DeepSpeedEngine]
@@ -524,7 +530,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     with deepspeed.zero.GatheredParameters(
                         self.reference_model.parameters()
                     ):
-                        if self.dist_manager.is_master:
+                        if self.dist_ops.is_master:
                             self.reference_model.module.load_state_dict(
                                 policy_state_dict
                             )
@@ -541,7 +547,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.ref_update_count += 1
         self.logger.log_scalar('train/reference_update', self.ref_update_count)
         self.logger.debug('Reached barrier after sync attempt.')
-        self.dist_manager.barrier()
+        self.dist_ops.barrier()
         self.logger.debug('Passed barrier after sync attempt.')
 
         self.logger.info('Reference model sync process finished.')
@@ -581,7 +587,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 self.clean_up()
 
                 # Only the master process interacts with the inference client
-                if self.dist_manager.is_master:
+                if self.dist_ops.is_master:
                     try:
                         self.logger.debug(
                             f"Master process updating inference engine from {temp_ckpt_path}..."
@@ -607,7 +613,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 # Barrier to ensure all processes wait until the master (if applicable)
                 # has finished its work within the 'with' block or an error occurred.
                 self.logger.debug('Reached barrier after sync attempt.')
-                self.dist_manager.barrier()
+                self.dist_ops.barrier()
                 self.logger.debug('Passed barrier after sync attempt.')
 
                 self.logger.info('Policy model sync process finished.')
@@ -656,7 +662,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         for ep in samples:
             # Save data to external file
             data_to_log = {
-                'rank': self.dist_manager.global_rank,
+                'rank': self.dist_ops.global_rank,
                 'timestamp': ep.timestamp,
                 'prompt_length': ep.prompt_length,
                 'completion_length': ep.completion_length,
@@ -684,7 +690,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         save_path = os.path.join(self.checkpoint_dir, tag)
         self.logger.info(f"Saving checkpoint to {save_path}...")
         self.policy_engine.save_checkpoint(save_path)
-        self.dist_manager.barrier()
+        self.dist_ops.barrier()
         self.logger.info('Checkpoint saved.')
 
     def train(self, job_config: Dict):
@@ -701,10 +707,10 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 hyperparameters and other metadata useful for logging or reproducibility.
         """
         self.logger.info('Initializing training loop...')
-        if job_config and self.dist_manager.is_master:
+        if job_config and self.dist_ops.is_master:
             self.logger.log_hyperparams(job_config)
 
-        self.dist_manager.synchronize()
+        self.dist_ops.synchronize()
 
         if self.config.eval_interval > 0 and self.eval_env:
             self.logger.info('Running initial evaluation before training...')
@@ -712,7 +718,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 self._prepare_for_generation()
                 self.evaluate_step()
                 self.clean_up()
-            self.dist_manager.barrier()
+            self.dist_ops.barrier()
 
         while self.global_step < self.config.max_steps:
             with self.logger.timer('global_step'):
@@ -723,7 +729,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     self._prepare_for_generation()
                     local_experience = self.generate_experience()
                     self.clean_up()
-                self.dist_manager.barrier()
+                self.dist_ops.barrier()
 
                 self.logger.info(
                     'Preprocessing collected experience for training...'
@@ -732,19 +738,19 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     self._prepare_for_pre_processing()
                     train_dataloader = self.build_train_loader(local_experience)
                     self.clean_up()
-                self.dist_manager.barrier()
+                self.dist_ops.barrier()
 
                 self.logger.info('Starting model training step...')
                 with self.logger.timer('train_step'):
                     self._prepare_for_training()
                     self.train_step(train_dataloader)
                     self.clean_up()
-                self.dist_manager.barrier()
+                self.dist_ops.barrier()
 
                 self.logger.info('Synchronizing policy model...')
                 with self.logger.timer('sync_policy_model'):
                     self.sync_policy_model()
-                self.dist_manager.barrier()
+                self.dist_ops.barrier()
 
                 if (
                     self.reference_model
@@ -756,7 +762,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     self.logger.info('Synchronizing reference model...')
                     with self.logger.timer('sync_reference_model'):
                         self.sync_reference_model()
-                    self.dist_manager.barrier()
+                    self.dist_ops.barrier()
 
                 if (
                     self.config.checkpoint_interval > 0
@@ -777,7 +783,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                         self._prepare_for_generation()
                         self.evaluate_step()
                         self.clean_up()
-                    self.dist_manager.barrier()
+                    self.dist_ops.barrier()
 
             self.logger.aggregate_and_log(self.global_step)
             del local_experience, train_dataloader

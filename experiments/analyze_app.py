@@ -126,10 +126,10 @@ st.markdown(
         color: var(--content-text-color);
         opacity: 0.9;
         line-height: 1.4; /* Adjust line height for preview */
-        max-height: 4.2em; /* Limit height to roughly 3 lines */
+        max-height: 7em; /* Limit height to roughly 5 lines */
         overflow: hidden; /* Hide overflow */
         display: -webkit-box; /* Enable flexbox */
-        -webkit-line-clamp: 3; /* Limit to 3 lines */
+        -webkit-line-clamp: 5; /* Limit to 5 lines */
         -webkit-box-orient: vertical; /* Vertical layout */
     }
     .preview-label {
@@ -214,7 +214,7 @@ def highlight_text(text, search_term):
         return html.escape(text)  # Return escaped text on error
 
 
-def truncate_middle(text, max_length=200, placeholder=' ... '):
+def truncate_middle(text, max_length=200, placeholder=' <......> '):
     """Truncates text showing the start and end, joined by a placeholder."""
     if not isinstance(text, str) or len(text) <= max_length:
         return html.escape(str(text))
@@ -1014,7 +1014,9 @@ if st.session_state.data_loaded and isinstance(filtered_df, pd.DataFrame):
                         '<hr style="margin-top: 0.5rem; margin-bottom: 0.5rem; border-top: 1px solid var(--content-border-color);">',
                         unsafe_allow_html=True,
                     )
-                    row_cols = st.columns([4, 1])  # Ratio for content vs button
+                    row_cols = st.columns(
+                        [4.5, 0.5]
+                    )  # Ratio for content vs button
 
                     # --- Left Column (Info & Previews) ---
                     info_parts = [f"Index: {idx}"]  # Always show original index
@@ -1073,7 +1075,7 @@ if st.session_state.data_loaded and isinstance(filtered_df, pd.DataFrame):
                     completion_text = row.get('completion_text', None)
                     if pd.notna(completion_text) and completion_text:
                         preview = truncate_middle(
-                            completion_text, max_length=250
+                            completion_text, max_length=1000
                         )
                         preview_highlighted = highlight_text(
                             preview,  # Pass already truncated text to highlight

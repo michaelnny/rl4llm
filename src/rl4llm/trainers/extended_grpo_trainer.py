@@ -115,7 +115,7 @@ class ExtendedGRPOTrainer(GRPOTrainer):
 
         # we always use batch size of 1 during training roll out
         local_rollout_size = (
-            self.config.train_rollout_size // self.dist_manager.world_size
+            self.config.train_rollout_size // self.dist_ops.world_size
         )
         collected_episodes: List[List[EpisodeData]] = []
         local_count = 0

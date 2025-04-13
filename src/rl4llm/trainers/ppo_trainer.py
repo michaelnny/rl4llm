@@ -12,7 +12,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.base_trainer import RewardTransform, RLConfig, RLTrainer
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.envs import EpisodeData, LocalLLMEnv
 from rl4llm.logging import LoggingManager
 
@@ -98,9 +98,7 @@ class PPOTrainer(RLTrainer):
         tokenizer: PreTrainedTokenizer,
         policy_engine: DeepSpeedEngine,
         value_engine: DeepSpeedEngine,
-        dist_manager: DistributedManager,
-        logger: LoggingManager,
-        artifacts_path: str,
+        log_config: Dict[str, Any],
         train_env: LocalLLMEnv,
         eval_env: Optional[LocalLLMEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
@@ -108,14 +106,13 @@ class PPOTrainer(RLTrainer):
         reward_transform_fn: Optional[RewardTransform] = None,
         seed: Optional[int] = 175,
     ):
+        """Initialize the PPO trainer instance"""
 
         super().__init__(
             config=config,
             tokenizer=tokenizer,
             policy_engine=policy_engine,
-            dist_manager=dist_manager,
-            logger=logger,
-            artifacts_path=artifacts_path,
+            log_config=log_config,
             train_env=train_env,
             eval_env=eval_env,
             ref_model=ref_model,
@@ -156,7 +153,7 @@ class PPOTrainer(RLTrainer):
             raise ValueError('No samples for training')
 
         local_rollout_size = (
-            self.config.train_rollout_size // self.dist_manager.world_size
+            self.config.train_rollout_size // self.dist_ops.world_size
         )
 
         if len(samples) > local_rollout_size:
@@ -194,7 +191,7 @@ class PPOTrainer(RLTrainer):
         loss_mask = experience_batch.loss_mask.to(self.device)
 
         if self.config.normalize_advantages:
-            advantages = self.masked_whiten(advantages, loss_mask)
+            advantages = self.dist_masked_whiten(advantages, loss_mask)
 
         # PPO clipped surrogate PG loss
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
@@ -207,20 +204,20 @@ class PPOTrainer(RLTrainer):
         pg_losses = -torch.min(pg_losses1, pg_losses2)
 
         with torch.no_grad():
-            approxkl = 0.5 * self.masked_mean(
+            approxkl = 0.5 * self.dist_masked_mean(
                 torch.square(pi_logprobs - behavior_logprobs), loss_mask
             )
-            clipfrac = self.masked_mean(
+            clipfrac = self.dist_masked_mean(
                 torch.lt(pg_losses2, pg_losses1), loss_mask
             )
 
         # First average over the sequence length, then average over the batch
-        pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
+        pg_loss = self.dist_masked_mean(pg_losses, loss_mask, dim=1).mean()
 
         # Compute entropy for the policy
-        # Convert log probabilities to probabilities first
-        probs = torch.exp(pi_logprobs)
-        entropies = torch.sum(probs * pi_logprobs * loss_mask, dim=-1)
+        dist = torch.distributions.Categorical(logits=pi_logits)
+        entropies = dist.entropy()
+        entropies = entropies * loss_mask
         entropy = entropies.mean()
         entropy_loss = -(self.config.entropy_loss_coef * entropy)
 
@@ -244,7 +241,7 @@ class PPOTrainer(RLTrainer):
                 - 1
             )
 
-            kl = self.masked_mean(per_token_kl, loss_mask, dim=1).mean()
+            kl = self.dist_masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
             loss += kl_loss
@@ -281,13 +278,13 @@ class PPOTrainer(RLTrainer):
         vf_losses1 = torch.square(pred_values - returns)
         vf_losses2 = torch.square(vpred_clipped - returns)
         vf_losses = 0.5 * torch.max(vf_losses1, vf_losses2)
-        vf_loss = self.masked_mean(vf_losses, loss_mask, dim=1).mean()
+        vf_loss = self.dist_masked_mean(vf_losses, loss_mask, dim=1).mean()
 
         with torch.no_grad():
-            pred_error = self.masked_mean(
+            pred_error = self.dist_masked_mean(
                 torch.square(pred_values.detach() - returns.detach()), loss_mask
             )
-            clipfrac = self.masked_mean(
+            clipfrac = self.dist_masked_mean(
                 torch.gt(vf_losses2, vf_losses1), loss_mask
             )
 
@@ -300,13 +297,13 @@ class PPOTrainer(RLTrainer):
     def train_step(self, train_dataloader: DataLoader):
         """Performs the policy and value models update using collected rollout."""
 
-        self.value_engine = self.value_engine.to('cpu')
+        self._configure_model(self.value_engine, 'cpu', 'offload')
         self.clean_up()
         self._train_policy_step(train_dataloader)
 
-        self.policy_engine = self.policy_engine.to('cpu')
+        self._configure_model(self.policy_engine, 'cpu', 'offload')
         self.clean_up()
-        self.value_engine = self.value_engine.to(self.device)
+        self._configure_model(self.value_engine, self.device, 'load')
         self._train_value_step(train_dataloader)
 
     @torch.inference_mode()
@@ -319,7 +316,7 @@ class PPOTrainer(RLTrainer):
         local_rollout_size = (
             self.config.eval_rollout_size
             // self.config.eval_batch_size
-            // self.dist_manager.world_size
+            // self.dist_ops.world_size
         )
 
         # Use greedy sampling
@@ -372,7 +369,7 @@ class PPOTrainer(RLTrainer):
 
         # we always use batch size of 1 during training roll out
         local_rollout_size = (
-            self.config.train_rollout_size // self.dist_manager.world_size
+            self.config.train_rollout_size // self.dist_ops.world_size
         )
         collected_episodes: List[List[EpisodeData]] = []
         local_count = 0
@@ -468,7 +465,7 @@ class PPOTrainer(RLTrainer):
 
         batch_values: torch.Tensor = self.value_engine.forward(
             input_ids=batch_states, attention_mask=batch_attention_mask
-        ).logits  # [batch_size, seq_len]
+        ).values  # [batch_size, seq_len]
 
         del batch_attention_mask
 
@@ -548,6 +545,66 @@ class PPOTrainer(RLTrainer):
             )
 
         return transitions
+
+    def _train_policy_step(self, train_dataloader: DataLoader):
+        """Performs the policy update using collected rollout."""
+        for _ in range(self.config.num_updates):
+            for i, micro_batch in enumerate(train_dataloader):
+                input_ids = micro_batch.states.to(self.device)
+                attention_mask = (
+                    input_ids != self.tokenizer.pad_token_id
+                ).bool()
+                pi_logits = self.policy_engine.forward(
+                    input_ids=input_ids, attention_mask=attention_mask
+                ).logits
+
+                loss = self.compute_policy_loss(pi_logits, micro_batch)
+
+                del (micro_batch, input_ids, attention_mask, pi_logits)
+                self.clean_up()
+
+                self.policy_engine.backward(loss)
+                self.policy_engine.step()
+
+                if self.policy_engine.is_gradient_accumulation_boundary():
+                    self.policy_update_count += 1
+                    self.logger.log_scalar(
+                        'train/policy_update', self.policy_update_count
+                    )
+                    self.logger.log_scalar(
+                        'train/policy_learning_rate',
+                        self.policy_engine.get_lr()[0],
+                    )
+
+    def _train_value_step(self, train_dataloader: DataLoader):
+        """Performs the value update using collected rollout."""
+        for _ in range(self.config.num_updates):
+            for i, micro_batch in enumerate(train_dataloader):
+                input_ids = micro_batch.states.to(self.device)
+                attention_mask = (
+                    input_ids != self.tokenizer.pad_token_id
+                ).bool()
+                pred_values = self.value_engine.forward(
+                    input_ids=input_ids, attention_mask=attention_mask
+                ).values
+
+                loss = self.compute_value_loss(pred_values, micro_batch)
+
+                del (micro_batch, input_ids, attention_mask, pred_values)
+                self.clean_up()
+
+                self.value_engine.backward(loss)
+                self.value_engine.step()
+
+                if self.value_engine.is_gradient_accumulation_boundary():
+                    self.value_update_count += 1
+                    self.logger.log_scalar(
+                        'train/value_update', self.value_update_count
+                    )
+                    self.logger.log_scalar(
+                        'train/value_learning_rate',
+                        self.value_engine.get_lr()[0],
+                    )
 
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""
@@ -630,63 +687,3 @@ class PPOTrainer(RLTrainer):
             returns=batch_returns,
             advantages=batch_advantages,
         )
-
-    def _train_policy_step(self, train_dataloader: DataLoader):
-        """Performs the policy update using collected rollout."""
-        for _ in range(self.config.num_updates):
-            for i, micro_batch in enumerate(train_dataloader):
-                input_ids = micro_batch.states.to(self.device)
-                attention_mask = (
-                    input_ids != self.tokenizer.pad_token_id
-                ).bool()
-                pi_logits = self.policy_engine.forward(
-                    input_ids=input_ids, attention_mask=attention_mask
-                ).logits
-
-                loss = self.compute_policy_loss(pi_logits, micro_batch)
-
-                del (micro_batch, input_ids, attention_mask, pi_logits)
-                self.clean_up()
-
-                self.policy_engine.backward(loss)
-                self.policy_engine.step()
-
-                if self.policy_engine.is_gradient_accumulation_boundary():
-                    self.policy_update_count += 1
-                    self.logger.log_scalar(
-                        'train/policy_update', self.policy_update_count
-                    )
-                    self.logger.log_scalar(
-                        'train/policy_learning_rate',
-                        self.policy_engine.get_lr()[0],
-                    )
-
-    def _train_value_step(self, train_dataloader: DataLoader):
-        """Performs the value update using collected rollout."""
-        for _ in range(self.config.num_updates):
-            for i, micro_batch in enumerate(train_dataloader):
-                input_ids = micro_batch.states.to(self.device)
-                attention_mask = (
-                    input_ids != self.tokenizer.pad_token_id
-                ).bool()
-                pred_values = self.value_engine.forward(
-                    input_ids=input_ids, attention_mask=attention_mask
-                ).logits
-
-                loss = self.compute_value_loss(pred_values, micro_batch)
-
-                del (micro_batch, input_ids, attention_mask, pred_values)
-                self.clean_up()
-
-                self.value_engine.backward(loss)
-                self.value_engine.step()
-
-                if self.value_engine.is_gradient_accumulation_boundary():
-                    self.value_update_count += 1
-                    self.logger.log_scalar(
-                        'train/value_update', self.value_update_count
-                    )
-                    self.logger.log_scalar(
-                        'train/value_learning_rate',
-                        self.value_engine.get_lr()[0],
-                    )

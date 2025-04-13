@@ -25,8 +25,8 @@ DEFAULT_INTERVAL = 0.2
 
 
 @pytest.fixture
-def mock_dist_manager():
-    """Returns a mock DistributedManager."""
+def mock_dist_ops():
+    """Returns a mock DistributedOps."""
     return MagicMock()
 
 
@@ -37,10 +37,10 @@ def logger():
 
 
 @pytest.fixture
-def resource_handler(mock_dist_manager, logger):
+def resource_handler(mock_dist_ops, logger):
     """Yields a ResourceHandler with monitoring dependencies enabled."""
     handler = ResourceHandler(
-        dist_manager=mock_dist_manager,
+        dist_ops=mock_dist_ops,
         logger=logger,
         sampling_interval_seconds=DEFAULT_INTERVAL,
     )
@@ -49,7 +49,7 @@ def resource_handler(mock_dist_manager, logger):
 
 
 @pytest.fixture
-def resource_handler_no_deps(mock_dist_manager, logger):
+def resource_handler_no_deps(mock_dist_ops, logger):
     """Yields a ResourceHandler with psutil and CUDA mocked as unavailable."""
     with (
         patch(
@@ -58,7 +58,7 @@ def resource_handler_no_deps(mock_dist_manager, logger):
         patch('torch.cuda.is_available', return_value=False),
     ):
         handler = ResourceHandler(
-            dist_manager=mock_dist_manager,
+            dist_ops=mock_dist_ops,
             logger=logger,
             sampling_interval_seconds=DEFAULT_INTERVAL,
         )
@@ -80,11 +80,11 @@ def test_initialization_no_deps(resource_handler_no_deps):
 @pytest.mark.skipif(
     not _PSUTIL_AVAILABLE_FOR_TEST, reason='psutil not installed'
 )
-def test_initialization_with_psutil(mock_dist_manager, logger):
+def test_initialization_with_psutil(mock_dist_ops, logger):
     """Tests psutil-based initialization of the handler."""
     with patch('torch.cuda.is_available', return_value=False):
         handler = ResourceHandler(
-            dist_manager=mock_dist_manager,
+            dist_ops=mock_dist_ops,
             logger=logger,
             sampling_interval_seconds=DEFAULT_INTERVAL,
         )
@@ -99,7 +99,7 @@ def test_initialization_with_psutil(mock_dist_manager, logger):
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason='torch.cuda not available'
 )
-def test_initialization_with_cuda(mock_dist_manager, logger):
+def test_initialization_with_cuda(mock_dist_ops, logger):
     """Tests torch.cuda-based initialization of the handler."""
     with patch(
         'rl4llm.logging.handlers.resource_handler._PSUTIL_AVAILABLE', False
@@ -109,7 +109,7 @@ def test_initialization_with_cuda(mock_dist_manager, logger):
             side_effect=ImportError('Simulating psutil not available'),
         ):
             handler = ResourceHandler(
-                dist_manager=mock_dist_manager,
+                dist_ops=mock_dist_ops,
                 logger=logger,
                 sampling_interval_seconds=DEFAULT_INTERVAL,
             )
