@@ -9,14 +9,14 @@ from torch import nn
 
 from rl4llm.core.training_mixin import TrainingMixin
 
-DIST_OPS_PATH = 'rl4llm.core.distributed.DistributedOps'
+DIST_OPS_PATH = "rl4llm.core.distributed.DistributedOps"
 
 
 # --- Fixtures  ---
 @pytest.fixture
 def mock_dist_ops():
     """Provides a MagicMock object simulating DistributedOps."""
-    mock = MagicMock(name='MockDistributedOps')
+    mock = MagicMock(name="MockDistributedOps")
     type(mock).world_size = PropertyMock(return_value=1)
 
     def mock_all_reduce(tensor, op=dist.ReduceOp.SUM):
@@ -69,7 +69,7 @@ def test_compute_grad_norm(simple_linear_model):
 
 
 @pytest.mark.parametrize(
-    'dim, expected', [(None, torch.tensor(9.0)), (1, torch.tensor([4.0, 5.0]))]
+    "dim, expected", [(None, torch.tensor(9.0)), (1, torch.tensor([4.0, 5.0]))]
 )
 def test_masked_sum(sample_tensor_data, dim, expected):
     """Test masked sum computation for global and dimension-wise cases."""
@@ -79,7 +79,7 @@ def test_masked_sum(sample_tensor_data, dim, expected):
 
 
 @pytest.mark.parametrize(
-    'dim, expected',
+    "dim, expected",
     [(None, torch.tensor(3.0)), (1, torch.tensor([[2.0], [5.0]]))],
 )
 def test_masked_mean(sample_tensor_data, dim, expected):
@@ -89,7 +89,7 @@ def test_masked_mean(sample_tensor_data, dim, expected):
     assert torch.allclose(result, expected, atol=1e-8)
 
 
-@pytest.mark.parametrize('shift_mean', [True, False])
+@pytest.mark.parametrize("shift_mean", [True, False])
 def test_whiten(sample_tensor_data, shift_mean):
     """Test whitening normalizes data appropriately based on shift_mean."""
     values, _ = sample_tensor_data
@@ -117,9 +117,7 @@ def test_masked_whiten(sample_tensor_data):
                     (3 - 2) / torch.sqrt(torch.tensor(1.0 + epsilon)),
                 ]
             ),
-            torch.tensor(
-                [4.0, (5 - 5) / torch.sqrt(torch.tensor(epsilon)), 6.0]
-            ),
+            torch.tensor([4.0, (5 - 5) / torch.sqrt(torch.tensor(epsilon)), 6.0]),
         ]
     )
     assert torch.allclose(whitened, expected, atol=1e-5)
@@ -183,7 +181,7 @@ def test_compute_entropy_from_logits(logits_and_actions):
 
 
 @pytest.mark.parametrize(
-    'rewards, mask, gamma, expected',
+    "rewards, mask, gamma, expected",
     [
         (
             torch.tensor([1.0, 2.0, 3.0, 4.0]),
@@ -205,165 +203,142 @@ def test_compute_entropy_from_logits(logits_and_actions):
         ),
     ],
 )
-def test_compute_masked_monte_carlo_returns(rewards, mask, gamma, expected):
+def test_masked_monte_carlo_returns(rewards, mask, gamma, expected):
     """Test Monte Carlo returns computation with various masks and gamma values."""
-    result = TrainingMixin.compute_masked_monte_carlo_returns(
-        rewards, mask, gamma
-    )
+    result = TrainingMixin.masked_monte_carlo_returns(rewards, mask, gamma)
     assert torch.allclose(result, expected, atol=1e-5)
 
 
 @pytest.mark.parametrize(
-    'rewards, mask, gamma',
+    "rewards, mask, gamma",
     [
         (torch.tensor([[1.0, 2.0]]), torch.tensor([[True, False]]), 1.0),
         (torch.tensor([1.0, 2.0]), torch.tensor([True, True]), 0.0),
         (torch.tensor([1.0, 2.0]), torch.tensor([True, True]), 1.1),
     ],
 )
-def test_compute_masked_monte_carlo_returns_invalid(rewards, mask, gamma):
+def test_masked_monte_carlo_returns_invalid(rewards, mask, gamma):
     """Test Monte Carlo returns raises AssertionError for invalid inputs."""
     with pytest.raises(AssertionError):
-        TrainingMixin.compute_masked_monte_carlo_returns(rewards, mask, gamma)
+        TrainingMixin.masked_monte_carlo_returns(rewards, mask, gamma)
 
 
-# --- For GAE advantage ---
+# --- Tests for GAE advantages ---
 
 
-@pytest.fixture
-def sample_gae_inputs():
-    """Provides a standard set of rewards, values, gamma, and lambda."""
-    return {
-        'rewards': torch.tensor([0.0, 0.0, 1.0, 0.5, 0.0], dtype=torch.float32),
-        'values': torch.tensor([0.1, 0.2, 0.8, 0.6, 0.1], dtype=torch.float32),
-        'gamma': 0.99,
-        'gae_lambda': 0.95,
-    }
-
-
-def test_masked_gae_advantage_no_mask(sample_gae_inputs):
-    """Tests GAE calculation when all steps are considered (mask is all ones)."""
-    mask = torch.tensor([1, 1, 1, 1, 1], dtype=torch.int)
-    # Updated expected values based on actual correct output
+def test_masked_returns_and_gae_advantages_calculation():
+    """Tests the GAE and returns calculation against manually computed values."""
+    # Define test data directly within the test
+    rewards = torch.tensor(
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 1.5], dtype=torch.float32
+    )
+    values = torch.tensor([0.1, 0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 1.0], dtype=torch.float32)
+    mask = torch.tensor([False, False, False, True, True, True, True, True])
+    # Expected results based on manual calculation (see previous explanation)
     expected_advantages = torch.tensor(
-        [1.2780, 1.2547, 0.7046, -0.0951, -0.1000], dtype=torch.float32
+        [0.0, 0.0, 0.0, 1.4354489, 1.4241882, 1.3080151, 0.76025, 0.5],
+        dtype=torch.float32,
+    )
+    expected_returns = torch.tensor(
+        [0.0, 0.0, 0.0, 1.7354489, 1.8241882, 1.9080151, 1.46025, 1.5],
+        dtype=torch.float32,
     )
 
-    advantages = TrainingMixin.compute_masked_gae_advantage(
-        rewards=sample_gae_inputs['rewards'],
-        values=sample_gae_inputs['values'],
-        mask=mask,
-        gamma=sample_gae_inputs['gamma'],
-        gae_lambda=sample_gae_inputs['gae_lambda'],
+    gamma, gae_lambda = 0.99, 0.95
+
+    # Call the function under test
+    returns, advantages = TrainingMixin.masked_returns_and_gae_advantages(
+        rewards, values, mask, gamma, gae_lambda
     )
 
-    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
+    # Assertions
+    assert returns.shape == rewards.shape
+    assert advantages.shape == rewards.shape
+    assert returns.dtype == rewards.dtype
+    assert advantages.dtype == rewards.dtype
+    assert returns.device == rewards.device
+    assert advantages.device == rewards.device
+    torch.testing.assert_close(advantages, expected_advantages, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(returns, expected_returns, rtol=1e-5, atol=1e-5)
 
 
-def test_masked_gae_advantage_simple_mask(sample_gae_inputs):
-    """Tests GAE calculation with a typical mask for prompt/response sequences."""
-    mask = torch.tensor([0, 0, 1, 1, 0], dtype=torch.int)
-    # Expected values from previous correct calculation
+def test_masked_returns_and_gae_advantages_no_completion():
+    """Tests the case where the mask is all False (no completion tokens)."""
+    rewards = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
+    values = torch.tensor([0.1, 0.1, 0.2], dtype=torch.float32)
+    mask = torch.tensor([False, False, False])
+    expected_returns = torch.zeros_like(rewards)
+    expected_advantages = torch.zeros_like(rewards)
+
+    gamma, gae_lambda = 0.99, 0.95
+
+    returns, advantages = TrainingMixin.masked_returns_and_gae_advantages(
+        rewards, values, mask, gamma, gae_lambda
+    )
+
+    torch.testing.assert_close(advantages, expected_advantages)
+    torch.testing.assert_close(returns, expected_returns)
+    assert returns.shape == rewards.shape
+    assert advantages.shape == rewards.shape
+
+
+def test_masked_returns_and_gae_advantages_all_completion():
+    """Tests the case where the mask is all True (only completion tokens)."""
+    rewards = torch.tensor([0.0, 0.0, 0.5], dtype=torch.float32)
+    values = torch.tensor([0.3, 0.4, 0.6], dtype=torch.float32)
+    mask = torch.tensor([True, True, True])
+    # Expected results based on manual calculation (see previous explanation)
+    expected_advantages = torch.tensor([0.190003, 0.09995, -0.1], dtype=torch.float32)
+    expected_returns = torch.tensor([0.490003, 0.49995, 0.5], dtype=torch.float32)
+
+    gamma, gae_lambda = 0.99, 0.95
+
+    returns, advantages = TrainingMixin.masked_returns_and_gae_advantages(
+        rewards, values, mask, gamma, gae_lambda
+    )
+
+    torch.testing.assert_close(advantages, expected_advantages, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(returns, expected_returns, rtol=1e-5, atol=1e-5)
+    assert returns.shape == rewards.shape
+    assert advantages.shape == rewards.shape
+
+
+def test_masked_returns_and_gae_advantages_gamma_one():
+    """Tests the GAE and returns calculation with gamma = 1.0."""
+    # Use the same base data as the main calculation test
+    rewards = torch.tensor(
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 1.5], dtype=torch.float32
+    )
+    values = torch.tensor([0.1, 0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 1.0], dtype=torch.float32)
+    mask = torch.tensor([False, False, False, True, True, True, True, True])
+
+    # Set discount factors for this test
+    gamma = 1.0
+    gae_lambda = 0.95  # Keep lambda the same as other tests for comparison
+
+    # Expected results based on manual calculation with gamma = 1.0
+    # delta_t = [0.1, 0.2, 0.6, 0.3, 0.5]
+    # adv_t = [1.4959656, 1.4694375, 1.33625, 0.775, 0.5]
+    # return_t = adv_t + v_t[mask] = [1.7959656, 1.8694375, 1.93625, 1.475, 1.5]
     expected_advantages = torch.tensor(
-        [0.0000, 0.0000, 0.7046, -0.0951, 0.0000], dtype=torch.float32
+        [0.0, 0.0, 0.0, 1.4959656, 1.4694375, 1.33625, 0.775, 0.5], dtype=torch.float32
+    )
+    expected_returns = torch.tensor(
+        [0.0, 0.0, 0.0, 1.7959656, 1.8694375, 1.93625, 1.475, 1.5], dtype=torch.float32
     )
 
-    advantages = TrainingMixin.compute_masked_gae_advantage(
-        rewards=sample_gae_inputs['rewards'],
-        values=sample_gae_inputs['values'],
-        mask=mask,
-        gamma=sample_gae_inputs['gamma'],
-        gae_lambda=sample_gae_inputs['gae_lambda'],
+    # Call the function under test
+    returns, advantages = TrainingMixin.masked_returns_and_gae_advantages(
+        rewards, values, mask, gamma, gae_lambda
     )
 
-    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
-
-
-def test_masked_gae_advantage_mask_stops_propagation(
-    sample_gae_inputs,
-):
-    """Tests that a zero in the mask correctly stops the lambda-discounted propagation."""
-    # Mask: [Assistant, Prompt, Assistant] - propagation should break at t=1
-    mask = torch.tensor([1, 0, 1], dtype=torch.int)
-    rewards = torch.tensor([0.5, 0.1, 1.0], dtype=torch.float32)
-    values = torch.tensor([0.2, 0.3, 0.8], dtype=torch.float32)
-    gamma = 0.99  # Using specific gamma/lambda for this test
-    gae_lambda = 0.95
-
-    # Updated expected values based on actual correct output
-    expected_advantages = torch.tensor(
-        [1.1537, 0.0000, 0.2000], dtype=torch.float32  # Adjusted first element
-    )
-
-    advantages = TrainingMixin.compute_masked_gae_advantage(
-        rewards=rewards,
-        values=values,
-        mask=mask,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-    )
-
-    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
-
-
-def test_masked_gae_advantage_all_mask_zeros(sample_gae_inputs):
-    """Tests that advantages are all zero when the mask is all zeros."""
-    mask = torch.zeros_like(sample_gae_inputs['rewards'], dtype=torch.int)
-    expected_advantages = torch.zeros_like(
-        sample_gae_inputs['rewards'], dtype=torch.float32
-    )
-
-    advantages = TrainingMixin.compute_masked_gae_advantage(
-        rewards=sample_gae_inputs['rewards'],
-        values=sample_gae_inputs['values'],
-        mask=mask,
-        gamma=sample_gae_inputs['gamma'],
-        gae_lambda=sample_gae_inputs['gae_lambda'],
-    )
-
-    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
-
-
-def test_masked_gae_advantage_single_element_masked_in():
-    """Tests GAE calculation for a single-element sequence that is masked in."""
-    rewards = torch.tensor([1.0], dtype=torch.float32)
-    values = torch.tensor([0.5], dtype=torch.float32)
-    mask = torch.tensor([1], dtype=torch.int)
-    gamma = 0.99
-    gae_lambda = 0.95
-
-    expected_advantages = torch.tensor([0.5], dtype=torch.float32)
-
-    advantages = TrainingMixin.compute_masked_gae_advantage(
-        rewards=rewards,
-        values=values,
-        mask=mask,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-    )
-
-    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
-
-
-def test_masked_gae_advantage_single_element_masked_out():
-    """Tests GAE calculation for a single-element sequence that is masked out."""
-    rewards = torch.tensor([1.0], dtype=torch.float32)
-    values = torch.tensor([0.5], dtype=torch.float32)
-    mask = torch.tensor([0], dtype=torch.int)
-    gamma = 0.99
-    gae_lambda = 0.95
-
-    expected_advantages = torch.tensor([0.0], dtype=torch.float32)
-
-    advantages = TrainingMixin.compute_masked_gae_advantage(
-        rewards=rewards,
-        values=values,
-        mask=mask,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-    )
-
-    assert torch.allclose(advantages, expected_advantages, atol=1e-4)
+    # Assertions
+    assert returns.shape == rewards.shape
+    assert advantages.shape == rewards.shape
+    assert returns.dtype == rewards.dtype
+    assert advantages.dtype == rewards.dtype
+    torch.testing.assert_close(advantages, expected_advantages, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(returns, expected_returns, rtol=1e-5, atol=1e-5)
 
 
 # --- Tests distributed ops ---
@@ -381,17 +356,16 @@ def sample_data():
 def train_mixin_instance(mock_dist_ops):
     """Provides an instance of TrainingMixin with mocked dist_ops."""
 
-    patch_target = f'{DIST_OPS_PATH}.get_instance'
+    patch_target = f"{DIST_OPS_PATH}.get_instance"
     try:
         # Try patching, might fail if the module doesn't exist
         with patch(patch_target, return_value=mock_dist_ops):
             mixin = TrainingMixin(dist_ops=None)  # Let init fetch the mock
     except (ModuleNotFoundError, AttributeError):
-
         mixin = TrainingMixin(dist_ops=mock_dist_ops)
 
     # Fallback: Directly assign the mock if the above fails or isn't the desired setup
-    if not hasattr(mixin, 'dist_ops') or mixin.dist_ops is not mock_dist_ops:
+    if not hasattr(mixin, "dist_ops") or mixin.dist_ops is not mock_dist_ops:
         mixin.dist_ops = mock_dist_ops
 
     return mixin
@@ -435,9 +409,9 @@ def assert_mock_tensor_call(mock_method, expected_tensor, **kwargs):
 def assert_mock_tensor_calls(mock_method, expected_calls):
     """Asserts a mock was called with a list of specific tensors/kwargs."""
     actual_calls = mock_method.call_args_list
-    assert len(actual_calls) == len(
-        expected_calls
-    ), f"Expected {len(expected_calls)} calls, but got {len(actual_calls)}"
+    assert len(actual_calls) == len(expected_calls), (
+        f"Expected {len(expected_calls)} calls, but got {len(actual_calls)}"
+    )
 
     matched_actual_indices = set()
 
@@ -488,7 +462,7 @@ def assert_mock_tensor_calls(mock_method, expected_calls):
 
 
 # Test dist_masked_sum
-@pytest.mark.parametrize('dim', [None, 0, 1])
+@pytest.mark.parametrize("dim", [None, 0, 1])
 def test_dist_masked_sum_multi_process(
     train_mixin_instance, sample_data, mock_dist_ops, dim
 ):
@@ -511,7 +485,7 @@ def test_dist_masked_sum_multi_process(
 
 
 # Test dist_masked_mean
-@pytest.mark.parametrize('dim', [None, 0, 1])
+@pytest.mark.parametrize("dim", [None, 0, 1])
 def test_dist_masked_mean_multi_process(
     train_mixin_instance, sample_data, mock_dist_ops, dim
 ):
@@ -527,9 +501,7 @@ def test_dist_masked_mean_multi_process(
 
     expected_global_sum = local_sum * world_size
     expected_global_count = local_count * world_size
-    expected_global_mean = expected_global_sum / (
-        expected_global_count + epsilon
-    )
+    expected_global_mean = expected_global_sum / (expected_global_count + epsilon)
     if dim is not None:
         expected_global_mean = torch.where(
             expected_global_count.view_as(expected_global_mean) > 0,
@@ -543,21 +515,19 @@ def test_dist_masked_mean_multi_process(
         values, mask, dim=dim, epsilon=epsilon
     )
 
-    torch.testing.assert_close(
-        dist_result, expected_global_mean, rtol=1e-8, atol=1e-8
-    )
+    torch.testing.assert_close(dist_result, expected_global_mean, rtol=1e-8, atol=1e-8)
     assert mock_dist_ops.all_reduce_tensor.call_count == 2
     # Use helper to check calls with tensors
     expected_calls = [
-        (local_sum, {'op': dist.ReduceOp.SUM}),
-        (local_count, {'op': dist.ReduceOp.SUM}),
+        (local_sum, {"op": dist.ReduceOp.SUM}),
+        (local_count, {"op": dist.ReduceOp.SUM}),
     ]
     assert_mock_tensor_calls(mock_dist_ops.all_reduce_tensor, expected_calls)
 
 
 # Test dist_masked_whiten
-@pytest.mark.parametrize('shift_mean', [True, False])
-@pytest.mark.parametrize('dim', [-1, 0])
+@pytest.mark.parametrize("shift_mean", [True, False])
+@pytest.mark.parametrize("dim", [-1, 0])
 def test_dist_masked_whiten_multi_process(
     train_mixin_instance, sample_data, mock_dist_ops, shift_mean, dim
 ):
@@ -592,9 +562,7 @@ def test_dist_masked_whiten_multi_process(
     )
 
     # Calculate expected output
-    expected_whitened = (values - global_mean) * torch.rsqrt(
-        global_var + epsilon
-    )
+    expected_whitened = (values - global_mean) * torch.rsqrt(global_var + epsilon)
     if not shift_mean:
         expected_whitened += global_mean
     expected_output = torch.where(broadcast_mask, expected_whitened, values)
@@ -604,15 +572,13 @@ def test_dist_masked_whiten_multi_process(
         values, mask, shift_mean=shift_mean, dim=dim, epsilon=epsilon
     )
 
-    torch.testing.assert_close(
-        dist_result, expected_output, rtol=1e-5, atol=1e-5
-    )
+    torch.testing.assert_close(dist_result, expected_output, rtol=1e-5, atol=1e-5)
     assert mock_dist_ops.all_reduce_tensor.call_count == 3
     # Use helper to check calls with tensors
     expected_calls = [
-        (sum_local, {'op': dist.ReduceOp.SUM}),
-        (sum_sq_local, {'op': dist.ReduceOp.SUM}),
-        (num_valid_local, {'op': dist.ReduceOp.SUM}),
+        (sum_local, {"op": dist.ReduceOp.SUM}),
+        (sum_sq_local, {"op": dist.ReduceOp.SUM}),
+        (num_valid_local, {"op": dist.ReduceOp.SUM}),
     ]
     assert_mock_tensor_calls(mock_dist_ops.all_reduce_tensor, expected_calls)
 
@@ -652,15 +618,11 @@ def test_dist_masked_mean_single_process(
 
     dist_result = train_mixin_instance.dist_masked_mean(values, mask)
 
-    torch.testing.assert_close(
-        dist_result, expected_local_mean, rtol=1e-8, atol=1e-8
-    )
+    torch.testing.assert_close(dist_result, expected_local_mean, rtol=1e-8, atol=1e-8)
     mock_dist_ops.all_reduce_tensor.assert_not_called()
 
 
-def test_dist_masked_mean_zero_count_multi_process(
-    train_mixin_instance, mock_dist_ops
-):
+def test_dist_masked_mean_zero_count_multi_process(train_mixin_instance, mock_dist_ops):
     """Tests dist_masked_mean handles zero global count correctly."""
     world_size = 2
     type(mock_dist_ops).world_size = PropertyMock(return_value=world_size)
@@ -687,7 +649,7 @@ def test_dist_masked_whiten_single_process(
 
 
 @patch.object(
-    TrainingMixin, 'dist_masked_whiten', autospec=True
+    TrainingMixin, "dist_masked_whiten", autospec=True
 )  # Mock the target method directly
 def test_dist_whiten_calls_masked_whiten(
     mock_dist_masked_whiten, train_mixin_instance, mock_dist_ops
@@ -706,11 +668,11 @@ def test_dist_whiten_calls_masked_whiten(
     mock_dist_masked_whiten.assert_called_once()
     call_args = mock_dist_masked_whiten.call_args
     passed_self = call_args[0][0]
-    passed_values = call_args.kwargs.get('values')
-    passed_mask = call_args.kwargs.get('mask')
-    passed_shift_mean = call_args.kwargs.get('shift_mean')
-    passed_dim = call_args.kwargs.get('dim')
-    passed_epsilon = call_args.kwargs.get('epsilon')
+    passed_values = call_args.kwargs.get("values")
+    passed_mask = call_args.kwargs.get("mask")
+    passed_shift_mean = call_args.kwargs.get("shift_mean")
+    passed_dim = call_args.kwargs.get("dim")
+    passed_epsilon = call_args.kwargs.get("epsilon")
 
     assert passed_self is train_mixin_instance
     torch.testing.assert_close(passed_values, values)

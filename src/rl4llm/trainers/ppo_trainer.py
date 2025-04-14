@@ -12,9 +12,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.base_trainer import RewardTransform, RLConfig, RLTrainer
-from rl4llm.core.distributed import DistributedOps
 from rl4llm.envs import EpisodeData, LocalLLMEnv
-from rl4llm.logging import LoggingManager
 
 
 class PPOConfig(RLConfig):
@@ -546,17 +544,12 @@ class PPOTrainer(RLTrainer):
 
             # TODO: debug this, try a better way? maybe even try naive GRPO-style for compute the advantages without using state-values
             # Compute GAE advantages
-            # advantages = self.compute_masked_gae_advantage(
-            #     seq_rewards,
-            #     values,
-            #     loss_mask,
-            #     self.config.gamma,
-            #     self.config.gae_lambda,
-            # )
-            # returns = (advantages + values) * loss_mask
-
-            returns, advantages = self._masked_returns_and_gae_advantages(
-                seq_rewards, values, loss_mask
+            returns, advantages = self.masked_returns_and_gae_advantages(
+                seq_rewards,
+                values,
+                loss_mask,
+                self.config.gamma,
+                self.config.gae_lambda,
             )
 
             assert (
@@ -583,60 +576,6 @@ class PPOTrainer(RLTrainer):
             )
 
         return transitions
-
-    def _masked_returns_and_gae_advantages(
-        self,
-        rewards: torch.Tensor,
-        values: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute returns and GAE advantages for a single episode sequence.
-
-        Args:
-            rewards (torch.Tensor): A tensor containing the reward for both prompt and completion sequence
-                                    from t=0,1,...,T-1, shape [seq_len].
-            values (torch.Tensor): A tensor containing the state value estimate for both prompt and completion
-                                sequence from t=0,1,...,T-1, shape [seq_len].
-            mask (torch.Tensor): A tensor where 0s for prompt position and 1s for completion position
-                                for sequence from t=0,1,...,T-1, shape [seq_len].
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Tensors containing the returns and advantage estimates.
-        """
-
-        assert rewards.shape == values.shape == mask.shape, (
-            "Tensors have mismatched shapes"
-        )
-        assert rewards.dim() == 1, "Tensors must be 1D"
-        assert mask.dtype == torch.bool
-
-        device = rewards.device
-
-        # Extract only the completion sequence (where mask == 1)
-        r_t = rewards[mask]
-        v_t = values[mask]
-
-        # Pad value at terminal step T to have zero
-        v_tp1 = torch.zeros_like(v_t, device=device)
-        v_tp1[:-1] = v_t[1:]
-
-        # Mark terminal step
-        done_tp1 = torch.zeros_like(v_tp1, dtype=torch.bool, device=device)
-        done_tp1[-1] = True
-        discount_tp1 = (~done_tp1).float() * self.config.gamma
-
-        adv_t = truncated_generalized_advantage_estimation(
-            r_t, v_t, v_tp1, discount_tp1, self.config.gae_lambda
-        )
-        return_t = adv_t + v_t
-
-        # Create the full tensors with zero values for prompt tokens
-        returns = torch.zeros_like(mask, dtype=self.torch_dtype, device=device)
-        advantages = torch.zeros_like(mask, dtype=self.torch_dtype, device=device)
-        returns[mask] = return_t
-        advantages[mask] = adv_t
-
-        return returns, advantages
 
     def _train_policy_step(self, train_dataloader: DataLoader):
         """Performs the policy update using collected rollout."""

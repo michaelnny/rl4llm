@@ -1,3 +1,4 @@
+"""Implements common features for model training"""
 import gc
 from typing import Optional, Tuple, Union
 
@@ -10,7 +11,7 @@ from rl4llm.core.distributed import DistributedOps
 class TrainingMixin:
     """
     A mixin class providing common utility functions for training loops,
-    like gradient norm computation, masked operations, and whitening.
+    like masked operations, and whitening.
     """
 
     def __init__(self, dist_ops: Optional[DistributedOps] = None):
@@ -40,9 +41,7 @@ class TrainingMixin:
         for p in model.parameters():
             if p.grad is not None:
                 grad_detached = p.grad.detach()
-                local_norm = torch.linalg.vector_norm(
-                    grad_detached, dtype=p.dtype
-                )
+                local_norm = torch.linalg.vector_norm(grad_detached, dtype=p.dtype)
                 if total_norm.device != local_norm.device:
                     total_norm = total_norm.to(local_norm.device)
                 total_norm += local_norm**2
@@ -65,12 +64,12 @@ class TrainingMixin:
         Returns:
             torch.Tensor: The sum of masked elements.
         """
-        assert (
-            torch.is_tensor(mask) and mask.dtype == torch.bool
-        ), 'Mask must be a boolean tensor'
-        assert (
-            torch.is_tensor(values) and values.shape == mask.shape
-        ), 'Values and mask must have the same shape'
+        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
+            "Mask must be a boolean tensor"
+        )
+        assert torch.is_tensor(values) and values.shape == mask.shape, (
+            "Values and mask must have the same shape"
+        )
 
         masked_values = values * mask  # Zero out masked-out elements
 
@@ -96,12 +95,12 @@ class TrainingMixin:
         Returns:
             torch.Tensor: The mean of masked elements.
         """
-        assert (
-            torch.is_tensor(mask) and mask.dtype == torch.bool
-        ), 'Mask must be a boolean tensor'
-        assert (
-            torch.is_tensor(values) and values.shape == mask.shape
-        ), 'Values and mask must have the same shape'
+        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
+            "Mask must be a boolean tensor"
+        )
+        assert torch.is_tensor(values) and values.shape == mask.shape, (
+            "Values and mask must have the same shape"
+        )
 
         masked_values = values * mask  # Zero out masked-out elements
         num_valid = mask.sum(
@@ -184,12 +183,12 @@ class TrainingMixin:
         Returns:
             torch.Tensor: The tensor with masked elements whitened.
         """
-        assert (
-            torch.is_tensor(mask) and mask.dtype == torch.bool
-        ), 'Mask must be a boolean tensor'
-        assert (
-            torch.is_tensor(values) and values.shape == mask.shape
-        ), 'Values and mask must have the same shape'
+        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
+            "Mask must be a boolean tensor"
+        )
+        assert torch.is_tensor(values) and values.shape == mask.shape, (
+            "Values and mask must have the same shape"
+        )
         if not torch.is_floating_point(values):
             # Promote integer types to float for mean/var calculation
             values = values.float()
@@ -246,12 +245,12 @@ class TrainingMixin:
                         Available on all ranks.
         """
         # Verify inputs
-        assert (
-            torch.is_tensor(mask) and mask.dtype == torch.bool
-        ), 'Mask must be a boolean tensor'
-        assert (
-            torch.is_tensor(values) and values.shape == mask.shape
-        ), 'Values and mask must have the same shape'
+        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
+            "Mask must be a boolean tensor"
+        )
+        assert torch.is_tensor(values) and values.shape == mask.shape, (
+            "Values and mask must have the same shape"
+        )
 
         # Calculate local masked sum using parent method
         local_sum = self.masked_sum(values, mask, dim=dim)
@@ -261,9 +260,7 @@ class TrainingMixin:
             return local_sum
 
         # Aggregate local sums across all processes using all_reduce
-        global_sum = self.dist_ops.all_reduce_tensor(
-            local_sum, op=dist.ReduceOp.SUM
-        )
+        global_sum = self.dist_ops.all_reduce_tensor(local_sum, op=dist.ReduceOp.SUM)
 
         return global_sum
 
@@ -294,12 +291,12 @@ class TrainingMixin:
                           Available on all ranks.
         """
         # Verify inputs
-        assert (
-            torch.is_tensor(mask) and mask.dtype == torch.bool
-        ), 'Mask must be a boolean tensor'
-        assert (
-            torch.is_tensor(values) and values.shape == mask.shape
-        ), 'Values and mask must have the same shape'
+        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
+            "Mask must be a boolean tensor"
+        )
+        assert torch.is_tensor(values) and values.shape == mask.shape, (
+            "Values and mask must have the same shape"
+        )
 
         # Calculate local masked sum and local count
         local_sum = self.masked_sum(values, mask, dim=dim)
@@ -322,17 +319,13 @@ class TrainingMixin:
             mean = local_sum / (local_count + epsilon)
             # Handle division by zero if local_count is 0
             if dim is not None:
-                mean = torch.where(
-                    local_count > 0, mean, torch.zeros_like(mean)
-                )
+                mean = torch.where(local_count > 0, mean, torch.zeros_like(mean))
             elif local_count == 0:
                 mean = torch.zeros_like(mean)
             return mean
 
         # Aggregate local sums and counts across all processes
-        global_sum = self.dist_ops.all_reduce_tensor(
-            local_sum, op=dist.ReduceOp.SUM
-        )
+        global_sum = self.dist_ops.all_reduce_tensor(local_sum, op=dist.ReduceOp.SUM)
         global_count = self.dist_ops.all_reduce_tensor(
             local_count, op=dist.ReduceOp.SUM
         )
@@ -387,12 +380,12 @@ class TrainingMixin:
                           Has the same shape as the input `values`. Available on all ranks.
         """
         # Verify inputs
-        assert (
-            torch.is_tensor(mask) and mask.dtype == torch.bool
-        ), 'Mask must be a boolean tensor'
-        assert (
-            torch.is_tensor(values) and values.shape == mask.shape
-        ), 'Values and mask must have the same shape'
+        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
+            "Mask must be a boolean tensor"
+        )
+        assert torch.is_tensor(values) and values.shape == mask.shape, (
+            "Values and mask must have the same shape"
+        )
 
         # Ensure values is float
         if not torch.is_floating_point(values):
@@ -428,9 +421,7 @@ class TrainingMixin:
             )
 
         # Aggregate local statistics across all processes
-        global_sum = self.dist_ops.all_reduce_tensor(
-            sum_local, op=dist.ReduceOp.SUM
-        )
+        global_sum = self.dist_ops.all_reduce_tensor(sum_local, op=dist.ReduceOp.SUM)
         global_sum_sq = self.dist_ops.all_reduce_tensor(
             sum_sq_local, op=dist.ReduceOp.SUM
         )
@@ -440,9 +431,7 @@ class TrainingMixin:
 
         # Calculate global mean and variance from aggregated statistics
         global_mean = global_sum / (global_num_valid + epsilon)
-        global_var = (
-            global_sum_sq / (global_num_valid + epsilon)
-        ) - global_mean**2
+        global_var = (global_sum_sq / (global_num_valid + epsilon)) - global_mean**2
         global_var = torch.clamp(global_var, min=0.0)
 
         # Handle cases where global_num_valid is 0 to avoid NaN
@@ -455,9 +444,7 @@ class TrainingMixin:
         )
 
         # Whiten the *local* valid values using the *global* statistics
-        whitened_values = (values - global_mean) * torch.rsqrt(
-            global_var + epsilon
-        )
+        whitened_values = (values - global_mean) * torch.rsqrt(global_var + epsilon)
 
         if not shift_mean:
             whitened_values += global_mean
@@ -517,22 +504,22 @@ class TrainingMixin:
             torch.Tensor: Log probabilities of actions, shape [batch_size, seq_len]
         """
 
-        assert (
-            logits.dim() == 3
-        ), 'Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]'
-        assert (
-            actions.dim() == 2
-        ), 'Actions tensor must have 2 dimensions: [batch_size, seq_len]'
-        assert (
-            logits.shape[:2] == actions.shape
-        ), 'Logits tensor shape must match actions shape for batch_size and seq_len'
+        assert logits.dim() == 3, (
+            "Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]"
+        )
+        assert actions.dim() == 2, (
+            "Actions tensor must have 2 dimensions: [batch_size, seq_len]"
+        )
+        assert logits.shape[:2] == actions.shape, (
+            "Logits tensor shape must match actions shape for batch_size and seq_len"
+        )
         if loss_masks is not None:
-            assert (
-                loss_masks.dim() == 2
-            ), 'Loss masks tensor must have 2 dimensions: [batch_size, seq_len]'
-            assert (
-                loss_masks.shape == actions.shape
-            ), 'Loss masks shape must match logits shape for batch_size and seq_len'
+            assert loss_masks.dim() == 2, (
+                "Loss masks tensor must have 2 dimensions: [batch_size, seq_len]"
+            )
+            assert loss_masks.shape == actions.shape, (
+                "Loss masks shape must match logits shape for batch_size and seq_len"
+            )
 
         # Process log_softmax and gather operations one sample at a time to avoid CUDA OOM
         batch_size = logits.shape[0]
@@ -570,16 +557,16 @@ class TrainingMixin:
         """
 
         # Check input dimensions
-        assert (
-            logits.dim() == 3
-        ), 'Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]'
+        assert logits.dim() == 3, (
+            "Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]"
+        )
         if loss_masks is not None:
-            assert (
-                loss_masks.dim() == 2
-            ), 'Loss masks tensor must have 2 dimensions: [batch_size, seq_len]'
-            assert (
-                loss_masks.shape == logits.shape[:2]
-            ), 'Loss masks shape must match logits shape for batch_size and seq_len'
+            assert loss_masks.dim() == 2, (
+                "Loss masks tensor must have 2 dimensions: [batch_size, seq_len]"
+            )
+            assert loss_masks.shape == logits.shape[:2], (
+                "Loss masks shape must match logits shape for batch_size and seq_len"
+            )
 
         # Compute log probabilities in a numerically stable way
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
@@ -596,7 +583,7 @@ class TrainingMixin:
         return entropy
 
     @staticmethod
-    def compute_masked_monte_carlo_returns(
+    def masked_monte_carlo_returns(
         rewards: torch.Tensor, mask: torch.Tensor, gamma: float
     ) -> torch.FloatTensor:
         """
@@ -612,11 +599,9 @@ class TrainingMixin:
                 for assistant turns and zeros for user turns
         """
         # Input validation
-        assert rewards.dim() == mask.dim() == 1, 'Inputs must be 1-dimensional'
-        assert rewards.size(0) == mask.size(
-            0
-        ), 'Rewards and mask must have same length'
-        assert gamma > 0.0 and gamma <= 1.0, 'Discount factor must be in (0, 1]'
+        assert rewards.dim() == mask.dim() == 1, "Inputs must be 1-dimensional"
+        assert rewards.size(0) == mask.size(0), "Rewards and mask must have same length"
+        assert gamma > 0.0 and gamma <= 1.0, "Discount factor must be in (0, 1]"
 
         # Initialize returns tensor
         returns = torch.zeros_like(mask, dtype=rewards.dtype)
@@ -633,66 +618,112 @@ class TrainingMixin:
         return returns
 
     @staticmethod
-    def compute_masked_gae_advantage(
+    def masked_returns_and_gae_advantages(
         rewards: torch.Tensor,
         values: torch.Tensor,
         mask: torch.Tensor,
         gamma: float,
         gae_lambda: float,
-    ) -> torch.Tensor:
-        """Computes masked generalized advantage estimates for a sequence length k considering only assistant turns
-
-        The advantages are computed in a backwards fashion according to the equation:
-        Âₜ = δₜ + (γλ) * δₜ₊₁ + ... + ... + (γλ)ᵏ⁻ᵗ⁺¹ * δₖ₋₁
-        where δₜ = rₜ + γ * V(sₜ₊₁) - V(sₜ).
-
-        Advantages are zeroed out for steps where mask is 0.
-
-        See Proximal Policy Optimization Algorithms, Schulman et al.:
-        https://arxiv.org/abs/1707.06347
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute returns and GAE advantages for a single episode sequence. This is often used in PPO.
 
         Args:
-            rewards (torch.Tensor): Float tensor with rewards, shape [seq_len]
-            values (torch.Tensor): Float tensor with value estimate, shape [seq_len]
-            mask (torch.Tensor): Binary mask (0 for user/prompt, 1 for assistant/generation), shape [seq_len]
+            rewards (torch.Tensor): A tensor containing the reward for both prompt and completion sequence
+                                    from t=0,1,...,T-1, shape [seq_len].
+            values (torch.Tensor): A tensor containing the state value estimate for both prompt and completion
+                                sequence from t=0,1,...,T-1, shape [seq_len].
+            mask (torch.Tensor): A tensor where 0s for prompt position and 1s for completion position
+                                for sequence from t=0,1,...,T-1, shape [seq_len].
             gamma (float): Discount factor
             gae_lambda (float): GAE lambda parameter.
 
         Returns:
-            torch.Tensor: Multi-step truncated generalized advantage estimation, shape [seq_len].
-                         Advantages are zero at positions where mask is 0.
+            Tuple[torch.Tensor, torch.Tensor]: Tensors containing the returns and advantage estimates.
         """
 
-        assert (
-            rewards.dim() == values.dim() == mask.dim() == 1
-        ), 'Inputs must be 1D tensors'
-        assert (
-            rewards.shape == values.shape == mask.shape
-        ), 'Input shapes must match'
-        seq_len = rewards.shape[0]
+        assert rewards.shape == values.shape == mask.shape, (
+            "Tensors have mismatched shapes"
+        )
+        assert rewards.dim() == 1, "Tensors must be 1D"
+        assert mask.dtype == torch.bool, "Mask must be a bool tensor"
+        assert 0 < gamma <= 1.0, "Invalid gamma, must be (0, 10]"
+        assert 0 < gae_lambda <= 1.0, "Invalid gae_lambda, must be (0, 10]"
 
-        advantages = torch.zeros_like(rewards, dtype=rewards.dtype)
-        gae_cumulative = 0.0
+        device = rewards.device
+        torch_dtype = rewards.dtype
 
-        # Convert mask to float for multiplication
-        mask_float = mask.float()
+        # Extract only the completion sequence (where mask == 1)
+        r_t = rewards[mask]
+        v_t = values[mask]
 
-        # Iterate backwards through the sequence
-        for t in reversed(range(seq_len)):
-            # Determine V(s_{t+1}). If t is the last step, V(s_{t+1}) = 0.
-            if t == seq_len - 1:
-                next_value = 0.0
-            else:
-                next_value = values[t + 1]
+        # Handle empty completion sequence case
+        if r_t.numel() == 0:
+            return torch.zeros_like(rewards), torch.zeros_like(rewards)
 
-            # Calculate delta: δₜ = rₜ + γ * V(sₜ₊₁) - V(sₜ)
-            delta = rewards[t] + gamma * next_value - values[t]
+        # Pad value at terminal step T to have zero
+        v_tp1 = torch.zeros_like(v_t, device=device)
+        v_tp1[:-1] = v_t[1:]
 
-            # Calculate GAE for step t: Aₜ = δₜ + γ * λ * Aₜ₊₁
-            gae_cumulative = (
-                delta + gamma * gae_lambda * gae_cumulative * mask_float[t]
-            )
+        # Mark terminal step
+        done_tp1 = torch.zeros_like(v_tp1, dtype=torch.bool, device=device)
+        done_tp1[-1] = True
+        discount_tp1 = (~done_tp1).float() * gamma
 
-            advantages[t] = gae_cumulative * mask_float[t]
+        adv_t = truncated_generalized_advantage_estimation(
+            r_t, v_t, v_tp1, discount_tp1, gae_lambda
+        )
+        return_t = adv_t + v_t
 
-        return advantages
+        # Create the full tensors with zero values for prompt tokens
+        returns = torch.zeros_like(mask, dtype=torch_dtype, device=device)
+        advantages = torch.zeros_like(mask, dtype=torch_dtype, device=device)
+        returns[mask] = return_t
+        advantages[mask] = adv_t
+
+        return returns, advantages
+
+
+def truncated_generalized_advantage_estimation(
+    reward_t: torch.Tensor,
+    value_t: torch.Tensor,
+    value_tp1: torch.Tensor,
+    discount_tp1: torch.Tensor,
+    lambda_: float,
+) -> torch.Tensor:
+    """Computes truncated generalized advantage estimates for a sequence length k.
+
+    The advantages are computed in a backwards fashion according to the equation:
+    Âₜ = δₜ + (γλ) * δₜ₊₁ + ... + ... + (γλ)ᵏ⁻ᵗ⁺¹ * δₖ₋₁
+    where δₜ = rₜ + γₜ * v(sₜ₊₁) - v(sₜ).
+
+    See Proximal Policy Optimization Algorithms, Schulman et al.:
+    https://arxiv.org/abs/1707.06347
+
+    Args:
+      reward_t: Sequence of rewards at times [0, k]
+      value_t: Sequence of values under π at times [0, k]
+      value_tp1: Sequence of values under π at times [1, k+1]
+      discount_tp1: Sequence of discounts at times [1, k+1]
+      lambda_: a scalar
+
+    Returns:
+      Multistep truncated generalized advantage estimation at times [0, k].
+    """
+
+    assert len(reward_t.shape) == 1
+    assert len(value_t.shape) == 1
+    assert len(value_tp1.shape) == 1
+    assert len(discount_tp1.shape) == 1
+    _dtype = reward_t.dtype
+    # Ensure lambda_ is a tensor of the same shape as discount_tp1
+    lambda_ = torch.ones_like(discount_tp1, dtype=_dtype) * lambda_
+    delta_t = reward_t + discount_tp1 * value_tp1 - value_t
+    advantage_t = torch.zeros_like(delta_t, dtype=_dtype)
+
+    # Compute advantages in reverse order
+    gae_t = 0
+    for i in reversed(range(len(delta_t))):
+        gae_t = delta_t[i] + discount_tp1[i] * lambda_[i] * gae_t
+        advantage_t[i] = gae_t
+
+    return advantage_t

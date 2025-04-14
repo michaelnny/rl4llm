@@ -479,7 +479,7 @@ class GRPOTrainer(RLTrainer):
             seq_rewards = torch.zeros_like(actions, dtype=self.torch_dtype)
             seq_rewards[-1] = normalized_rewards[i]
 
-            returns = self.compute_masked_monte_carlo_returns(
+            returns = self.masked_monte_carlo_returns(
                 seq_rewards, loss_mask, self.config.gamma
             )
 
