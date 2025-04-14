@@ -20,9 +20,9 @@ from rl4llm.logging import LoggingManager
 class PPOConfig(RLConfig):
     """PPO config instance for RL LLM"""
 
-    gae_lambda: float = Field(0.95, gt=0.0, le=1.0, description='GAE lambda')
+    gae_lambda: float = Field(0.95, gt=0.0, le=1.0, description="GAE lambda")
     value_clip_eps: float = Field(
-        0.2, ge=0.0, le=1.0, description='PPO value loss clip epsilon'
+        0.2, ge=0.0, le=1.0, description="PPO value loss clip epsilon"
     )
 
 
@@ -31,38 +31,38 @@ class TransitionData(BaseModel):
 
     states: torch.Tensor = Field(
         ...,
-        description='A long tensor for token sequences from t=0, 1, ..., T-1',
+        description="A long tensor for token sequences from t=0, 1, ..., T-1",
     )
     actions: torch.Tensor = Field(
         ...,
-        description='A long tensor for token sequences from t=1, 2, ..., T-1, T',
+        description="A long tensor for token sequences from t=1, 2, ..., T-1, T",
     )
     values: torch.Tensor = Field(
         ...,
-        description='A tensor for value estimated for sequences from t=1, 2, ..., T-1, T',
+        description="A tensor for value estimated for sequences from t=1, 2, ..., T-1, T",
     )
     loss_mask: torch.Tensor = Field(
         ...,
-        description='A boolean tensor (0s user tokens, 1s assistant tokens) corresponding to token sequences from t=1, 2, ..., T-1, T',
+        description="A boolean tensor (0s user tokens, 1s assistant tokens) corresponding to token sequences from t=1, 2, ..., T-1, T",
     )
     pi_logprobs: torch.Tensor = Field(
         ...,
-        description='A float tensor for action logprobs corresponding to token sequences from t=1, 2, ..., T-1, T',
+        description="A float tensor for action logprobs corresponding to token sequences from t=1, 2, ..., T-1, T",
     )
     ref_logprobs: torch.Tensor = Field(
         ...,
-        description='A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T',
+        description="A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T",
     )
     returns: torch.Tensor = Field(
         ...,
-        description='A float tensor for returns estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
+        description="A float tensor for returns estimate corresponding to token sequences from t=1, 2, ..., T-1, T",
     )
     advantages: torch.Tensor = Field(
         ...,
-        description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
+        description="A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T",
     )
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def check_tensor_shapes(cls, values):
         tensors = [
             values.states,
@@ -89,6 +89,52 @@ class TransitionData(BaseModel):
         arbitrary_types_allowed = True
 
 
+def truncated_generalized_advantage_estimation(
+    reward_t: torch.Tensor,
+    value_t: torch.Tensor,
+    value_tp1: torch.Tensor,
+    discount_tp1: torch.Tensor,
+    lambda_: float,
+) -> torch.Tensor:
+    """Computes truncated generalized advantage estimates for a sequence length k.
+
+    The advantages are computed in a backwards fashion according to the equation:
+    Âₜ = δₜ + (γλ) * δₜ₊₁ + ... + ... + (γλ)ᵏ⁻ᵗ⁺¹ * δₖ₋₁
+    where δₜ = rₜ + γₜ * v(sₜ₊₁) - v(sₜ).
+
+    See Proximal Policy Optimization Algorithms, Schulman et al.:
+    https://arxiv.org/abs/1707.06347
+
+    Args:
+      reward_t: Sequence of rewards at times [0, k]
+      value_t: Sequence of values under π at times [0, k]
+      value_tp1: Sequence of values under π at times [1, k+1]
+      discount_tp1: Sequence of discounts at times [1, k+1]
+      lambda_: a scalar
+
+    Returns:
+      Multistep truncated generalized advantage estimation at times [0, k].
+    """
+
+    assert len(reward_t.shape) == 1
+    assert len(value_t.shape) == 1
+    assert len(value_tp1.shape) == 1
+    assert len(discount_tp1.shape) == 1
+    _dtype = reward_t.dtype
+    # Ensure lambda_ is a tensor of the same shape as discount_tp1
+    lambda_ = torch.ones_like(discount_tp1, dtype=_dtype) * lambda_
+    delta_t = reward_t + discount_tp1 * value_tp1 - value_t
+    advantage_t = torch.zeros_like(delta_t, dtype=_dtype)
+
+    # Compute advantages in reverse order
+    gae_t = 0
+    for i in reversed(range(len(delta_t))):
+        gae_t = delta_t[i] + discount_tp1[i] * lambda_[i] * gae_t
+        advantage_t[i] = gae_t
+
+    return advantage_t
+
+
 class PPOTrainer(RLTrainer):
     """PPO trainer for LLM"""
 
@@ -106,7 +152,6 @@ class PPOTrainer(RLTrainer):
         reward_transform_fn: Optional[RewardTransform] = None,
         seed: Optional[int] = 175,
     ):
-        """Initialize the PPO trainer instance"""
         """Initialize the PPO trainer instance"""
 
         super().__init__(
@@ -139,7 +184,7 @@ class PPOTrainer(RLTrainer):
         """
 
         if not experience:
-            raise ValueError('No samples for training')
+            raise ValueError("No samples for training")
 
         samples = []
 
@@ -151,11 +196,9 @@ class PPOTrainer(RLTrainer):
                 samples.extend(processed)
 
         if not samples:
-            raise ValueError('No samples for training')
+            raise ValueError("No samples for training")
 
-        local_rollout_size = (
-            self.config.train_rollout_size // self.dist_ops.world_size
-        )
+        local_rollout_size = self.config.train_rollout_size // self.dist_ops.world_size
 
         if len(samples) > local_rollout_size:
             samples = samples[:local_rollout_size]
@@ -164,7 +207,7 @@ class PPOTrainer(RLTrainer):
             samples,
             batch_size=self.config.train_micro_batch_size,
             shuffle=True,
-            pin_memory=self.device.type == 'cuda',
+            pin_memory=self.device.type == "cuda",
             collate_fn=self._train_collate_fn,
             drop_last=True,
         )
@@ -197,9 +240,7 @@ class PPOTrainer(RLTrainer):
         # PPO clipped surrogate PG loss
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clipped_ratio = ratio.clamp(
-            1 - self.config.clip_eps, 1 + self.config.clip_eps
-        )
+        clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
         pg_losses1 = ratio * advantages.detach()
         pg_losses2 = clipped_ratio * advantages.detach()
         pg_losses = -torch.min(pg_losses1, pg_losses2)
@@ -222,13 +263,11 @@ class PPOTrainer(RLTrainer):
         entropy = entropies.mean()
         entropy_loss = -(self.config.entropy_loss_coef * entropy)
 
-        self.logger.log_scalar('train/pg_loss', pg_loss.detach().item())
-        self.logger.log_scalar(
-            'train/entropy_loss', entropy_loss.detach().item()
-        )
-        self.logger.log_scalar('policy/entropy', entropy.detach().item())
-        self.logger.log_scalar('policy/approxkl', approxkl.detach().item())
-        self.logger.log_scalar('policy/clipfrac', clipfrac.detach().item())
+        self.logger.log_scalar("train/pg_loss", pg_loss.detach().item())
+        self.logger.log_scalar("train/entropy_loss", entropy_loss.detach().item())
+        self.logger.log_scalar("policy/entropy", entropy.detach().item())
+        self.logger.log_scalar("policy/approxkl", approxkl.detach().item())
+        self.logger.log_scalar("policy/clipfrac", clipfrac.detach().item())
 
         loss = pg_loss + entropy_loss
 
@@ -237,17 +276,15 @@ class PPOTrainer(RLTrainer):
             ref_logprobs = experience_batch.ref_logprobs.to(self.device)
             # Compute the KL divergence between the model and the reference model
             per_token_kl = (
-                torch.exp(ref_logprobs - pi_logprobs)
-                - (ref_logprobs - pi_logprobs)
-                - 1
+                torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
             )
 
             kl = self.dist_masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
             loss += kl_loss
-            self.logger.log_scalar('train/kl_loss', kl_loss.detach().item())
-            self.logger.log_scalar('objective/kl', kl.detach().item())
+            self.logger.log_scalar("train/kl_loss", kl_loss.detach().item())
+            self.logger.log_scalar("objective/kl", kl.detach().item())
 
         return loss
 
@@ -289,22 +326,22 @@ class PPOTrainer(RLTrainer):
                 torch.gt(vf_losses2, vf_losses1), loss_mask
             )
 
-        self.logger.log_scalar('train/vf_loss', vf_loss.detach().item())
-        self.logger.log_scalar('value/error', pred_error.detach().item())
-        self.logger.log_scalar('value/clipfrac', clipfrac.detach().item())
+        self.logger.log_scalar("train/vf_loss", vf_loss.detach().item())
+        self.logger.log_scalar("value/error", pred_error.detach().item())
+        self.logger.log_scalar("value/clipfrac", clipfrac.detach().item())
 
         return vf_loss
 
     def train_step(self, train_dataloader: DataLoader):
         """Performs the policy and value models update using collected rollout."""
 
-        self._configure_model(self.value_engine, 'cpu', 'offload')
+        self._configure_model(self.value_engine, "cpu", "offload")
         self.clean_up()
         self._train_policy_step(train_dataloader)
 
-        self._configure_model(self.policy_engine, 'cpu', 'offload')
+        self._configure_model(self.policy_engine, "cpu", "offload")
         self.clean_up()
-        self._configure_model(self.value_engine, self.device, 'reload')
+        self._configure_model(self.value_engine, self.device, "reload")
         self._train_value_step(train_dataloader)
 
     @torch.inference_mode()
@@ -323,27 +360,23 @@ class PPOTrainer(RLTrainer):
         # Use greedy sampling
         if self.is_inference_engine_enabled():
             eval_sampling_params = {
-                'max_new_tokens': self.config.max_completion_tokens,
-                'temperature': 0.0,
+                "max_new_tokens": self.config.max_completion_tokens,
+                "temperature": 0.0,
             }
         else:
             eval_sampling_params = {
-                'max_new_tokens': self.config.max_completion_tokens,
-                'temperature': None,
-                'top_p': None,
-                'top_k': None,
-                'repetition_penalty': None,
-                'do_sample': False,
+                "max_new_tokens": self.config.max_completion_tokens,
+                "temperature": None,
+                "top_p": None,
+                "top_k": None,
+                "repetition_penalty": None,
+                "do_sample": False,
             }
 
         with self.unwrapped_model_for_generation() as policy_model:
             for _ in range(local_rollout_size):
-                outputs = self.eval_env.rollout(
-                    policy_model, eval_sampling_params
-                )
-                self.log_batch_episodes(
-                    self._eval_phase, outputs, self.global_step
-                )
+                outputs = self.eval_env.rollout(policy_model, eval_sampling_params)
+                self.log_batch_episodes(self._eval_phase, outputs, self.global_step)
 
     @torch.inference_mode()
     def generate_experience(self) -> List[EpisodeData]:
@@ -351,35 +384,31 @@ class PPOTrainer(RLTrainer):
 
         if self.is_inference_engine_enabled():
             train_sampling_params = {
-                'max_new_tokens': self.config.max_completion_tokens,
-                'temperature': self.config.temperature,
-                'top_p': self.config.top_p,
-                'top_k': self.config.top_k,
-                'repetition_penalty': self.config.repetition_penalty,
+                "max_new_tokens": self.config.max_completion_tokens,
+                "temperature": self.config.temperature,
+                "top_p": self.config.top_p,
+                "top_k": self.config.top_k,
+                "repetition_penalty": self.config.repetition_penalty,
             }
         else:
             train_sampling_params = {
-                'max_new_tokens': self.config.max_completion_tokens,
-                'temperature': self.config.temperature,
-                'top_p': self.config.top_p,
-                'top_k': self.config.top_k,
-                'repetition_penalty': self.config.repetition_penalty,
-                'num_return_sequences': 1,  # we handle the group size inside the LocalLLMEnv
-                'do_sample': True,
+                "max_new_tokens": self.config.max_completion_tokens,
+                "temperature": self.config.temperature,
+                "top_p": self.config.top_p,
+                "top_k": self.config.top_k,
+                "repetition_penalty": self.config.repetition_penalty,
+                "num_return_sequences": 1,  # we handle the group size inside the LocalLLMEnv
+                "do_sample": True,
             }
 
         # we always use batch size of 1 during training roll out
-        local_rollout_size = (
-            self.config.train_rollout_size // self.dist_ops.world_size
-        )
+        local_rollout_size = self.config.train_rollout_size // self.dist_ops.world_size
         collected_episodes: List[List[EpisodeData]] = []
         local_count = 0
 
         with self.unwrapped_model_for_generation() as policy_model:
             while local_count < local_rollout_size:
-                outputs = self.train_env.rollout(
-                    policy_model, train_sampling_params
-                )
+                outputs = self.train_env.rollout(policy_model, train_sampling_params)
                 if outputs:
                     collected_episodes.extend(outputs)
                     local_count += len(outputs)
@@ -406,10 +435,11 @@ class PPOTrainer(RLTrainer):
             return []
 
         # Training specific pre-processing
+        # This is the terminal-step reward from outcome function or reward model
         rewards = self.transform_batch_rewards(episodes).cpu()
 
         if self.config.normalize_rewards:
-            rewards = self.whiten(rewards)
+            rewards = self.whiten(rewards, shift_mean=False)
 
         # Prepare batched sequences for model forward pass
         sequences = [
@@ -434,9 +464,7 @@ class PPOTrainer(RLTrainer):
             padding_value=self.tokenizer.pad_token_id,
         ).to(self.device)
 
-        batch_attention_mask = (
-            batch_states != self.tokenizer.pad_token_id
-        ).bool()
+        batch_attention_mask = (batch_states != self.tokenizer.pad_token_id).bool()
 
         # Policy Model
         batch_pi_logits = self.policy_engine.forward(
@@ -452,7 +480,7 @@ class PPOTrainer(RLTrainer):
         # Reference Model (if applicable)
         if (
             self.config.kl_loss_coef > 0
-            and hasattr(self, 'reference_model')
+            and hasattr(self, "reference_model")
             and self.reference_model
         ):
             batch_ref_logits = self.reference_model.forward(
@@ -467,6 +495,7 @@ class PPOTrainer(RLTrainer):
             # Using policy logprobs ensures KL is zero if ref model not used
             batch_ref_logprobs = batch_pi_logprobs.clone()
 
+        # State value
         batch_values: torch.Tensor = self.value_engine.forward(
             input_ids=batch_states, attention_mask=batch_attention_mask
         ).values  # [batch_size, seq_len]
@@ -515,15 +544,20 @@ class PPOTrainer(RLTrainer):
             seq_rewards = torch.zeros_like(actions, dtype=self.torch_dtype)
             seq_rewards[-1] = rewards[i]
 
+            # TODO: debug this, try a better way? maybe even try naive GRPO-style for compute the advantages without using state-values
             # Compute GAE advantages
-            advantages = self.compute_masked_gae_advantage(
-                seq_rewards,
-                values,
-                loss_mask,
-                self.config.gamma,
-                self.config.gae_lambda,
+            # advantages = self.compute_masked_gae_advantage(
+            #     seq_rewards,
+            #     values,
+            #     loss_mask,
+            #     self.config.gamma,
+            #     self.config.gae_lambda,
+            # )
+            # returns = (advantages + values) * loss_mask
+
+            returns, advantages = self._masked_returns_and_gae_advantages(
+                seq_rewards, values, loss_mask
             )
-            returns = (advantages + values) * loss_mask
 
             assert (
                 states.shape
@@ -550,14 +584,66 @@ class PPOTrainer(RLTrainer):
 
         return transitions
 
+    def _masked_returns_and_gae_advantages(
+        self,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute returns and GAE advantages for a single episode sequence.
+
+        Args:
+            rewards (torch.Tensor): A tensor containing the reward for both prompt and completion sequence
+                                    from t=0,1,...,T-1, shape [seq_len].
+            values (torch.Tensor): A tensor containing the state value estimate for both prompt and completion
+                                sequence from t=0,1,...,T-1, shape [seq_len].
+            mask (torch.Tensor): A tensor where 0s for prompt position and 1s for completion position
+                                for sequence from t=0,1,...,T-1, shape [seq_len].
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Tensors containing the returns and advantage estimates.
+        """
+
+        assert rewards.shape == values.shape == mask.shape, (
+            "Tensors have mismatched shapes"
+        )
+        assert rewards.dim() == 1, "Tensors must be 1D"
+        assert mask.dtype == torch.bool
+
+        device = rewards.device
+
+        # Extract only the completion sequence (where mask == 1)
+        r_t = rewards[mask]
+        v_t = values[mask]
+
+        # Pad value at terminal step T to have zero
+        v_tp1 = torch.zeros_like(v_t, device=device)
+        v_tp1[:-1] = v_t[1:]
+
+        # Mark terminal step
+        done_tp1 = torch.zeros_like(v_tp1, dtype=torch.bool, device=device)
+        done_tp1[-1] = True
+        discount_tp1 = (~done_tp1).float() * self.config.gamma
+
+        adv_t = truncated_generalized_advantage_estimation(
+            r_t, v_t, v_tp1, discount_tp1, self.config.gae_lambda
+        )
+        return_t = adv_t + v_t
+
+        # Create the full tensors with zero values for prompt tokens
+        returns = torch.zeros_like(mask, dtype=self.torch_dtype, device=device)
+        advantages = torch.zeros_like(mask, dtype=self.torch_dtype, device=device)
+        returns[mask] = return_t
+        advantages[mask] = adv_t
+
+        return returns, advantages
+
     def _train_policy_step(self, train_dataloader: DataLoader):
         """Performs the policy update using collected rollout."""
         for _ in range(self.config.num_updates):
             for i, micro_batch in enumerate(train_dataloader):
                 input_ids = micro_batch.states.to(self.device)
-                attention_mask = (
-                    input_ids != self.tokenizer.pad_token_id
-                ).bool()
+                attention_mask = (input_ids != self.tokenizer.pad_token_id).bool()
                 pi_logits = self.policy_engine.forward(
                     input_ids=input_ids, attention_mask=attention_mask
                 ).logits
@@ -573,10 +659,10 @@ class PPOTrainer(RLTrainer):
                 if self.policy_engine.is_gradient_accumulation_boundary():
                     self.policy_update_count += 1
                     self.logger.log_scalar(
-                        'train/policy_update', self.policy_update_count
+                        "train/policy_update", self.policy_update_count
                     )
                     self.logger.log_scalar(
-                        'train/policy_learning_rate',
+                        "train/policy_learning_rate",
                         self.policy_engine.get_lr()[0],
                     )
 
@@ -585,9 +671,7 @@ class PPOTrainer(RLTrainer):
         for _ in range(self.config.num_updates):
             for i, micro_batch in enumerate(train_dataloader):
                 input_ids = micro_batch.states.to(self.device)
-                attention_mask = (
-                    input_ids != self.tokenizer.pad_token_id
-                ).bool()
+                attention_mask = (input_ids != self.tokenizer.pad_token_id).bool()
                 pred_values = self.value_engine.forward(
                     input_ids=input_ids, attention_mask=attention_mask
                 ).values
@@ -603,10 +687,10 @@ class PPOTrainer(RLTrainer):
                 if self.value_engine.is_gradient_accumulation_boundary():
                     self.value_update_count += 1
                     self.logger.log_scalar(
-                        'train/value_update', self.value_update_count
+                        "train/value_update", self.value_update_count
                     )
                     self.logger.log_scalar(
-                        'train/value_learning_rate',
+                        "train/value_learning_rate",
                         self.value_engine.get_lr()[0],
                     )
 
