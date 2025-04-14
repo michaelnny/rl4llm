@@ -1,4 +1,5 @@
 """Implements common features for model training"""
+
 import gc
 from typing import Optional, Tuple, Union
 
@@ -41,7 +42,9 @@ class TrainingMixin:
         for p in model.parameters():
             if p.grad is not None:
                 grad_detached = p.grad.detach()
-                local_norm = torch.linalg.vector_norm(grad_detached, dtype=p.dtype)
+                local_norm = torch.linalg.vector_norm(
+                    grad_detached, dtype=p.dtype
+                )
                 if total_norm.device != local_norm.device:
                     total_norm = total_norm.to(local_norm.device)
                 total_norm += local_norm**2
@@ -64,12 +67,12 @@ class TrainingMixin:
         Returns:
             torch.Tensor: The sum of masked elements.
         """
-        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
-            "Mask must be a boolean tensor"
-        )
-        assert torch.is_tensor(values) and values.shape == mask.shape, (
-            "Values and mask must have the same shape"
-        )
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert (
+            torch.is_tensor(values) and values.shape == mask.shape
+        ), 'Values and mask must have the same shape'
 
         masked_values = values * mask  # Zero out masked-out elements
 
@@ -95,12 +98,12 @@ class TrainingMixin:
         Returns:
             torch.Tensor: The mean of masked elements.
         """
-        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
-            "Mask must be a boolean tensor"
-        )
-        assert torch.is_tensor(values) and values.shape == mask.shape, (
-            "Values and mask must have the same shape"
-        )
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert (
+            torch.is_tensor(values) and values.shape == mask.shape
+        ), 'Values and mask must have the same shape'
 
         masked_values = values * mask  # Zero out masked-out elements
         num_valid = mask.sum(
@@ -183,12 +186,12 @@ class TrainingMixin:
         Returns:
             torch.Tensor: The tensor with masked elements whitened.
         """
-        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
-            "Mask must be a boolean tensor"
-        )
-        assert torch.is_tensor(values) and values.shape == mask.shape, (
-            "Values and mask must have the same shape"
-        )
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert (
+            torch.is_tensor(values) and values.shape == mask.shape
+        ), 'Values and mask must have the same shape'
         if not torch.is_floating_point(values):
             # Promote integer types to float for mean/var calculation
             values = values.float()
@@ -245,12 +248,12 @@ class TrainingMixin:
                         Available on all ranks.
         """
         # Verify inputs
-        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
-            "Mask must be a boolean tensor"
-        )
-        assert torch.is_tensor(values) and values.shape == mask.shape, (
-            "Values and mask must have the same shape"
-        )
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert (
+            torch.is_tensor(values) and values.shape == mask.shape
+        ), 'Values and mask must have the same shape'
 
         # Calculate local masked sum using parent method
         local_sum = self.masked_sum(values, mask, dim=dim)
@@ -260,7 +263,9 @@ class TrainingMixin:
             return local_sum
 
         # Aggregate local sums across all processes using all_reduce
-        global_sum = self.dist_ops.all_reduce_tensor(local_sum, op=dist.ReduceOp.SUM)
+        global_sum = self.dist_ops.all_reduce_tensor(
+            local_sum, op=dist.ReduceOp.SUM
+        )
 
         return global_sum
 
@@ -291,12 +296,12 @@ class TrainingMixin:
                           Available on all ranks.
         """
         # Verify inputs
-        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
-            "Mask must be a boolean tensor"
-        )
-        assert torch.is_tensor(values) and values.shape == mask.shape, (
-            "Values and mask must have the same shape"
-        )
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert (
+            torch.is_tensor(values) and values.shape == mask.shape
+        ), 'Values and mask must have the same shape'
 
         # Calculate local masked sum and local count
         local_sum = self.masked_sum(values, mask, dim=dim)
@@ -319,13 +324,17 @@ class TrainingMixin:
             mean = local_sum / (local_count + epsilon)
             # Handle division by zero if local_count is 0
             if dim is not None:
-                mean = torch.where(local_count > 0, mean, torch.zeros_like(mean))
+                mean = torch.where(
+                    local_count > 0, mean, torch.zeros_like(mean)
+                )
             elif local_count == 0:
                 mean = torch.zeros_like(mean)
             return mean
 
         # Aggregate local sums and counts across all processes
-        global_sum = self.dist_ops.all_reduce_tensor(local_sum, op=dist.ReduceOp.SUM)
+        global_sum = self.dist_ops.all_reduce_tensor(
+            local_sum, op=dist.ReduceOp.SUM
+        )
         global_count = self.dist_ops.all_reduce_tensor(
             local_count, op=dist.ReduceOp.SUM
         )
@@ -380,12 +389,12 @@ class TrainingMixin:
                           Has the same shape as the input `values`. Available on all ranks.
         """
         # Verify inputs
-        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
-            "Mask must be a boolean tensor"
-        )
-        assert torch.is_tensor(values) and values.shape == mask.shape, (
-            "Values and mask must have the same shape"
-        )
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert (
+            torch.is_tensor(values) and values.shape == mask.shape
+        ), 'Values and mask must have the same shape'
 
         # Ensure values is float
         if not torch.is_floating_point(values):
@@ -421,7 +430,9 @@ class TrainingMixin:
             )
 
         # Aggregate local statistics across all processes
-        global_sum = self.dist_ops.all_reduce_tensor(sum_local, op=dist.ReduceOp.SUM)
+        global_sum = self.dist_ops.all_reduce_tensor(
+            sum_local, op=dist.ReduceOp.SUM
+        )
         global_sum_sq = self.dist_ops.all_reduce_tensor(
             sum_sq_local, op=dist.ReduceOp.SUM
         )
@@ -431,7 +442,9 @@ class TrainingMixin:
 
         # Calculate global mean and variance from aggregated statistics
         global_mean = global_sum / (global_num_valid + epsilon)
-        global_var = (global_sum_sq / (global_num_valid + epsilon)) - global_mean**2
+        global_var = (
+            global_sum_sq / (global_num_valid + epsilon)
+        ) - global_mean**2
         global_var = torch.clamp(global_var, min=0.0)
 
         # Handle cases where global_num_valid is 0 to avoid NaN
@@ -444,7 +457,9 @@ class TrainingMixin:
         )
 
         # Whiten the *local* valid values using the *global* statistics
-        whitened_values = (values - global_mean) * torch.rsqrt(global_var + epsilon)
+        whitened_values = (values - global_mean) * torch.rsqrt(
+            global_var + epsilon
+        )
 
         if not shift_mean:
             whitened_values += global_mean
@@ -504,22 +519,22 @@ class TrainingMixin:
             torch.Tensor: Log probabilities of actions, shape [batch_size, seq_len]
         """
 
-        assert logits.dim() == 3, (
-            "Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]"
-        )
-        assert actions.dim() == 2, (
-            "Actions tensor must have 2 dimensions: [batch_size, seq_len]"
-        )
-        assert logits.shape[:2] == actions.shape, (
-            "Logits tensor shape must match actions shape for batch_size and seq_len"
-        )
+        assert (
+            logits.dim() == 3
+        ), 'Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]'
+        assert (
+            actions.dim() == 2
+        ), 'Actions tensor must have 2 dimensions: [batch_size, seq_len]'
+        assert (
+            logits.shape[:2] == actions.shape
+        ), 'Logits tensor shape must match actions shape for batch_size and seq_len'
         if loss_masks is not None:
-            assert loss_masks.dim() == 2, (
-                "Loss masks tensor must have 2 dimensions: [batch_size, seq_len]"
-            )
-            assert loss_masks.shape == actions.shape, (
-                "Loss masks shape must match logits shape for batch_size and seq_len"
-            )
+            assert (
+                loss_masks.dim() == 2
+            ), 'Loss masks tensor must have 2 dimensions: [batch_size, seq_len]'
+            assert (
+                loss_masks.shape == actions.shape
+            ), 'Loss masks shape must match logits shape for batch_size and seq_len'
 
         # Process log_softmax and gather operations one sample at a time to avoid CUDA OOM
         batch_size = logits.shape[0]
@@ -557,16 +572,16 @@ class TrainingMixin:
         """
 
         # Check input dimensions
-        assert logits.dim() == 3, (
-            "Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]"
-        )
+        assert (
+            logits.dim() == 3
+        ), 'Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]'
         if loss_masks is not None:
-            assert loss_masks.dim() == 2, (
-                "Loss masks tensor must have 2 dimensions: [batch_size, seq_len]"
-            )
-            assert loss_masks.shape == logits.shape[:2], (
-                "Loss masks shape must match logits shape for batch_size and seq_len"
-            )
+            assert (
+                loss_masks.dim() == 2
+            ), 'Loss masks tensor must have 2 dimensions: [batch_size, seq_len]'
+            assert (
+                loss_masks.shape == logits.shape[:2]
+            ), 'Loss masks shape must match logits shape for batch_size and seq_len'
 
         # Compute log probabilities in a numerically stable way
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
@@ -599,9 +614,11 @@ class TrainingMixin:
                 for assistant turns and zeros for user turns
         """
         # Input validation
-        assert rewards.dim() == mask.dim() == 1, "Inputs must be 1-dimensional"
-        assert rewards.size(0) == mask.size(0), "Rewards and mask must have same length"
-        assert gamma > 0.0 and gamma <= 1.0, "Discount factor must be in (0, 1]"
+        assert rewards.dim() == mask.dim() == 1, 'Inputs must be 1-dimensional'
+        assert rewards.size(0) == mask.size(
+            0
+        ), 'Rewards and mask must have same length'
+        assert gamma > 0.0 and gamma <= 1.0, 'Discount factor must be in (0, 1]'
 
         # Initialize returns tensor
         returns = torch.zeros_like(mask, dtype=rewards.dtype)
@@ -641,13 +658,14 @@ class TrainingMixin:
             Tuple[torch.Tensor, torch.Tensor]: Tensors containing the returns and advantage estimates.
         """
 
-        assert rewards.shape == values.shape == mask.shape, (
-            "Tensors have mismatched shapes"
-        )
-        assert rewards.dim() == 1, "Tensors must be 1D"
-        assert mask.dtype == torch.bool, "Mask must be a bool tensor"
-        assert 0 < gamma <= 1.0, "Invalid gamma, must be (0, 10]"
-        assert 0 < gae_lambda <= 1.0, "Invalid gae_lambda, must be (0, 10]"
+        assert (
+            rewards.shape == values.shape == mask.shape
+        ), 'Tensors have mismatched shapes'
+        assert rewards.dtype == values.dtype, 'Tensors have mismatched dtypes'
+        assert rewards.dim() == 1, 'Tensors must be 1D'
+        assert mask.dtype == torch.bool, 'Mask must be a bool tensor'
+        assert 0 < gamma <= 1.0, 'Invalid gamma, must be (0, 10]'
+        assert 0 < gae_lambda <= 1.0, 'Invalid gae_lambda, must be (0, 10]'
 
         device = rewards.device
         torch_dtype = rewards.dtype
@@ -658,10 +676,12 @@ class TrainingMixin:
 
         # Handle empty completion sequence case
         if r_t.numel() == 0:
-            return torch.zeros_like(rewards), torch.zeros_like(rewards)
+            return torch.zeros_like(
+                rewards, dtype=torch_dtype
+            ), torch.zeros_like(rewards, dtype=torch_dtype)
 
         # Pad value at terminal step T to have zero
-        v_tp1 = torch.zeros_like(v_t, device=device)
+        v_tp1 = torch.zeros_like(v_t, dtype=torch_dtype, device=device)
         v_tp1[:-1] = v_t[1:]
 
         # Mark terminal step
@@ -675,8 +695,8 @@ class TrainingMixin:
         return_t = adv_t + v_t
 
         # Create the full tensors with zero values for prompt tokens
-        returns = torch.zeros_like(mask, dtype=torch_dtype, device=device)
-        advantages = torch.zeros_like(mask, dtype=torch_dtype, device=device)
+        returns = torch.zeros_like(rewards, dtype=torch_dtype, device=device)
+        advantages = torch.zeros_like(rewards, dtype=torch_dtype, device=device)
         returns[mask] = return_t
         advantages[mask] = adv_t
 

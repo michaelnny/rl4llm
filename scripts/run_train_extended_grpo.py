@@ -20,7 +20,6 @@ from rl4llm.envs import (
 )
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.logging import LoggingManager
 from rl4llm.trainers.extended_grpo_trainer import (
     ExtendedGRPOConfig,
     ExtendedGRPOTrainer,

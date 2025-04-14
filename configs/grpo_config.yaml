@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_small_bs_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -25,11 +25,11 @@ model:
   model_max_length: 4000
 
 grpo:
-  max_steps: 1000
-  train_rollout_size: 128
+  max_steps: 100
+  train_rollout_size: 256
   num_updates: 1
-  train_micro_batch_size: 8
-  train_batch_size: 128
+  train_micro_batch_size: 4
+  train_batch_size: 64
   gamma: 1.0                            # discount
   clip_eps: 0.2                         # PPO-style policy clip parameter
   group_reward_zero_mean: false         # group reward is normalized to have a zero mean without standard deviation scaling    
@@ -50,7 +50,7 @@ grpo:
   # evaluation
   eval_rollout_size: 1024    
   eval_batch_size: 64
-  eval_interval: 50                     # every N global steps
+  eval_interval: 0                     # every N global steps
 
   # others
   checkpoint_interval: 100              # every N global steps
@@ -67,7 +67,7 @@ deepspeed:
   optimizer:
     type: Adam
     params:
-      lr: 1.0e-6                   
+      lr: 5.0e-7                   
       betas: [0.9, 0.999]
       eps: 1.0e-8
       weight_decay: 0.0

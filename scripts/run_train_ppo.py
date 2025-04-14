@@ -10,18 +10,10 @@ import torch
 
 from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import (
-    InferenceEnv,
-    LocalLLMEnv,
-)
+from rl4llm.envs import InferenceEnv, LocalLLMEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.logging import LoggingManager
-from rl4llm.trainers.ppo_trainer import (
-    DistributedOps,
-    PPOConfig,
-    PPOTrainer,
-)
+from rl4llm.trainers.ppo_trainer import PPOConfig, PPOTrainer
 from rl4llm.utils import load_yaml_config_file, set_seed
 from rl4llm.utils.model_utils import (
     build_policy_model_and_tokenizer,
@@ -294,6 +286,8 @@ def main():
         reward_transform_fn=reward_transform_fn,
         seed=seed,
     )
+
+    # TODO: try warm up the value model first
 
     trainer.train(job_config)
 

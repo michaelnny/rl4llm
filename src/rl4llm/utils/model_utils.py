@@ -37,7 +37,7 @@ class ModelWrapperWithValueHead(nn.Module):
     Uses composition: holds the base model internally.
     """
 
-    def __init__(self, base_model: PreTrainedModel):
+    def __init__(self, base_model: PreTrainedModel, torch_dtype: torch.dtype):
         """Initialize the wrapper and access the torso from the base model"""
         super().__init__()
 
@@ -55,31 +55,26 @@ class ModelWrapperWithValueHead(nn.Module):
         if hasattr(base_model, 'output'):
             del base_model.output
 
-        # Extract just the transformer part without the LM head
-        if hasattr(base_model, 'transformer'):
-            self.model = base_model.transformer
-        elif hasattr(base_model, 'model'):
-            self.model = base_model.model
-        else:
-            raise ValueError("Base model has 'model' as torso.")
-
-        # Free memory by deleting the LM head
-        if hasattr(base_model, 'lm_head'):
-            del base_model.lm_head
-        if hasattr(base_model, 'output'):
-            del base_model.output
+        torch.cuda.empty_cache()
 
         self.config = base_model.config
 
         # Define the value head
-        self.value_head = nn.Linear(self.config.hidden_size, 1, bias=False)
-        self.value_head = nn.Linear(self.config.hidden_size, 1, bias=False)
+        self.value_head = nn.Linear(
+            self.config.hidden_size, 1, bias=False, dtype=torch_dtype
+        )
 
         self._init_value_head()
 
     def _init_value_head(self):
         """Initialize value head weights"""
-        nn.init.normal_(self.value_head.weight, std=0.001)
+        import math
+
+        nn.init.normal_(
+            self.value_head.weight,
+            mean=0,
+            std=0.02 / math.sqrt(2 * self.config.num_hidden_layers),
+        )
         if self.value_head.bias is not None:
             nn.init.zeros_(self.value_head.bias)
 
@@ -96,7 +91,6 @@ class ModelWrapperWithValueHead(nn.Module):
         )
 
         # Shape: [batch_size, sequence_length, hidden_size]
-        # hidden_state = outputs.hidden_states[-1]
         hidden_state = outputs.last_hidden_state
 
         # Shape: [batch_size, sequence_length]
@@ -159,7 +153,7 @@ def build_value_model_and_tokenizer(
             gradient_checkpointing_kwargs={'use_reentrant': False}
         )
 
-    wrapped_model = ModelWrapperWithValueHead(model)
+    wrapped_model = ModelWrapperWithValueHead(model, torch_dtype)
     return wrapped_model, tokenizer
 
 
