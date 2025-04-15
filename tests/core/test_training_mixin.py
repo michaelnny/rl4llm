@@ -55,19 +55,6 @@ def test_clean_up():
         pytest.fail(f"clean_up() raised an exception: {e}")
 
 
-def test_compute_grad_norm(simple_linear_model):
-    """Test gradient norm computation matches manual calculation."""
-    model = simple_linear_model
-    computed_norm = TrainingMixin.compute_grad_norm(model)
-    total_norm_sq = sum(
-        torch.linalg.vector_norm(p.grad.detach(), dtype=p.grad.dtype) ** 2
-        for p in model.parameters()
-        if p.grad is not None
-    )
-    expected_norm = total_norm_sq.sqrt()
-    assert torch.allclose(computed_norm, expected_norm, atol=1e-8)
-
-
 @pytest.mark.parametrize(
     "dim, expected", [(None, torch.tensor(9.0)), (1, torch.tensor([4.0, 5.0]))]
 )
@@ -85,7 +72,7 @@ def test_masked_sum(sample_tensor_data, dim, expected):
 def test_masked_mean(sample_tensor_data, dim, expected):
     """Test masked mean computation for global and dimension-wise cases."""
     values, mask = sample_tensor_data
-    result = TrainingMixin.masked_mean(values, mask, dim=dim)
+    result = TrainingMixin.masked_mean(values, mask, dim=dim, keepdim=True)
     assert torch.allclose(result, expected, atol=1e-8)
 
 
@@ -480,7 +467,7 @@ def test_dist_masked_sum_multi_process(
     assert_mock_tensor_call(
         mock_dist_ops.all_reduce_tensor, local_sum, op=dist.ReduceOp.SUM
     )
-    # Ensure it was called only once total
+    # Ensure it was called
     assert mock_dist_ops.all_reduce_tensor.call_count == 1
 
 
@@ -681,3 +668,75 @@ def test_dist_whiten_calls_masked_whiten(
     assert passed_shift_mean == shift_mean
     assert passed_dim == dim
     assert passed_epsilon == epsilon
+
+
+@pytest.mark.parametrize("dim", [None, 0, 1])
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_dist_masked_var_multi_process(
+    train_mixin_instance,
+    sample_data,
+    mock_dist_ops,
+    dim,
+    keepdim,
+):
+    """Tests dist_masked_var aggregates correctly across processes."""
+    # Skip invalid combinations (keepdim=True has no effect if dim=None)
+    if dim is None and keepdim:
+        pytest.skip("keepdim=True has no effect when dim is None")
+
+    world_size = 3
+    epsilon = 1e-8
+    type(mock_dist_ops).world_size = PropertyMock(return_value=world_size)
+    # Reset mock and define side effect for aggregation simulation
+    mock_dist_ops.reset_mock()
+    # Simulate all_reduce by multiplying the local stat by world_size
+    mock_dist_ops.all_reduce_tensor.side_effect = (
+        lambda tensor, op=dist.ReduceOp.SUM: tensor * world_size
+    )
+
+    values, mask = sample_data
+    # Ensure float for variance calculation
+    float_values = values.float()
+
+    # 1. Calculate local stats manually for independent verification
+    try:
+        broadcast_mask = torch.broadcast_to(mask, float_values.shape)
+    except RuntimeError as e:
+        pytest.fail(f"Mask not broadcastable in test setup: {e}")
+
+    local_count_manual = broadcast_mask.sum(dim=dim, keepdim=keepdim).float()
+    masked_values = torch.where(
+        broadcast_mask, float_values, torch.zeros_like(float_values)
+    )
+    local_sum_manual = masked_values.sum(dim=dim, keepdim=keepdim)
+    local_sum_sq_manual = (masked_values**2).sum(dim=dim, keepdim=keepdim)
+
+    # 2. Calculate expected global stats based on mock aggregation
+    expected_global_sum = local_sum_manual * world_size
+    expected_global_count = local_count_manual * world_size
+    expected_global_sum_sq = local_sum_sq_manual * world_size
+
+    # 3. Calculate expected global variance using aggregated stats
+    safe_global_count = expected_global_count + epsilon
+    expected_global_mean = expected_global_sum / safe_global_count
+    expected_global_e_x_sq = expected_global_sum_sq / safe_global_count
+    expected_global_var = expected_global_e_x_sq - expected_global_mean**2
+    expected_global_var = torch.clamp(expected_global_var, min=0.0)
+    # Handle division by zero where count is zero
+    expected_global_var = torch.where(
+        expected_global_count > 0,
+        expected_global_var,
+        torch.zeros_like(expected_global_var),
+    )
+
+    # --- Call the Method Under Test ---
+    dist_result = train_mixin_instance.dist_masked_var(
+        values, mask, dim=dim, keepdim=keepdim, epsilon=epsilon
+    )
+    # Check the calculated variance value
+    torch.testing.assert_close(dist_result, expected_global_var, rtol=1e-5, atol=1e-6)
+
+    # Check that all_reduce was called exactly 3 times (for sum, count, sum_sq)
+    assert mock_dist_ops.all_reduce_tensor.call_count == 3, (
+        f"Expected 3 calls to all_reduce_tensor, but got {mock_dist_ops.all_reduce_tensor.call_count}"
+    )
