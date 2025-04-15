@@ -248,7 +248,6 @@ class PPOTrainer(RLTrainer):
         self,
         pred_values: torch.Tensor,
         experience_batch: TransitionData,
-        warmup: Optional[bool] = False,
     ) -> torch.Tensor:
         """Compute value loss for a single training batch
 
@@ -257,7 +256,6 @@ class PPOTrainer(RLTrainer):
                 current value model, shape [batch_size, seq_len]
             experience_batch (TransitionData): A batch of samples collected
                 during generation
-            warmup (bool): Is in warmup phase.
 
         Returns:
             torch.Tensor: The total loss tensor
@@ -287,28 +285,11 @@ class PPOTrainer(RLTrainer):
             returns_var = self.masked_var(returns, loss_mask, dim=1).mean()
             var_explained = 1 - pred_error / returns_var
 
-        if warmup:
-            prefix = "warmup"
-            value_prefix = "warmup"
-        else:
-            prefix = "train"
-            value_prefix = "value"
-
-        self.logger.log_scalar(f"{prefix}/vf_loss", vf_loss.detach().item())
-        self.logger.log_scalar(f"{value_prefix}/error", pred_error.detach().item())
-        self.logger.log_scalar(f"{value_prefix}/clipfrac", clipfrac.detach().item())
-        self.logger.log_scalar(
-            f"{value_prefix}/returns_var", returns_var.detach().item()
-        )
-        self.logger.log_scalar(
-            f"{value_prefix}/var_explained", var_explained.detach().item()
-        )
-
-        # self.logger.log_scalar("train/vf_loss", vf_loss.detach().item())
-        # self.logger.log_scalar("value/error", pred_error.detach().item())
-        # self.logger.log_scalar("value/clipfrac", clipfrac.detach().item())
-        # self.logger.log_scalar("value/returns_var", returns_var.detach().item())
-        # self.logger.log_scalar("value/var_explained", var_explained.detach().item())
+        self.logger.log_scalar("train/vf_loss", vf_loss.detach().item())
+        self.logger.log_scalar("value/error", pred_error.detach().item())
+        self.logger.log_scalar("value/clipfrac", clipfrac.detach().item())
+        self.logger.log_scalar("value/returns_var", returns_var.detach().item())
+        self.logger.log_scalar("value/var_explained", var_explained.detach().item())
 
         return vf_loss
 
@@ -358,58 +339,9 @@ class PPOTrainer(RLTrainer):
                 outputs = self.eval_env.rollout(policy_model, eval_sampling_params)
                 self.log_batch_episodes(self._eval_phase, outputs, self.global_step)
 
-    def warmup_value_function(self, rollout_size: int, num_epochs: int) -> None:
-        """Run rollout to collect samples and initialize the value function."""
-        assert rollout_size > 0 and rollout_size % self.dist_ops.world_size == 0
-        assert num_epochs > 0
-
-        warmup_episodes = self.generate_experience(rollout_size)
-
-        warmup_loader = self.build_train_loader(warmup_episodes)
-
-        self._configure_model(self.policy_engine, "cpu", "offload")
-        self.clean_up()
-        self._configure_model(self.value_engine, self.device, "reload")
-
-        # TODO how to log metrics???
-        warmup_t = 0
-        for _ in range(num_epochs):
-            for i, micro_batch in enumerate(warmup_loader):
-                input_ids = micro_batch.states.to(self.device)
-                attention_mask = (input_ids != self.tokenizer.pad_token_id).bool()
-                pred_values = self.value_engine.forward(
-                    input_ids=input_ids, attention_mask=attention_mask
-                ).values
-
-                loss = self.compute_value_loss(pred_values, micro_batch, warmup=True)
-
-                del (micro_batch, input_ids, attention_mask, pred_values)
-                self.clean_up()
-
-                self.value_engine.backward(loss)
-                self.value_engine.step()
-
-                if self.value_engine.is_gradient_accumulation_boundary():
-                    self.value_update_count += 1
-                    self.logger.log_scalar(
-                        "warmup/value_update", self.value_update_count
-                    )
-                    self.logger.log_scalar(
-                        "warmup/value_learning_rate",
-                        self.value_engine.get_lr()[0],
-                    )
-
-                    self.logger.aggregate_and_log(warmup_t)
-                    warmup_t += 1
-
     @torch.inference_mode()
-    def generate_experience(
-        self, rollout_size: Optional[int] = None
-    ) -> List[EpisodeData]:
+    def generate_experience(self) -> List[EpisodeData]:
         """Generates samples using the current policy."""
-
-        if rollout_size is None:
-            rollout_size = self.config.train_rollout_size  # default
 
         if self.is_inference_engine_enabled():
             train_sampling_params = {
@@ -431,7 +363,7 @@ class PPOTrainer(RLTrainer):
             }
 
         # we always use batch size of 1 during training roll out
-        local_rollout_size = rollout_size // self.dist_ops.world_size
+        local_rollout_size = self.config.train_rollout_size // self.dist_ops.world_size
         collected_episodes: List[List[EpisodeData]] = []
         local_count = 0
 
