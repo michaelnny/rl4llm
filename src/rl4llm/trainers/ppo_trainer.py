@@ -198,9 +198,12 @@ class PPOTrainer(RLTrainer):
         pg_losses = -torch.min(pg_losses1, pg_losses2)
 
         with torch.no_grad():
-            approxkl = 0.5 * self.dist_masked_mean(
-                torch.square(pi_logprobs - behavior_logprobs), loss_mask, dim=1
-            ).mean()
+            approxkl = (
+                0.5
+                * self.dist_masked_mean(
+                    torch.square(pi_logprobs - behavior_logprobs), loss_mask, dim=1
+                ).mean()
+            )
             clipfrac = self.dist_masked_mean(
                 torch.lt(pg_losses2, pg_losses1), loss_mask, dim=1
             ).mean()
@@ -245,6 +248,7 @@ class PPOTrainer(RLTrainer):
         self,
         pred_values: torch.Tensor,
         experience_batch: TransitionData,
+        warmup: Optional[bool] = False,
     ) -> torch.Tensor:
         """Compute value loss for a single training batch
 
@@ -253,6 +257,8 @@ class PPOTrainer(RLTrainer):
                 current value model, shape [batch_size, seq_len]
             experience_batch (TransitionData): A batch of samples collected
                 during generation
+            warmup (bool): Is in warmup phase.
+
         Returns:
             torch.Tensor: The total loss tensor
         """
@@ -281,11 +287,28 @@ class PPOTrainer(RLTrainer):
             returns_var = self.masked_var(returns, loss_mask, dim=1).mean()
             var_explained = 1 - pred_error / returns_var
 
-        self.logger.log_scalar("train/vf_loss", vf_loss.detach().item())
-        self.logger.log_scalar("value/error", pred_error.detach().item())
-        self.logger.log_scalar("value/clipfrac", clipfrac.detach().item())
-        self.logger.log_scalar("value/returns_var", returns_var.detach().item())
-        self.logger.log_scalar("value/var_explained", var_explained.detach().item())
+        if warmup:
+            prefix = "warmup"
+            value_prefix = "warmup"
+        else:
+            prefix = "train"
+            value_prefix = "value"
+
+        self.logger.log_scalar(f"{prefix}/vf_loss", vf_loss.detach().item())
+        self.logger.log_scalar(f"{value_prefix}/error", pred_error.detach().item())
+        self.logger.log_scalar(f"{value_prefix}/clipfrac", clipfrac.detach().item())
+        self.logger.log_scalar(
+            f"{value_prefix}/returns_var", returns_var.detach().item()
+        )
+        self.logger.log_scalar(
+            f"{value_prefix}/var_explained", var_explained.detach().item()
+        )
+
+        # self.logger.log_scalar("train/vf_loss", vf_loss.detach().item())
+        # self.logger.log_scalar("value/error", pred_error.detach().item())
+        # self.logger.log_scalar("value/clipfrac", clipfrac.detach().item())
+        # self.logger.log_scalar("value/returns_var", returns_var.detach().item())
+        # self.logger.log_scalar("value/var_explained", var_explained.detach().item())
 
         return vf_loss
 
@@ -349,6 +372,7 @@ class PPOTrainer(RLTrainer):
         self._configure_model(self.value_engine, self.device, "reload")
 
         # TODO how to log metrics???
+        warmup_t = 0
         for _ in range(num_epochs):
             for i, micro_batch in enumerate(warmup_loader):
                 input_ids = micro_batch.states.to(self.device)
@@ -357,7 +381,7 @@ class PPOTrainer(RLTrainer):
                     input_ids=input_ids, attention_mask=attention_mask
                 ).values
 
-                loss = self.compute_value_loss(pred_values, micro_batch)
+                loss = self.compute_value_loss(pred_values, micro_batch, warmup=True)
 
                 del (micro_batch, input_ids, attention_mask, pred_values)
                 self.clean_up()
@@ -374,6 +398,9 @@ class PPOTrainer(RLTrainer):
                         "warmup/value_learning_rate",
                         self.value_engine.get_lr()[0],
                     )
+
+                    self.logger.aggregate_and_log(warmup_t)
+                    warmup_t += 1
 
     @torch.inference_mode()
     def generate_experience(
