@@ -285,6 +285,11 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         """
         pass
 
+    @abstractmethod
+    def save_checkpoint(self, step: int) -> None:
+        """Saves model checkpoint"""
+        pass
+
     @contextmanager
     def unwrapped_model_for_generation(
         self,
@@ -317,36 +322,10 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self._configure_model(self.value_engine, 'cpu', state_action='offload')
         self.clean_up()
 
-        # # Offload any possible state to free up GPU memory
-        # if self.reference_model is not None:
-        #     self.reference_model = self.reference_model.to('cpu')
-        #     self.reference_model.eval()
-
-        # if self.can_offload_state(self.policy_engine):
-        #     self.policy_engine.offload_states()
-        # if self.value_engine is not None:
-        #     if self.can_offload_state(self.value_engine):
-        #         self.value_engine.offload_states()
-        #     self.value_engine = self.value_engine.to('cpu')
-
-        # if self.is_cohost_inference_engine():
-        #     try:
-        #         self.policy_engine = self.policy_engine.to('cpu')
-        #     except Exception as e:
-        #         raise RuntimeError(
-        #             f"Failed to offload deepspeed engine, error: {str(e)}"
-        #         )
-        # else:
-        #     self.policy_engine.eval()
-
-        # self.clean_up()
-
     def _prepare_for_pre_processing(self):
         """Switch models handle pre-processing (like compute logprobs) before training."""
 
-        # Inference engine is not needed
         self._release_inference_memory()
-
         self.clean_up()
 
         self._configure_model(
@@ -356,22 +335,6 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             self.value_engine, self.device, state_action='offload', mode='eval'
         )
         self._configure_model(self.reference_model, self.device, mode='eval')
-
-        # # For pre-processing a need all models on CUDA
-        # self.policy_engine = self.policy_engine.to(self.device)
-        # if self.can_offload_state(self.policy_engine):
-        #     self.policy_engine.offload_states()
-        # self.policy_engine.eval()
-
-        # if self.value_engine is not None:
-        #     if self.can_offload_state(self.value_engine):
-        #         self.value_engine.offload_states()
-        #     self.value_engine = self.value_engine.to(self.device)
-        #     self.value_engine.eval()
-
-        # if self.reference_model is not None:
-        #     self.reference_model = self.reference_model.to(self.device)
-        #     self.reference_model.eval()
 
     def _prepare_for_training(self):
         """Switch models to train mode."""
@@ -385,32 +348,6 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self._configure_model(
             self.value_engine, self.device, state_action='reload', mode='train'
         )
-
-        # if self.is_cohost_inference_engine():
-        #     try:
-        #         # Try offload GPU RAM caches
-        #         self.inference_client.release_memory()
-        #     except Exception as e:
-        #         raise RuntimeError(
-        #             f"Failed to offload inference engine, error: {str(e)}"
-        #         )
-
-        # # Training phase we don't need the reference model
-        # if self.reference_model is not None:
-        #     self.reference_model = self.reference_model.to('cpu')
-
-        # self.clean_up()
-
-        # self.policy_engine = self.policy_engine.to(self.device)
-        # if self.can_offload_state(self.policy_engine):
-        #     self.policy_engine.reload_states()
-        # self.policy_engine.train()
-
-        # if self.value_engine is not None:
-        #     self.value_engine = self.value_engine.to(self.device)
-        #     if self.can_offload_state(self.value_engine):
-        #         self.value_engine.reload_states()
-        #     self.value_engine.train()
 
     def _configure_model(
         self,
@@ -684,14 +621,14 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 f"{token_metric_key}/prompt_length", ep.prompt_length
             )
 
-    def save_checkpoint(self, step: int):
-        """Saves a model checkpoint."""
-        tag = f"iteration_{step}"
-        save_path = os.path.join(self.checkpoint_dir, tag)
-        self.logger.info(f"Saving checkpoint to {save_path}...")
-        self.policy_engine.save_checkpoint(save_path)
-        self.dist_ops.barrier()
-        self.logger.info('Checkpoint saved.')
+    # def save_checkpoint(self, step: int):
+    #     """Saves a model checkpoint."""
+    #     tag = f"iteration_{step}"
+    #     save_path = os.path.join(self.checkpoint_dir, tag)
+    #     self.logger.info(f"Saving checkpoint to {save_path}...")
+    #     self.policy_engine.save_checkpoint(save_path)
+    #     self.dist_ops.barrier()
+    #     self.logger.info('Checkpoint saved.')
 
     def train(self, job_config: Dict):
         """

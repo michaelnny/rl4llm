@@ -18,9 +18,9 @@ from rl4llm.envs import EpisodeData, LocalLLMEnv
 class PPOConfig(RLConfig):
     """PPO config instance for RL LLM"""
 
-    gae_lambda: float = Field(0.95, gt=0.0, le=1.0, description="GAE lambda")
+    gae_lambda: float = Field(0.95, gt=0.0, le=1.0, description='GAE lambda')
     value_clip_eps: float = Field(
-        0.2, ge=0.0, le=1.0, description="PPO value loss clip epsilon"
+        0.2, ge=0.0, le=1.0, description='PPO value loss clip epsilon'
     )
 
 
@@ -29,38 +29,38 @@ class TransitionData(BaseModel):
 
     states: torch.Tensor = Field(
         ...,
-        description="A long tensor for token sequences from t=0, 1, ..., T-1",
+        description='A long tensor for token sequences from t=0, 1, ..., T-1',
     )
     actions: torch.Tensor = Field(
         ...,
-        description="A long tensor for token sequences from t=1, 2, ..., T-1, T",
+        description='A long tensor for token sequences from t=1, 2, ..., T-1, T',
     )
     values: torch.Tensor = Field(
         ...,
-        description="A tensor for value estimated for sequences from t=1, 2, ..., T-1, T",
+        description='A tensor for value estimated for sequences from t=1, 2, ..., T-1, T',
     )
     loss_mask: torch.Tensor = Field(
         ...,
-        description="A boolean tensor (0s user tokens, 1s assistant tokens) corresponding to token sequences from t=1, 2, ..., T-1, T",
+        description='A boolean tensor (0s user tokens, 1s assistant tokens) corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
     pi_logprobs: torch.Tensor = Field(
         ...,
-        description="A float tensor for action logprobs corresponding to token sequences from t=1, 2, ..., T-1, T",
+        description='A float tensor for action logprobs corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
     ref_logprobs: torch.Tensor = Field(
         ...,
-        description="A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T",
+        description='A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
     returns: torch.Tensor = Field(
         ...,
-        description="A float tensor for returns estimate corresponding to token sequences from t=1, 2, ..., T-1, T",
+        description='A float tensor for returns estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
     advantages: torch.Tensor = Field(
         ...,
-        description="A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T",
+        description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def check_tensor_shapes(cls, values):
         tensors = [
             values.states,
@@ -69,6 +69,7 @@ class TransitionData(BaseModel):
             values.loss_mask,
             values.pi_logprobs,
             values.ref_logprobs,
+            values.returns,
             values.advantages,
         ]
 
@@ -136,7 +137,7 @@ class PPOTrainer(RLTrainer):
         """
 
         if not experience:
-            raise ValueError("No samples for training")
+            raise ValueError('No samples for training')
 
         samples = []
 
@@ -148,9 +149,11 @@ class PPOTrainer(RLTrainer):
                 samples.extend(processed)
 
         if not samples:
-            raise ValueError("No samples for training")
+            raise ValueError('No samples for training')
 
-        local_rollout_size = self.config.train_rollout_size // self.dist_ops.world_size
+        local_rollout_size = (
+            self.config.train_rollout_size // self.dist_ops.world_size
+        )
 
         if len(samples) > local_rollout_size:
             samples = samples[:local_rollout_size]
@@ -159,7 +162,7 @@ class PPOTrainer(RLTrainer):
             samples,
             batch_size=self.config.train_micro_batch_size,
             shuffle=True,
-            pin_memory=self.device.type == "cuda",
+            pin_memory=self.device.type == 'cuda',
             collate_fn=self._train_collate_fn,
             drop_last=True,
         )
@@ -192,7 +195,9 @@ class PPOTrainer(RLTrainer):
         # PPO clipped surrogate PG loss
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
+        clipped_ratio = ratio.clamp(
+            1 - self.config.clip_eps, 1 + self.config.clip_eps
+        )
         pg_losses1 = ratio * advantages.detach()
         pg_losses2 = clipped_ratio * advantages.detach()
         pg_losses = -torch.min(pg_losses1, pg_losses2)
@@ -201,7 +206,9 @@ class PPOTrainer(RLTrainer):
             approxkl = (
                 0.5
                 * self.dist_masked_mean(
-                    torch.square(pi_logprobs - behavior_logprobs), loss_mask, dim=1
+                    torch.square(pi_logprobs - behavior_logprobs),
+                    loss_mask,
+                    dim=1,
                 ).mean()
             )
             clipfrac = self.dist_masked_mean(
@@ -218,11 +225,13 @@ class PPOTrainer(RLTrainer):
         entropy = entropies.mean()
         entropy_loss = -(self.config.entropy_loss_coef * entropy)
 
-        self.logger.log_scalar("train/pg_loss", pg_loss.detach().item())
-        self.logger.log_scalar("train/entropy_loss", entropy_loss.detach().item())
-        self.logger.log_scalar("policy/entropy", entropy.detach().item())
-        self.logger.log_scalar("policy/approxkl", approxkl.detach().item())
-        self.logger.log_scalar("policy/clipfrac", clipfrac.detach().item())
+        self.logger.log_scalar('train/pg_loss', pg_loss.detach().item())
+        self.logger.log_scalar(
+            'train/entropy_loss', entropy_loss.detach().item()
+        )
+        self.logger.log_scalar('policy/entropy', entropy.detach().item())
+        self.logger.log_scalar('policy/approxkl', approxkl.detach().item())
+        self.logger.log_scalar('policy/clipfrac', clipfrac.detach().item())
 
         loss = pg_loss + entropy_loss
 
@@ -232,15 +241,17 @@ class PPOTrainer(RLTrainer):
             ref_logprobs = experience_batch.ref_logprobs.to(self.device)
             # Compute the KL divergence between the model and the reference model
             per_token_kl = (
-                torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+                torch.exp(ref_logprobs - pi_logprobs)
+                - (ref_logprobs - pi_logprobs)
+                - 1
             )
 
             kl = self.dist_masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
             loss += kl_loss
-            self.logger.log_scalar("train/kl_loss", kl_loss.detach().item())
-            self.logger.log_scalar("objective/kl", kl.detach().item())
+            self.logger.log_scalar('train/kl_loss', kl_loss.detach().item())
+            self.logger.log_scalar('objective/kl', kl.detach().item())
 
         return loss
 
@@ -277,7 +288,9 @@ class PPOTrainer(RLTrainer):
 
         with torch.no_grad():
             pred_error = self.dist_masked_mean(
-                torch.square(pred_values.detach() - returns.detach()), loss_mask, dim=1
+                torch.square(pred_values.detach() - returns.detach()),
+                loss_mask,
+                dim=1,
             ).mean()
             clipfrac = self.dist_masked_mean(
                 torch.gt(vf_losses2, vf_losses1), loss_mask, dim=1
@@ -285,24 +298,26 @@ class PPOTrainer(RLTrainer):
             returns_var = self.masked_var(returns, loss_mask, dim=1).mean()
             var_explained = 1 - pred_error / returns_var
 
-        self.logger.log_scalar("train/vf_loss", vf_loss.detach().item())
-        self.logger.log_scalar("value/error", pred_error.detach().item())
-        self.logger.log_scalar("value/clipfrac", clipfrac.detach().item())
-        self.logger.log_scalar("value/returns_var", returns_var.detach().item())
-        self.logger.log_scalar("value/var_explained", var_explained.detach().item())
+        self.logger.log_scalar('train/vf_loss', vf_loss.detach().item())
+        self.logger.log_scalar('value/error', pred_error.detach().item())
+        self.logger.log_scalar('value/clipfrac', clipfrac.detach().item())
+        self.logger.log_scalar('value/returns_var', returns_var.detach().item())
+        self.logger.log_scalar(
+            'value/var_explained', var_explained.detach().item()
+        )
 
         return vf_loss
 
     def train_step(self, train_dataloader: DataLoader):
         """Performs the policy and value models update using collected rollout."""
 
-        self._configure_model(self.value_engine, "cpu", "offload")
+        self._configure_model(self.value_engine, 'cpu', 'offload')
         self.clean_up()
         self._train_policy_step(train_dataloader)
 
-        self._configure_model(self.policy_engine, "cpu", "offload")
+        self._configure_model(self.policy_engine, 'cpu', 'offload')
         self.clean_up()
-        self._configure_model(self.value_engine, self.device, "reload")
+        self._configure_model(self.value_engine, self.device, 'reload')
         self._train_value_step(train_dataloader)
 
     @torch.inference_mode()
@@ -321,23 +336,27 @@ class PPOTrainer(RLTrainer):
         # Use greedy sampling
         if self.is_inference_engine_enabled():
             eval_sampling_params = {
-                "max_new_tokens": self.config.max_completion_tokens,
-                "temperature": 0.0,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': 0.0,
             }
         else:
             eval_sampling_params = {
-                "max_new_tokens": self.config.max_completion_tokens,
-                "temperature": None,
-                "top_p": None,
-                "top_k": None,
-                "repetition_penalty": None,
-                "do_sample": False,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': None,
+                'top_p': None,
+                'top_k': None,
+                'repetition_penalty': None,
+                'do_sample': False,
             }
 
         with self.unwrapped_model_for_generation() as policy_model:
             for _ in range(local_rollout_size):
-                outputs = self.eval_env.rollout(policy_model, eval_sampling_params)
-                self.log_batch_episodes(self._eval_phase, outputs, self.global_step)
+                outputs = self.eval_env.rollout(
+                    policy_model, eval_sampling_params
+                )
+                self.log_batch_episodes(
+                    self._eval_phase, outputs, self.global_step
+                )
 
     @torch.inference_mode()
     def generate_experience(self) -> List[EpisodeData]:
@@ -345,31 +364,35 @@ class PPOTrainer(RLTrainer):
 
         if self.is_inference_engine_enabled():
             train_sampling_params = {
-                "max_new_tokens": self.config.max_completion_tokens,
-                "temperature": self.config.temperature,
-                "top_p": self.config.top_p,
-                "top_k": self.config.top_k,
-                "repetition_penalty": self.config.repetition_penalty,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': self.config.temperature,
+                'top_p': self.config.top_p,
+                'top_k': self.config.top_k,
+                'repetition_penalty': self.config.repetition_penalty,
             }
         else:
             train_sampling_params = {
-                "max_new_tokens": self.config.max_completion_tokens,
-                "temperature": self.config.temperature,
-                "top_p": self.config.top_p,
-                "top_k": self.config.top_k,
-                "repetition_penalty": self.config.repetition_penalty,
-                "num_return_sequences": 1,  # we handle the group size inside the LocalLLMEnv
-                "do_sample": True,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': self.config.temperature,
+                'top_p': self.config.top_p,
+                'top_k': self.config.top_k,
+                'repetition_penalty': self.config.repetition_penalty,
+                'num_return_sequences': 1,  # we handle the group size inside the LocalLLMEnv
+                'do_sample': True,
             }
 
         # we always use batch size of 1 during training roll out
-        local_rollout_size = self.config.train_rollout_size // self.dist_ops.world_size
+        local_rollout_size = (
+            self.config.train_rollout_size // self.dist_ops.world_size
+        )
         collected_episodes: List[List[EpisodeData]] = []
         local_count = 0
 
         with self.unwrapped_model_for_generation() as policy_model:
             while local_count < local_rollout_size:
-                outputs = self.train_env.rollout(policy_model, train_sampling_params)
+                outputs = self.train_env.rollout(
+                    policy_model, train_sampling_params
+                )
                 if outputs:
                     collected_episodes.extend(outputs)
                     local_count += len(outputs)
@@ -425,7 +448,9 @@ class PPOTrainer(RLTrainer):
             padding_value=self.tokenizer.pad_token_id,
         ).to(self.device)
 
-        batch_attention_mask = (batch_states != self.tokenizer.pad_token_id).bool()
+        batch_attention_mask = (
+            batch_states != self.tokenizer.pad_token_id
+        ).bool()
 
         # Policy Model
         batch_pi_logits = self.policy_engine.forward(
@@ -441,7 +466,7 @@ class PPOTrainer(RLTrainer):
         # Reference Model (if applicable)
         if (
             self.config.kl_loss_coef > 0
-            and hasattr(self, "reference_model")
+            and hasattr(self, 'reference_model')
             and self.reference_model
         ):
             batch_ref_logits = self.reference_model.forward(
@@ -560,7 +585,9 @@ class PPOTrainer(RLTrainer):
         for _ in range(self.config.num_updates):
             for i, micro_batch in enumerate(train_dataloader):
                 input_ids = micro_batch.states.to(self.device)
-                attention_mask = (input_ids != self.tokenizer.pad_token_id).bool()
+                attention_mask = (
+                    input_ids != self.tokenizer.pad_token_id
+                ).bool()
                 pi_logits = self.policy_engine.forward(
                     input_ids=input_ids, attention_mask=attention_mask
                 ).logits
@@ -576,10 +603,10 @@ class PPOTrainer(RLTrainer):
                 if self.policy_engine.is_gradient_accumulation_boundary():
                     self.policy_update_count += 1
                     self.logger.log_scalar(
-                        "train/policy_update", self.policy_update_count
+                        'train/policy_update', self.policy_update_count
                     )
                     self.logger.log_scalar(
-                        "train/policy_learning_rate",
+                        'train/policy_learning_rate',
                         self.policy_engine.get_lr()[0],
                     )
 
@@ -588,7 +615,9 @@ class PPOTrainer(RLTrainer):
         for _ in range(self.config.num_updates):
             for i, micro_batch in enumerate(train_dataloader):
                 input_ids = micro_batch.states.to(self.device)
-                attention_mask = (input_ids != self.tokenizer.pad_token_id).bool()
+                attention_mask = (
+                    input_ids != self.tokenizer.pad_token_id
+                ).bool()
                 pred_values = self.value_engine.forward(
                     input_ids=input_ids, attention_mask=attention_mask
                 ).values
@@ -604,10 +633,10 @@ class PPOTrainer(RLTrainer):
                 if self.value_engine.is_gradient_accumulation_boundary():
                     self.value_update_count += 1
                     self.logger.log_scalar(
-                        "train/value_update", self.value_update_count
+                        'train/value_update', self.value_update_count
                     )
                     self.logger.log_scalar(
-                        "train/value_learning_rate",
+                        'train/value_learning_rate',
                         self.value_engine.get_lr()[0],
                     )
 

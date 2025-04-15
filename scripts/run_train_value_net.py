@@ -1,4 +1,4 @@
-"""Script to run RL PPO fine-tuning."""
+"""Script to run RL value model training."""
 
 import argparse
 import os
@@ -13,20 +13,17 @@ from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import InferenceEnv, LocalLLMEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.trainers.ppo_trainer import PPOConfig, PPOTrainer
+from rl4llm.trainers.rl_value_trainer import ValueNetConfig, ValueNetTrainer
 from rl4llm.utils import load_yaml_config_file, set_seed
-from rl4llm.utils.model_utils import (
-    build_policy_model_and_tokenizer,
-    build_value_model_and_tokenizer,
-)
+from rl4llm.utils.model_utils import build_value_model_and_tokenizer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='RL PPO fine-tuning')
+    parser = argparse.ArgumentParser(description='RL RL value model training')
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/ppo_config.yaml',
+        default='./configs/value_net_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -145,7 +142,7 @@ def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
 
 
 def main():
-    """Starts RL PPO training loop."""
+    """Starts value model training loop."""
     if not torch.cuda.is_available():
         raise RuntimeError('This script requires supports CUDA.')
 
@@ -159,11 +156,10 @@ def main():
     datasets_config = job_config.get('dataset')
     max_train_samples = datasets_config.get('max_train_samples', None)
     max_test_samples = datasets_config.get('max_test_samples', None)
-    policy_model_config = job_config['policy_model']
-    value_model_config = job_config['value_model']
-    policy_model_name = policy_model_config['pretrained_model']
+    model_config = job_config['model']
+    model_name = model_config['pretrained_model']
     deepspeed_config = job_config['deepspeed']
-    ppo_config = PPOConfig(**job_config['ppo'])
+    value_config = ValueNetConfig(**job_config['value_net_config'])
 
     set_seed(seed)
 
@@ -173,13 +169,11 @@ def main():
     world_size = int(os.environ['WORLD_SIZE'])
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
-
     deepspeed_config['train_micro_batch_size_per_gpu'] = (
-        ppo_config.train_micro_batch_size
+        value_config.train_micro_batch_size
     )
-    deepspeed_config['train_batch_size'] = ppo_config.train_batch_size
+    deepspeed_config['train_batch_size'] = value_config.train_batch_size
 
-    # Prepare datasets
     train_dataset, eval_dataset = load_multiple_datasets(
         datasets_config['names']
     )
@@ -190,7 +184,7 @@ def main():
     if max_test_samples is not None and max_test_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
-    if any([k in policy_model_name for k in ['0.5B', '1B', '1.5B']]):
+    if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
         template = PROMPT_TEMPLATE_EASY
     else:
         template = PROMPT_TEMPLATE
@@ -201,19 +195,8 @@ def main():
     train_dataset = train_dataset.map(apply_prompt)
     eval_dataset = eval_dataset.map(apply_prompt)
 
-    # Create model and deepspeed engine
-    policy_model, tokenizer = build_policy_model_and_tokenizer(
-        policy_model_config, torch_dtype
-    )
-
-    value_model, _ = build_value_model_and_tokenizer(
-        value_model_config, torch_dtype
-    )
-
-    policy_engine, *_ = deepspeed.initialize(
-        model=policy_model,
-        model_parameters=policy_model.parameters(),
-        config_params=deepspeed_config,
+    value_model, tokenizer = build_value_model_and_tokenizer(
+        model_config, torch_dtype
     )
     value_engine, *_ = deepspeed.initialize(
         model=value_model,
@@ -221,31 +204,6 @@ def main():
         config_params=deepspeed_config,
     )
 
-    # Create reference model and optionally use deepspeed sharding
-    ref_model = None
-    if ppo_config.kl_loss_coef > 0:
-        ref_model, _ = build_policy_model_and_tokenizer(
-            policy_model_config, torch_dtype
-        )
-        for param in ref_model.parameters():
-            param.requires_grad = False
-        ref_model.eval()
-
-    reference_deepspeed_config = job_config.get('reference_deepspeed')
-    if ref_model is not None and reference_deepspeed_config is not None:
-        zero3_enabled = (
-            reference_deepspeed_config.get('zero_optimization', {}).get('stage')
-            == 3
-        )
-        if zero3_enabled:
-            ref_model, *_ = deepspeed.initialize(
-                model=ref_model,
-                model_parameters=[],
-                config_params=reference_deepspeed_config,
-            )
-            ref_model.eval()
-
-    # Create envs
     env_reward_functions = [AccuracyRewardFunction()]
     inference_client = None
     env_cls = LocalLLMEnv
@@ -260,7 +218,7 @@ def main():
     train_env = env_cls(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
-        group_size=ppo_config.group_size,
+        group_size=value_config.group_size,
         tokenizer=tokenizer,
         reward_functions=env_reward_functions,
         rank=local_rank,
@@ -268,7 +226,7 @@ def main():
     )
     eval_env = env_cls(
         dataset=eval_dataset,
-        batch_size=ppo_config.eval_batch_size,
+        batch_size=value_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
         tokenizer=tokenizer,
         reward_functions=env_reward_functions,
@@ -276,16 +234,14 @@ def main():
         world_size=world_size,
     )
 
-    trainer = PPOTrainer(
-        config=ppo_config,
+    trainer = ValueNetTrainer(
+        config=value_config,
         tokenizer=tokenizer,
-        policy_engine=policy_engine,
         value_engine=value_engine,
         log_config=log_config,
         train_env=train_env,
         eval_env=eval_env,
         inference_client=inference_client,
-        ref_model=ref_model,
         reward_transform_fn=reward_transform_fn,
         seed=seed,
     )
