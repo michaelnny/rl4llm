@@ -13,7 +13,7 @@ from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import InferenceEnv, LocalLLMEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.trainers.rl_value_trainer import ValueNetConfig, ValueNetTrainer
+from rl4llm.trainers.value_net_trainer import ValueNetConfig, ValueNetTrainer
 from rl4llm.utils import load_yaml_config_file, set_seed
 from rl4llm.utils.model_utils import build_value_model_and_tokenizer
 
@@ -156,7 +156,7 @@ def main():
     datasets_config = job_config.get('dataset')
     max_train_samples = datasets_config.get('max_train_samples', None)
     max_test_samples = datasets_config.get('max_test_samples', None)
-    model_config = job_config['model']
+    model_config = job_config['value_model']
     model_name = model_config['pretrained_model']
     deepspeed_config = job_config['deepspeed']
     value_config = ValueNetConfig(**job_config['value_net_config'])
@@ -198,6 +198,7 @@ def main():
     value_model, tokenizer = build_value_model_and_tokenizer(
         model_config, torch_dtype
     )
+
     value_engine, *_ = deepspeed.initialize(
         model=value_model,
         model_parameters=value_model.parameters(),
@@ -224,15 +225,6 @@ def main():
         rank=local_rank,
         world_size=world_size,
     )
-    eval_env = env_cls(
-        dataset=eval_dataset,
-        batch_size=value_config.eval_batch_size,
-        group_size=1,  # always set group size to 1 for evaluation
-        tokenizer=tokenizer,
-        reward_functions=env_reward_functions,
-        rank=local_rank,
-        world_size=world_size,
-    )
 
     trainer = ValueNetTrainer(
         config=value_config,
@@ -240,7 +232,6 @@ def main():
         value_engine=value_engine,
         log_config=log_config,
         train_env=train_env,
-        eval_env=eval_env,
         inference_client=inference_client,
         reward_transform_fn=reward_transform_fn,
         seed=seed,

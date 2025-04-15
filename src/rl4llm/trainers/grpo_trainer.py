@@ -1,5 +1,6 @@
 """Implements GRPO trainer"""
 
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -21,7 +22,7 @@ class GRPOConfig(RLConfig):
 
     group_reward_zero_mean: bool = Field(
         False,
-        description="Normalized group reward to have a zero mean without standard deviation scaling",
+        description='Normalized group reward to have a zero mean without standard deviation scaling',
     )
 
 
@@ -30,30 +31,30 @@ class TransitionData(BaseModel):
 
     states: torch.Tensor = Field(
         ...,
-        description="A long tensor for token sequences from t=0, 1, ..., T-1",
+        description='A long tensor for token sequences from t=0, 1, ..., T-1',
     )
     actions: torch.Tensor = Field(
         ...,
-        description="A long tensor for token sequences from t=1, 2, ..., T-1, T",
+        description='A long tensor for token sequences from t=1, 2, ..., T-1, T',
     )
     loss_mask: torch.Tensor = Field(
         ...,
-        description="A boolean tensor (0s user tokens, 1s assistant tokens) corresponding to token sequences from t=1, 2, ..., T-1, T",
+        description='A boolean tensor (0s user tokens, 1s assistant tokens) corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
     pi_logprobs: torch.Tensor = Field(
         ...,
-        description="A float tensor for action logprobs corresponding to token sequences from t=1, 2, ..., T-1, T",
+        description='A float tensor for action logprobs corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
     ref_logprobs: torch.Tensor = Field(
         ...,
-        description="A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T",
+        description='A float tensor for action logprobs from reference model corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
     advantages: torch.Tensor = Field(
         ...,
-        description="A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T",
+        description='A float tensor for GAE advantages estimate corresponding to token sequences from t=1, 2, ..., T-1, T',
     )
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def check_tensor_shapes(cls, values):
         tensors = [
             values.states,
@@ -111,13 +112,33 @@ class GRPOTrainer(RLTrainer):
             seed=seed,
         )
 
+        if config.train_rollout_size % self.dist_ops.world_size != 0:
+            raise ValueError(
+                'Train rollout size must be divisible by world size'
+            )
+        if config.eval_rollout_size % self.dist_ops.world_size != 0:
+            raise ValueError(
+                'Evaluation rollout size must be divisible by world size'
+            )
+
         self.config: GRPOConfig = config  # for better type hinting
 
     def initialize_trainer(self):
         """Initialize GRPO specific settings"""
         pass
 
-    def build_train_loader(self, experience: List[List[EpisodeData]]) -> DataLoader:
+    def save_checkpoint(self, tag: str) -> None:
+        """Save trained model in HF format"""
+        subpath = f"epoch_{tag}"
+        save_path = os.path.join(self.checkpoint_dir, subpath)
+        self.logger.info(f"Saving HF checkpoint to {save_path}...")
+        self.save_weights_hf_pretrained(self.policy_engine, save_path)
+        self.dist_ops.barrier()
+        self.logger.info('Checkpoint saved.')
+
+    def build_train_loader(
+        self, experience: List[List[EpisodeData]]
+    ) -> DataLoader:
         """Creates a train loader using the collected experiences.
 
         Args:
@@ -134,9 +155,11 @@ class GRPOTrainer(RLTrainer):
                 flatted_samples.extend(samples)
 
         if not flatted_samples:
-            raise ValueError("No samples for training")
+            raise ValueError('No samples for training')
 
-        local_rollout_size = self.config.train_rollout_size // self.dist_ops.world_size
+        local_rollout_size = (
+            self.config.train_rollout_size // self.dist_ops.world_size
+        )
 
         if len(flatted_samples) > local_rollout_size:
             flatted_samples = flatted_samples[:local_rollout_size]
@@ -145,7 +168,7 @@ class GRPOTrainer(RLTrainer):
             flatted_samples,
             batch_size=self.config.train_micro_batch_size,
             shuffle=True,
-            pin_memory=self.device.type == "cuda",
+            pin_memory=self.device.type == 'cuda',
             collate_fn=self._train_collate_fn,
             drop_last=True,
         )
@@ -176,7 +199,9 @@ class GRPOTrainer(RLTrainer):
         # PPO clipped surrogate PG loss
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clipped_ratio = ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
+        clipped_ratio = ratio.clamp(
+            1 - self.config.clip_eps, 1 + self.config.clip_eps
+        )
         pg_losses1 = ratio * advantages.detach()
         pg_losses2 = clipped_ratio * advantages.detach()
         pg_losses = -torch.min(pg_losses1, pg_losses2)
@@ -185,7 +210,9 @@ class GRPOTrainer(RLTrainer):
             approxkl = (
                 0.5
                 * self.dist_masked_mean(
-                    torch.square(pi_logprobs - behavior_logprobs), loss_mask, dim=1
+                    torch.square(pi_logprobs - behavior_logprobs),
+                    loss_mask,
+                    dim=1,
                 ).mean()
             )
             clipfrac = self.dist_masked_mean(
@@ -203,11 +230,13 @@ class GRPOTrainer(RLTrainer):
         entropy = entropies.mean()
         entropy_loss = -(self.config.entropy_loss_coef * entropy)
 
-        self.logger.log_scalar("train/pg_loss", pg_loss.detach().item())
-        self.logger.log_scalar("train/entropy_loss", entropy_loss.detach().item())
-        self.logger.log_scalar("policy/entropy", entropy.detach().item())
-        self.logger.log_scalar("policy/approxkl", approxkl.detach().item())
-        self.logger.log_scalar("policy/clipfrac", clipfrac.detach().item())
+        self.logger.log_scalar('train/pg_loss', pg_loss.detach().item())
+        self.logger.log_scalar(
+            'train/entropy_loss', entropy_loss.detach().item()
+        )
+        self.logger.log_scalar('policy/entropy', entropy.detach().item())
+        self.logger.log_scalar('policy/approxkl', approxkl.detach().item())
+        self.logger.log_scalar('policy/clipfrac', clipfrac.detach().item())
 
         loss = pg_loss + entropy_loss
         # Compute KL divergence if coefficient is positive
@@ -216,15 +245,17 @@ class GRPOTrainer(RLTrainer):
             ref_logprobs = experience_batch.ref_logprobs.to(self.device)
             # Compute the KL divergence between the model and the reference model
             per_token_kl = (
-                torch.exp(ref_logprobs - pi_logprobs) - (ref_logprobs - pi_logprobs) - 1
+                torch.exp(ref_logprobs - pi_logprobs)
+                - (ref_logprobs - pi_logprobs)
+                - 1
             )
 
             kl = self.dist_masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
             loss += kl_loss
-            self.logger.log_scalar("train/kl_loss", kl_loss.detach().item())
-            self.logger.log_scalar("objective/kl", kl.detach().item())
+            self.logger.log_scalar('train/kl_loss', kl_loss.detach().item())
+            self.logger.log_scalar('objective/kl', kl.detach().item())
 
         return loss
 
@@ -234,7 +265,9 @@ class GRPOTrainer(RLTrainer):
         for _ in range(self.config.num_updates):
             for i, micro_batch in enumerate(train_dataloader):
                 input_ids = micro_batch.states.to(self.device)
-                attention_mask = (input_ids != self.tokenizer.pad_token_id).bool()
+                attention_mask = (
+                    input_ids != self.tokenizer.pad_token_id
+                ).bool()
                 pi_logits = self.policy_engine.forward(
                     input_ids=input_ids, attention_mask=attention_mask
                 ).logits
@@ -250,10 +283,10 @@ class GRPOTrainer(RLTrainer):
                 if self.policy_engine.is_gradient_accumulation_boundary():
                     self.policy_update_count += 1
                     self.logger.log_scalar(
-                        "train/policy_update", self.policy_update_count
+                        'train/policy_update', self.policy_update_count
                     )
                     self.logger.log_scalar(
-                        "train/learning_rate",
+                        'train/learning_rate',
                         self.policy_engine.get_lr()[0],
                     )
 
@@ -273,23 +306,27 @@ class GRPOTrainer(RLTrainer):
         # Use greedy sampling
         if self.is_inference_engine_enabled():
             eval_sampling_params = {
-                "max_new_tokens": self.config.max_completion_tokens,
-                "temperature": 0.0,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': 0.0,
             }
         else:
             eval_sampling_params = {
-                "max_new_tokens": self.config.max_completion_tokens,
-                "temperature": None,
-                "top_p": None,
-                "top_k": None,
-                "repetition_penalty": None,
-                "do_sample": False,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': None,
+                'top_p': None,
+                'top_k': None,
+                'repetition_penalty': None,
+                'do_sample': False,
             }
 
         with self.unwrapped_model_for_generation() as policy_model:
             for _ in range(local_rollout_size):
-                outputs = self.eval_env.rollout(policy_model, eval_sampling_params)
-                self.log_batch_episodes(self._eval_phase, outputs, self.global_step)
+                outputs = self.eval_env.rollout(
+                    policy_model, eval_sampling_params
+                )
+                self.log_batch_episodes(
+                    self._eval_phase, outputs, self.global_step
+                )
 
     @torch.inference_mode()
     def generate_experience(self) -> List[EpisodeData]:
@@ -297,31 +334,35 @@ class GRPOTrainer(RLTrainer):
 
         if self.is_inference_engine_enabled():
             train_sampling_params = {
-                "max_new_tokens": self.config.max_completion_tokens,
-                "temperature": self.config.temperature,
-                "top_p": self.config.top_p,
-                "top_k": self.config.top_k,
-                "repetition_penalty": self.config.repetition_penalty,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': self.config.temperature,
+                'top_p': self.config.top_p,
+                'top_k': self.config.top_k,
+                'repetition_penalty': self.config.repetition_penalty,
             }
         else:
             train_sampling_params = {
-                "max_new_tokens": self.config.max_completion_tokens,
-                "temperature": self.config.temperature,
-                "top_p": self.config.top_p,
-                "top_k": self.config.top_k,
-                "repetition_penalty": self.config.repetition_penalty,
-                "num_return_sequences": 1,  # we handle the group size inside the LocalLLMEnv
-                "do_sample": True,
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': self.config.temperature,
+                'top_p': self.config.top_p,
+                'top_k': self.config.top_k,
+                'repetition_penalty': self.config.repetition_penalty,
+                'num_return_sequences': 1,  # we handle the group size inside the LocalLLMEnv
+                'do_sample': True,
             }
 
         # we always use batch size of 1 during training roll out
-        local_rollout_size = self.config.train_rollout_size // self.dist_ops.world_size
+        local_rollout_size = (
+            self.config.train_rollout_size // self.dist_ops.world_size
+        )
         collected_episodes: List[List[EpisodeData]] = []
         local_count = 0
 
         with self.unwrapped_model_for_generation() as policy_model:
             while local_count < local_rollout_size:
-                outputs = self.train_env.rollout(policy_model, train_sampling_params)
+                outputs = self.train_env.rollout(
+                    policy_model, train_sampling_params
+                )
 
                 if outputs:
                     # IMPORTANT: do not flatten the episodes yet
@@ -351,7 +392,7 @@ class GRPOTrainer(RLTrainer):
         if not episodes:
             return []
         if len(episodes) < 4:
-            raise ValueError("Expect group episodes to be greater than 4")
+            raise ValueError('Expect group episodes to be greater than 4')
 
         # Training specific pre-processing
         rewards = self.transform_batch_rewards(episodes).cpu()
@@ -383,7 +424,9 @@ class GRPOTrainer(RLTrainer):
             padding_value=self.tokenizer.pad_token_id,
         ).to(self.device)
 
-        batch_attention_mask = (batch_states != self.tokenizer.pad_token_id).bool()
+        batch_attention_mask = (
+            batch_states != self.tokenizer.pad_token_id
+        ).bool()
 
         # Policy Model
         batch_pi_logits = self.policy_engine.forward(
@@ -399,7 +442,7 @@ class GRPOTrainer(RLTrainer):
         # Reference Model (if applicable)
         if (
             self.config.kl_loss_coef > 0
-            and hasattr(self, "reference_model")
+            and hasattr(self, 'reference_model')
             and self.reference_model
         ):
             batch_ref_logits = self.reference_model.forward(
@@ -497,10 +540,10 @@ class GRPOTrainer(RLTrainer):
         Returns:
             torch.Tensor: Normalized rewards.
         """
-        assert eps > 0.0, "Epsilon must be positive"
-        assert rewards.dim() == 1, "Rewards must be 1-dimensional"
+        assert eps > 0.0, 'Epsilon must be positive'
+        assert rewards.dim() == 1, 'Rewards must be 1-dimensional'
         if len(rewards) < 4:
-            raise ValueError("Number of group rewards must be greater than 4")
+            raise ValueError('Number of group rewards must be greater than 4')
 
         mean_reward = rewards.mean()
         std_reward = rewards.std(unbiased=False)

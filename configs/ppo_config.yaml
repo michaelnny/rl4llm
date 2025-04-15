@@ -27,9 +27,10 @@ policy_model:
 
 value_model:
   pretrained_model: "Qwen/Qwen2.5-0.5B"
+  checkpoint_path: "./runs/test_value_net_qwen2.5_0.5b_gsm8k/checkpoints/epoch_last"    
   load_in_4bit: false
   gradient_checkpointing: true
-  flash_attention: true
+  flash_attention: false
   model_max_length: 4000
 
 ppo:

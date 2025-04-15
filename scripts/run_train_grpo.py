@@ -174,30 +174,29 @@ def main():
     )
     deepspeed_config['train_batch_size'] = grpo_config.train_batch_size
 
+    # Load and pre-processing dataset
     train_dataset, eval_dataset = load_multiple_datasets(
         datasets_config['names']
     )
-
     if max_train_samples is not None and max_train_samples < len(train_dataset):
         train_dataset = train_dataset.shuffle().select(range(max_train_samples))
-
     if max_test_samples is not None and max_test_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
-    policy_model, tokenizer = build_policy_model_and_tokenizer(
-        model_config, torch_dtype
-    )
-
+    # Define the function with fixed template using partial
     if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
         template = PROMPT_TEMPLATE_EASY
     else:
         template = PROMPT_TEMPLATE
 
-    # Define the function with fixed template using partial
     apply_prompt = partial(apply_prompt_template, template=template)
-
     train_dataset = train_dataset.map(apply_prompt)
     eval_dataset = eval_dataset.map(apply_prompt)
+
+    # Create models
+    policy_model, tokenizer = build_policy_model_and_tokenizer(
+        model_config, torch_dtype
+    )
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
@@ -229,6 +228,7 @@ def main():
             )
             ref_model.eval()
 
+    # Create envs
     env_reward_functions = [AccuracyRewardFunction()]
     inference_client = None
     env_cls = LocalLLMEnv

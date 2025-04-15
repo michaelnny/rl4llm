@@ -212,6 +212,8 @@ class BaseEnv(ABC):
         self.shuffle_dataset = shuffle_dataset
         self.num_workers = num_workers
 
+        self.epoch = 0
+
         self._setup_tokenizer()
         self._set_seed()
 
@@ -232,6 +234,27 @@ class BaseEnv(ABC):
             self.sharded_dataset,
             batch_size=self.batch_size,
             shuffle=self.shuffle_dataset,
+            collate_fn=self._collate_fn,
+            num_workers=self.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
+        self.dataset_iterator = iter(self.loader)
+
+    def shuffle(self):
+        """
+        Shuffles the dataset and resets the DataLoader iterator.
+
+        This method shuffles the sharded dataset using a seed based on the initial seed,
+        current epoch, and rank, ensuring reproducibility and diversity across ranks
+        in distributed training.
+        """
+        self.epoch += 1
+        shuffle_seed = self.seed + self.epoch + self.rank
+        self.sharded_dataset = self.sharded_dataset.shuffle(seed=shuffle_seed)
+        self.loader = DataLoader(
+            self.sharded_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
             collate_fn=self._collate_fn,
             num_workers=self.num_workers,
             pin_memory=torch.cuda.is_available(),

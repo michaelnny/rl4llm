@@ -197,14 +197,6 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
         TrainingMixin.__init__(self)
 
-        if config.train_rollout_size % self.dist_ops.world_size != 0:
-            raise ValueError(
-                'Train rollout size must be divisible by world size'
-            )
-        if config.eval_rollout_size % self.dist_ops.world_size != 0:
-            raise ValueError(
-                'Evaluation rollout size must be divisible by world size'
-            )
         if len(train_env.reward_functions) > 1 and not reward_transform_fn:
             raise ValueError(
                 'Reward aggregator is required when using mixed reward functions.'
@@ -220,7 +212,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.output_dir = log_config.get('output_dir')
         self.seed = seed
         self.device = self.dist_ops.device
-        self.torch_dtype = self.get_torch_dtype(policy_engine)
+        self._torch_dtype = None
 
         if not self.output_dir:
             raise ValueError('Invalid output_dir for logging')
@@ -250,6 +242,18 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             self.logger.info('Using inference engine client.')
 
         self.logger.info('RL Trainer initialized.')
+
+    @property
+    def torch_dtype(self) -> torch.dtype:
+        """Detects torch runtime data type from deepspeed engine"""
+        if self._torch_dtype is None:
+            if self.policy_engine is not None:
+                self._torch_dtype = self.get_torch_dtype(self.policy_engine)
+            elif self.value_engine is not None:
+                self._torch_dtype = self.get_torch_dtype(self.value_engine)
+            else:
+                raise RuntimeError('Can not detect torch dtype')
+        return self._torch_dtype
 
     @abstractmethod
     def initialize_trainer(self):
@@ -286,7 +290,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         pass
 
     @abstractmethod
-    def save_checkpoint(self, step: int) -> None:
+    def save_checkpoint(self, tag: str) -> None:
         """Saves model checkpoint"""
         pass
 
@@ -733,5 +737,5 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
     def on_exit(self):
         """Final clean-up and checkpoint save."""
-        self.save_checkpoint(self.config.max_steps)
+        self.save_checkpoint('last')
         self.logger.close()

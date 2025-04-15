@@ -50,9 +50,9 @@ class ValueNetConfig(BaseModel):
 
     """Training specific"""
     train_rollout_size: int = Field(
-        1024,
+        10240,
         ge=1,
-        le=5120,
+        le=102400,
         description='Number of samples to collect before update model',
     )
     num_epochs: int = Field(
@@ -73,7 +73,6 @@ class ValueNetConfig(BaseModel):
         le=1024,
         description='Global batch size across devices/ranks for training',
     )
-
     gamma: float = Field(
         1.0,
         ge=0.0,
@@ -127,8 +126,7 @@ class ValueNetTrainer(RLTrainer):
         value_engine: DeepSpeedEngine,
         log_config: Dict[str, Any],
         train_env: LocalLLMEnv,
-        # eval_env: Optional[LocalLLMEnv] = None,
-        inference_client: Optional[InferenceClient] = None,
+        inference_client: InferenceClient,
         reward_transform_fn: Optional[RewardTransform] = None,
         seed: Optional[int] = 175,
     ):
@@ -148,20 +146,29 @@ class ValueNetTrainer(RLTrainer):
             seed=seed,
         )
 
+        if config.train_rollout_size % self.dist_ops.world_size != 0:
+            raise ValueError(
+                'Train rollout size must be divisible by world size'
+            )
+
         self.config: ValueNetConfig = config  # for better type hinting
 
     def initialize_trainer(self):
         """Initialize algorithm specific settings"""
         pass
 
+    def save_checkpoint(self, tag: str) -> None:
+        """Save trained model in HF format"""
+        subpath = f"epoch_{tag}"
+        save_path = os.path.join(self.checkpoint_dir, subpath)
+        self.logger.info(f"Saving HF checkpoint to {save_path}...")
+        self.save_weights_hf_pretrained(self.value_engine, save_path)
+        self.dist_ops.barrier()
+        self.logger.info('Checkpoint saved.')
+
     def train(self, job_config: Dict):
         """
         Executes the main training loop.
-
-        This method orchestrates the full RL training process, including rollout generation,
-        data preprocessing, model training, evaluation, synchronization, and checkpointing.
-
-        It continues until `self.global_step` reaches `self.config.max_steps`.
 
         Args:
             job_config (Dict): Configuration dictionary containing job parameters such as
@@ -188,32 +195,11 @@ class ValueNetTrainer(RLTrainer):
         self.dist_ops.barrier()
 
         self.logger.info('Starting model training step...')
-        with self.logger.timer('train_step'):
+        with self.logger.timer('train_epochs'):
             self._prepare_for_training()
             self.train_step(train_dataloader)
             self.clean_up()
         self.dist_ops.barrier()
-
-        # if (
-        #     self.config.checkpoint_interval > 0
-        #     and (self.global_step + 1) % self.config.checkpoint_interval
-        #     == 0
-        # ):
-        #     self.logger.info('Saving checkpoint ...')
-        #     with self.logger.timer('checkpoint'):
-        #         self.save_checkpoint(self.global_step + 1)
-
-        # if (
-        #     self.config.eval_interval > 0
-        #     and self.eval_env
-        #     and (self.global_step + 1) % self.config.eval_interval == 0
-        # ):
-        #     self.logger.info('Running evaluation ...')
-        #     with self.logger.timer('evaluate_step'):
-
-        #         self.evaluate_step()
-        #         self.clean_up()
-        #     self.dist_ops.barrier()
 
         self.logger.info('Training loop complete. Finalizing...')
         self.on_exit()
@@ -290,14 +276,12 @@ class ValueNetTrainer(RLTrainer):
                 dim=1,
             ).mean()
             returns_var = self.masked_var(returns, loss_mask, dim=1).mean()
-            var_explained = 1 - pred_error / returns_var
+            var_explained = (1 - pred_error / (returns_var + 1e-8)).item()
 
         self.logger.log_scalar('train/loss', loss.detach().item())
         self.logger.log_scalar('train/error', pred_error.detach().item())
         self.logger.log_scalar('train/returns_var', returns_var.detach().item())
-        self.logger.log_scalar(
-            'train/var_explained', var_explained.detach().item()
-        )
+        self.logger.log_scalar('train/var_explained', var_explained)
 
         return loss
 
@@ -306,7 +290,7 @@ class ValueNetTrainer(RLTrainer):
 
         self._configure_model(self.policy_engine, 'cpu', 'offload')
 
-        for _ in range(self.config.num_updates):
+        for epoch in range(self.config.num_epochs):
             for i, micro_batch in enumerate(train_dataloader):
                 input_ids = micro_batch.states.to(self.device)
                 attention_mask = (
@@ -337,52 +321,12 @@ class ValueNetTrainer(RLTrainer):
 
                     self.logger.aggregate_and_log(self.global_step)
 
-    def save_checkpoint(self, step: int) -> None:
-        """Save trained model in HF format"""
-        tag = f"step_{step}"
-        save_path = os.path.join(self.checkpoint_dir, tag)
-        self.logger.info(f"Saving HF checkpoint to {save_path}...")
-        self.save_weights_hf_pretrained(self.value_engine, save_path)
-        self.dist_ops.barrier()
-        self.logger.info('Checkpoint saved.')
+            self.save_checkpoint(epoch)
 
     @torch.inference_mode()
     def evaluate_step(self):
-        """Run the policy on evaluation dataset"""
-
-        if self.eval_env is None:
-            return
-
-        # local_rollout_size = (
-        #     self.config.eval_rollout_size
-        #     // self.config.eval_batch_size
-        #     // self.dist_ops.world_size
-        # )
-
-        # # Use greedy sampling
-        # if self.is_inference_engine_enabled():
-        #     eval_sampling_params = {
-        #         "max_new_tokens": self.config.max_completion_tokens,
-        #         "temperature": 0.0,
-        #     }
-        # else:
-        #     eval_sampling_params = {
-        #         "max_new_tokens": self.config.max_completion_tokens,
-        #         "temperature": None,
-        #         "top_p": None,
-        #         "top_k": None,
-        #         "repetition_penalty": None,
-        #         "do_sample": False,
-        #     }
-
-        # with self.unwrapped_model_for_generation() as policy_model:
-        #     for _ in range(local_rollout_size):
-        #         outputs = self.eval_env.rollout(
-        #             policy_model, eval_sampling_params
-        #         )
-        #         self.log_batch_episodes(
-        #             self._eval_phase, outputs, self.global_step
-        #         )
+        """ """
+        pass
 
     @torch.inference_mode()
     def generate_experience(self) -> List[EpisodeData]:

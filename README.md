@@ -91,6 +91,27 @@ PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 
 ```
 
 
+```bash
+PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_value_net.py \
+    --config-file ./configs/value_net_config.yaml \
+    --use-infer-server \
+    --infer-host localhost \
+    --infer-port 30000 \
+    --infer-cohost-mode
+```
+
+
+
+```bash
+PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_ppo.py \
+    --config-file ./configs/ppo_config.yaml \
+    --use-infer-server \
+    --infer-host localhost \
+    --infer-port 30000 \
+    --infer-cohost-mode
+```
+
+
 ## Sample Generation Environments
 
 We adapt the MDP environment concept from classic RL, where sample generation was handled inside the MDP environment. The idea is the MDP env will collect the rollout and return the episode samples in a unified data structure. This avoids cluttering the actual RL algorithm.

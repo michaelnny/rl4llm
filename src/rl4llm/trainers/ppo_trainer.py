@@ -1,6 +1,7 @@
 """Implements PPO trainer"""
 
 import math
+import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeAlias, Union
 
 import torch
@@ -121,11 +122,38 @@ class PPOTrainer(RLTrainer):
             seed=seed,
         )
 
+        if config.train_rollout_size % self.dist_ops.world_size != 0:
+            raise ValueError(
+                'Train rollout size must be divisible by world size'
+            )
+        if config.eval_rollout_size % self.dist_ops.world_size != 0:
+            raise ValueError(
+                'Evaluation rollout size must be divisible by world size'
+            )
+
         self.config: PPOConfig = config  # for better type hinting
 
     def initialize_trainer(self):
         """Initialize PPO specific settings"""
         pass
+
+    def save_checkpoint(self, tag: str) -> None:
+        """Save trained model in HF format"""
+        subpath = f"epoch_{tag}"
+        policy_save_path = os.path.join(
+            self.checkpoint_dir, f"policy_{subpath}"
+        )
+        value_save_path = os.path.join(self.checkpoint_dir, f"value_{subpath}")
+        self.logger.info(
+            f"Saving policy model HF checkpoint to {policy_save_path}..."
+        )
+        self.save_weights_hf_pretrained(self.policy_engine, policy_save_path)
+        self.logger.info(
+            f"Saving value model HF checkpoint to {policy_save_path}..."
+        )
+        self.save_weights_hf_pretrained(self.value_engine, value_save_path)
+        self.dist_ops.barrier()
+        self.logger.info('Checkpoint saved.')
 
     def build_train_loader(self, experience: List[EpisodeData]) -> DataLoader:
         """Creates a train loader using the collected experiences.
@@ -271,20 +299,24 @@ class PPOTrainer(RLTrainer):
         Returns:
             torch.Tensor: The total loss tensor
         """
-        values = experience_batch.values.to(self.device)
+        # values = experience_batch.values.to(self.device)
         returns = experience_batch.returns.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
         # Value loss
-        vpred_clipped = torch.clamp(
-            pred_values,
-            values - self.config.value_clip_eps,
-            values + self.config.value_clip_eps,
-        )
-        vf_losses1 = torch.square(pred_values - returns)
-        vf_losses2 = torch.square(vpred_clipped - returns)
-        vf_losses = 0.5 * torch.max(vf_losses1, vf_losses2)
-        vf_loss = self.dist_masked_mean(vf_losses, loss_mask, dim=1).mean()
+        # vpred_clipped = torch.clamp(
+        #     pred_values,
+        #     values - self.config.value_clip_eps,
+        #     values + self.config.value_clip_eps,
+        # )
+        # vf_losses1 = torch.square(pred_values - returns)
+        # vf_losses2 = torch.square(vpred_clipped - returns)
+        # losses = 0.5 * torch.max(vf_losses1, vf_losses2)
+        # loss = self.dist_masked_mean(losses, loss_mask, dim=1).mean()
+
+        # Value loss
+        losses = 0.5 * torch.square(returns - pred_values)
+        loss = self.dist_masked_mean(losses, loss_mask, dim=1).mean()
 
         with torch.no_grad():
             pred_error = self.dist_masked_mean(
@@ -292,21 +324,19 @@ class PPOTrainer(RLTrainer):
                 loss_mask,
                 dim=1,
             ).mean()
-            clipfrac = self.dist_masked_mean(
-                torch.gt(vf_losses2, vf_losses1), loss_mask, dim=1
-            ).mean()
+            # clipfrac = self.dist_masked_mean(
+            #     torch.gt(vf_losses2, vf_losses1), loss_mask, dim=1
+            # ).mean()
             returns_var = self.masked_var(returns, loss_mask, dim=1).mean()
-            var_explained = 1 - pred_error / returns_var
+            var_explained = (1 - pred_error / (returns_var + 1e-8)).item()
 
-        self.logger.log_scalar('train/vf_loss', vf_loss.detach().item())
+        self.logger.log_scalar('train/vf_loss', loss.detach().item())
         self.logger.log_scalar('value/error', pred_error.detach().item())
-        self.logger.log_scalar('value/clipfrac', clipfrac.detach().item())
+        # self.logger.log_scalar('value/clipfrac', clipfrac.detach().item())
         self.logger.log_scalar('value/returns_var', returns_var.detach().item())
-        self.logger.log_scalar(
-            'value/var_explained', var_explained.detach().item()
-        )
+        self.logger.log_scalar('value/var_explained', var_explained)
 
-        return vf_loss
+        return loss
 
     def train_step(self, train_dataloader: DataLoader):
         """Performs the policy and value models update using collected rollout."""
@@ -486,14 +516,7 @@ class PPOTrainer(RLTrainer):
             input_ids=batch_states, attention_mask=batch_attention_mask
         ).values  # [batch_size, seq_len]
 
-        # This seems not working????
-        batch_values = self.masked_whiten(
-            batch_values, batch_attention_mask, shift_mean=False
-        ).to(self.torch_dtype)
-
         del batch_attention_mask
-
-        # batch_values = torch.zeros_like(batch_states, dtype=self.torch_dtype)
 
         # Move results back to CPU for per-episode processing and storage
         batch_states = batch_states.cpu()
@@ -537,9 +560,8 @@ class PPOTrainer(RLTrainer):
             seq_rewards = torch.zeros_like(actions, dtype=self.torch_dtype)
             seq_rewards[-1] = rewards[i]
 
-            # TODO: why not working if using value function???
             # Compute GAE advantages
-            returns, advantages = self.masked_returns_and_gae_advantages(
+            _, advantages = self.masked_returns_and_gae_advantages(
                 seq_rewards,
                 values,
                 loss_mask,
@@ -547,12 +569,12 @@ class PPOTrainer(RLTrainer):
                 self.config.gae_lambda,
             )
 
-            # Works well when not using value function
-            # returns = self.masked_monte_carlo_returns(
-            #     seq_rewards,
-            #     loss_mask,
-            #     self.config.gamma,
-            # )
+            # Don't mix advantage estimations for value function
+            returns = self.masked_monte_carlo_returns(
+                seq_rewards,
+                loss_mask,
+                self.config.gamma,
+            )
             # advantages = returns
 
             assert (

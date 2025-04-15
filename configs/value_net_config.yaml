@@ -2,13 +2,11 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_value_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_value_net_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
   log_level: 20
-  # metrics_aggregation_config:         # define custom metics aggregation methods
-  #   accuracy_reward: ['mean', 'std', 'min', 'max']
 
 dataset: 
   names:                                # List of math datasets to load
@@ -17,45 +15,35 @@ dataset:
   # max_train_samples: 4096             # for a quick run
   # max_test_samples: 1024        
 
-
 value_model:
   pretrained_model: "Qwen/Qwen2.5-0.5B"
   load_in_4bit: false
-  gradient_checkpointing: true
-  flash_attention: true
+  # gradient_checkpointing: true
+  # flash_attention: true
   model_max_length: 4000
 
 value_net_config:
-  train_rollout_size: 512
-  num_epochs: 1
-  train_micro_batch_size: 8
-  train_batch_size: 128
+  train_rollout_size: 4096
+  num_epochs: 2
+  train_micro_batch_size: 4
+  train_batch_size: 64
   gamma: 1.0                            # discount
 
   # for sample generation
   max_prompt_tokens: 512                # skip sample question that's too long
-  group_size: 8                         # for each sample we generate a group of answers
+  group_size: 4                         # for each sample we generate a group of answers
   max_completion_tokens: 1000
   temperature: 0.9                      
   repetition_penalty: 1.0
   top_p: 0.95
   top_k: -1                             # -1 to disable
 
-  # # evaluation
-  # eval_rollout_size: 1024    
-  # eval_batch_size: 64
-  # eval_interval: 0                     # every N global steps
-
-  # others
-  checkpoint_interval: 100              # every N global steps
-
-
 deepspeed:
   # memory_breakdown: true              # for debugging
   steps_per_print: 1000000              # disable default logging
   # train_micro_batch_size_per_gpu: 1      
   # train_batch_size: 1                    
-  gradient_clipping: 0.0
+  gradient_clipping: 1.0
   bf16:
     enabled: true
   optimizer:
@@ -66,13 +54,13 @@ deepspeed:
       eps: 1.0e-8
       weight_decay: 0.0
       adam_w_mode: true
-  # scheduler:
-  #   type: "WarmupDecayLR"
-  #   params:
-  #     warmup_num_steps: 200
-  #     total_num_steps: 10000
-  #     warmup_min_lr: 1.0e-8
-  #     warmup_max_lr: 9.0e-7
+  scheduler:
+    type: "WarmupDecayLR"
+    params:
+      warmup_num_steps: 10
+      total_num_steps: 1000
+      warmup_min_lr: 1.0e-8
+      warmup_max_lr: 1.0e-6
   zero_optimization:
     stage: 3
     contiguous_gradients: true
