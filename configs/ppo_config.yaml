@@ -27,16 +27,17 @@ policy_model:
 
 value_model:
   pretrained_model: "Qwen/Qwen2.5-0.5B"
-  checkpoint_path: "./runs/test_value_net_qwen2.5_0.5b_gsm8k/checkpoints/epoch_last"    
+  checkpoint_path: "./runs/test_value_net_qwen2.5_0.5b_gsm8k/checkpoints/epoch_1"    
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: false
   model_max_length: 4000
 
 ppo:
-  max_steps: 50
-  train_rollout_size: 256
-  num_updates: 1
+  max_steps: 100
+  train_rollout_size: 512
+  policy_num_updates: 1
+  value_num_updates: 4
   train_micro_batch_size: 4
   train_batch_size: 64
   gamma: 1.0                            # discount
@@ -44,9 +45,9 @@ ppo:
   clip_eps: 0.2                         # policy clip parameter
   value_clip_eps: 0.2                   # value clip parameter
   normalize_rewards: true               
-  normalize_advantages: false
-  kl_loss_coef: 0.0
-  entropy_loss_coef: 0.0
+  normalize_advantages: true
+  kl_loss_coef: 0.001
+  entropy_loss_coef: 0.0001
   sync_reference_interval: 0            # every N global steps
 
   # for sample generation
@@ -66,38 +67,62 @@ ppo:
   # others
   checkpoint_interval: 100              # every N global steps
 
-  # # exploration generation
-  # group_temperature: true             # group temperature where we balance exploration and exploitation
-  # min_temperature: 0.6
-  # max_temperature: 1.0
 
-  # # control rate of explore
-  # explore_init_epsilon: 0.8           # exploration epsilon decay
-  # explore_min_epsilon: 0.0
-  # explore_decay_steps: 50
-
-  # # exploring start
-  # explore_steps: 10                    # initial start steps to do random sampling
-  # explore_top_k: 100                   # Top K tokens to random sample during initial start steps
-  # explore_decay_rate: 0.9
-  
-  # # continue generation with failed outcomes
-  # continue_prob: 0.5
-  # continue_max_retry: 1               # max number of retry by adding the special token and continue generation
-
-
-deepspeed:
+policy_deepspeed:
   # memory_breakdown: true              # for debugging
   steps_per_print: 1000000              # disable default logging
   # train_micro_batch_size_per_gpu: 1      
   # train_batch_size: 1                    
-  gradient_clipping: 0.0
+  gradient_clipping: 1.0
   bf16:
     enabled: true
   optimizer:
     type: Adam
     params:
       lr: 5.0e-7                   
+      betas: [0.9, 0.999]
+      eps: 1.0e-8
+      weight_decay: 0.0
+      adam_w_mode: true
+  # scheduler:
+  #   type: "WarmupDecayLR"
+  #   params:
+  #     warmup_num_steps: 200
+  #     total_num_steps: 10000
+  #     warmup_min_lr: 1.0e-8
+  #     warmup_max_lr: 9.0e-7
+  zero_optimization:
+    stage: 3
+    contiguous_gradients: true
+    overlap_comm: true
+    allgather_partitions: true
+    reduce_scatter: true
+    # offload_param:
+    #   device: cpu
+    #   pin_memory: false
+    # offload_optimizer:
+    #   device: cpu
+    #   pin_memory: false
+  activation_checkpointing:
+    partition_activations: true
+    cpu_checkpointing: true
+    contiguous_memory_optimization: true
+    number_checkpoints: null
+    synchronize_checkpoint_boundary: false
+
+
+value_deepspeed:
+  # memory_breakdown: true              # for debugging
+  steps_per_print: 1000000              # disable default logging
+  # train_micro_batch_size_per_gpu: 1      
+  # train_batch_size: 1                    
+  gradient_clipping: 5.0
+  bf16:
+    enabled: true
+  optimizer:
+    type: Adam
+    params:
+      lr: 5.0e-6                   
       betas: [0.9, 0.999]
       eps: 1.0e-8
       weight_decay: 0.0

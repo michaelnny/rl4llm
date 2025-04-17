@@ -6,7 +6,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from rl4llm.constants import LOGGER_NAME
 from rl4llm.core.base_env import (
     BaseEnv,
     BaseRewardFunction,
@@ -15,7 +14,7 @@ from rl4llm.core.base_env import (
 )
 from rl4llm.core.base_inference_client import InferenceClient
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
 class InferenceEnv(BaseEnv):

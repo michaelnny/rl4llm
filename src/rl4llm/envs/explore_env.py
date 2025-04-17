@@ -8,7 +8,6 @@ import numpy as np
 import torch
 from transformers import LogitsProcessorList, PreTrainedModel
 
-from rl4llm.constants import LOGGER_NAME
 from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.envs.llm_env import LocalLLMEnv
@@ -16,7 +15,7 @@ from rl4llm.envs.sgl_env import EnvState, InferenceEnv
 from rl4llm.generation.hf_explore_processor import HfExploreLogitsProcessor
 from rl4llm.generation.sgl_explore_procesor import SglExploreLogitProcessor
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
 # --- Using SGLang inference client ---

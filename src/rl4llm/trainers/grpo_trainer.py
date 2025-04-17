@@ -11,18 +11,29 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_inference_client import InferenceClient
-from rl4llm.core.base_trainer import RewardTransform, RLConfig, RLTrainer
-from rl4llm.core.distributed import DistributedOps
+from rl4llm.core.base_trainer import (
+    BaseRLConfig,
+    BaseRLTrainer,
+    RewardTransform,
+)
 from rl4llm.envs import EpisodeData, LocalLLMEnv
-from rl4llm.logging import LoggingManager
 
 
-class GRPOConfig(RLConfig):
+class GRPOConfig(BaseRLConfig):
     """GRPO config instance for RL LLM"""
 
     group_reward_zero_mean: bool = Field(
         False,
         description='Normalized group reward to have a zero mean without standard deviation scaling',
+    )
+    clip_eps: float = Field(
+        0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon'
+    )
+    num_updates: int = Field(
+        1,
+        ge=1,
+        le=5,
+        description='PPO policy update epochs for a collection of samples',
     )
 
 
@@ -80,7 +91,7 @@ class TransitionData(BaseModel):
         arbitrary_types_allowed = True
 
 
-class GRPOTrainer(RLTrainer):
+class GRPOTrainer(BaseRLTrainer):
     """GRPO trainer for LLM"""
 
     def __init__(
@@ -223,10 +234,9 @@ class GRPOTrainer(RLTrainer):
         pg_loss = self.dist_masked_mean(pg_losses, loss_mask, dim=1).mean()
 
         # Compute entropy for the policy
-        # Convert log probabilities to probabilities first
-        dist = torch.distributions.Categorical(logits=pi_logits)
-        entropies = dist.entropy()
-        entropies = entropies * loss_mask
+        entropies = self.compute_entropy_from_logits(
+            logits=pi_logits, loss_mask=loss_mask
+        )
         entropy = entropies.mean()
         entropy_loss = -(self.config.entropy_loss_coef * entropy)
 
@@ -554,19 +564,19 @@ class GRPOTrainer(RLTrainer):
 
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""
-        pad_token_id = self.tokenizer.pad_token_id
+        eos_token_id = self.tokenizer.eos_token_id
         torch_dtype = self.torch_dtype
 
         # Pad states and actions (long tensors)
         batch_states = pad_sequence(
             [item.states for item in batch],
             batch_first=True,
-            padding_value=pad_token_id,
+            padding_value=eos_token_id,
         ).long()
         batch_actions = pad_sequence(
             [item.actions for item in batch],
             batch_first=True,
-            padding_value=pad_token_id,
+            padding_value=eos_token_id,
         ).long()
 
         # Pad loss_mask (boolean tensor)

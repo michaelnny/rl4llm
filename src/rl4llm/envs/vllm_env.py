@@ -16,7 +16,6 @@ import torch
 import vllm
 from transformers import PreTrainedTokenizer
 
-from rl4llm.constants import LOGGER_NAME
 from rl4llm.core.base_env import (
     BaseEnv,
     BaseRewardFunction,
@@ -24,7 +23,7 @@ from rl4llm.core.base_env import (
     EpisodeData,
 )
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
 class VLLMEnv(BaseEnv):

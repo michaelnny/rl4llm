@@ -8,9 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
 import torch
 import torch.distributed as dist
 
-from rl4llm.constants import LOGGER_NAME
-
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 # Generic Type Variable for object methods
 T = TypeVar('T')

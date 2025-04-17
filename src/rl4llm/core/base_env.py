@@ -18,10 +18,9 @@ from transformers import (
 )
 from transformers.tokenization_utils_base import PaddingStrategy
 
-from rl4llm.constants import LOGGER_NAME
 from rl4llm.utils.dataset_utils import shard_dataset
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
 class EpisodeData(BaseModel):

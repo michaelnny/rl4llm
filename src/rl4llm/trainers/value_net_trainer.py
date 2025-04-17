@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_inference_client import InferenceClient
-from rl4llm.core.base_trainer import RewardTransform, RLTrainer
+from rl4llm.core.base_trainer import BaseRLTrainer, RewardTransform
 from rl4llm.envs import EpisodeData, LocalLLMEnv
 
 
@@ -116,7 +116,7 @@ class TransitionData(BaseModel):
         arbitrary_types_allowed = True
 
 
-class ValueNetTrainer(RLTrainer):
+class ValueNetTrainer(BaseRLTrainer):
     """Value model trainer for LLM"""
 
     def __init__(
@@ -265,6 +265,9 @@ class ValueNetTrainer(RLTrainer):
         returns = experience_batch.returns.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
+        # pred_values = pred_values.float()
+        # returns = returns.float()
+
         # Value loss
         losses = 0.5 * torch.square(returns - pred_values)
         loss = self.dist_masked_mean(losses, loss_mask, dim=1).mean()
@@ -300,6 +303,7 @@ class ValueNetTrainer(RLTrainer):
                     input_ids=input_ids, attention_mask=attention_mask
                 ).values
 
+                # with torch.autograd.detect_anomaly():
                 loss = self.compute_loss(pred_values, micro_batch)
 
                 del (micro_batch, input_ids, attention_mask, pred_values)
@@ -315,7 +319,7 @@ class ValueNetTrainer(RLTrainer):
                         'train/value_update', self.value_update_count
                     )
                     self.logger.log_scalar(
-                        'train/value_learning_rate',
+                        'train/learning_rate',
                         self.value_engine.get_lr()[0],
                     )
 
@@ -357,7 +361,7 @@ class ValueNetTrainer(RLTrainer):
         )
         collected_episodes: List[List[EpisodeData]] = []
         local_count = 0
-
+        step_count = 0
         with self.unwrapped_model_for_generation() as policy_model:
             while local_count < local_rollout_size:
                 outputs = self.train_env.rollout(
@@ -369,6 +373,16 @@ class ValueNetTrainer(RLTrainer):
                     self.log_batch_episodes(
                         self._train_phase, outputs, self.global_step
                     )
+                    step_count += 1
+                    # Log progress every 50 valid steps or at completion
+                    if (
+                        step_count % 50 == 0
+                        or local_count >= local_rollout_size
+                    ):
+                        progress = (local_count / local_rollout_size) * 100
+                        self.logger.info(
+                            f"Progress: {progress:.2f}% ({local_count}/{local_rollout_size} episodes collected)"
+                        )
 
         return collected_episodes
 
@@ -466,21 +480,21 @@ class ValueNetTrainer(RLTrainer):
 
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""
-        pad_token_id = self.tokenizer.pad_token_id
+        eos_token_id = self.tokenizer.eos_token_id
         torch_dtype = self.torch_dtype
 
         # Pad states and actions (long tensors)
         batch_states = pad_sequence(
             [item.states for item in batch],
             batch_first=True,
-            padding_value=pad_token_id,
+            padding_value=eos_token_id,
         ).long()
 
         # Pad loss_mask (boolean tensor)
         batch_loss_mask = pad_sequence(
             [item.loss_mask for item in batch],
             batch_first=True,
-            padding_value=False,
+            padding_value=0,
         ).bool()
 
         batch_returns = (

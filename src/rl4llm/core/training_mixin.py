@@ -32,10 +32,10 @@ class TrainingMixin:
     @staticmethod
     def _validate_mask(values: torch.Tensor, mask: torch.Tensor):
         """Validate mask is boolean and broadcastable to values' shape."""
-        assert torch.is_tensor(mask) and mask.dtype == torch.bool, (
-            "Mask must be a boolean tensor"
-        )
-        assert torch.is_tensor(values), "Values must be a tensor"
+        assert (
+            torch.is_tensor(mask) and mask.dtype == torch.bool
+        ), 'Mask must be a boolean tensor'
+        assert torch.is_tensor(values), 'Values must be a tensor'
         try:
             # Check if mask shape can be broadcast to values shape
             torch.broadcast_shapes(mask.shape, values.shape)
@@ -82,7 +82,9 @@ class TrainingMixin:
         count = broadcast_mask.sum(dim=dim, keepdim=keepdim).float()
         safe_count = count + epsilon
 
-        masked_values = torch.where(broadcast_mask, values, torch.zeros_like(values))
+        masked_values = torch.where(
+            broadcast_mask, values, torch.zeros_like(values)
+        )
 
         masked_sum = masked_values.sum(dim=dim, keepdim=keepdim)
         mean = masked_sum / safe_count
@@ -156,7 +158,9 @@ class TrainingMixin:
             raise ValueError(
                 f"Mask shape {mask.shape} cannot be broadcast to values shape {values.shape}"
             ) from e
-        masked_values = torch.where(broadcast_mask, values, torch.zeros_like(values))
+        masked_values = torch.where(
+            broadcast_mask, values, torch.zeros_like(values)
+        )
         return masked_values.sum(dim=dim, keepdim=keepdim)
 
     @staticmethod
@@ -265,7 +269,9 @@ class TrainingMixin:
         calculate_sum: bool = True,  # Control calculation/reduction
         calculate_count: bool = True,  # Control calculation/reduction
         calculate_sum_sq: bool = False,  # Control calculation/reduction
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[
+        Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]
+    ]:
         """
         Helper: Calculates local masked stats (sum, count, sum_sq based on flags),
         then aggregates globally ONLY the requested stats.
@@ -346,7 +352,9 @@ class TrainingMixin:
             The globally summed tensor. Available on all ranks.
         """
         # OPTIMIZED: Calculate local sum directly and reduce only that.
-        local_sum = TrainingMixin.masked_sum(values, mask, dim=dim, keepdim=keepdim)
+        local_sum = TrainingMixin.masked_sum(
+            values, mask, dim=dim, keepdim=keepdim
+        )
 
         if self.dist_ops.world_size == 1:
             return local_sum
@@ -417,14 +425,16 @@ class TrainingMixin:
             The globally computed variance tensor. Available on all ranks.
         """
         # Need all three global stats
-        global_sum, global_count, global_sum_sq = self._dist_aggregate_masked_stats(
-            values,
-            mask,
-            dim,
-            keepdim,
-            calculate_sum=True,
-            calculate_count=True,
-            calculate_sum_sq=True,
+        global_sum, global_count, global_sum_sq = (
+            self._dist_aggregate_masked_stats(
+                values,
+                mask,
+                dim,
+                keepdim,
+                calculate_sum=True,
+                calculate_count=True,
+                calculate_sum_sq=True,
+            )
         )
         assert (
             global_sum is not None
@@ -464,17 +474,21 @@ class TrainingMixin:
             Local tensor with masked elements whitened using global stats, same shape as input.
         """
         float_values = TrainingMixin._ensure_float(values)
-        TrainingMixin._validate_mask(float_values, mask)  # Ensures broadcastable
+        TrainingMixin._validate_mask(
+            float_values, mask
+        )  # Ensures broadcastable
 
         # Get global stats, keeping dim for local broadcasting
-        global_sum, global_count, global_sum_sq = self._dist_aggregate_masked_stats(
-            float_values,
-            mask,
-            dim,
-            keepdim=True,  # MUST keepdim for broadcast
-            calculate_sum=True,
-            calculate_count=True,
-            calculate_sum_sq=True,
+        global_sum, global_count, global_sum_sq = (
+            self._dist_aggregate_masked_stats(
+                float_values,
+                mask,
+                dim,
+                keepdim=True,  # MUST keepdim for broadcast
+                calculate_sum=True,
+                calculate_count=True,
+                calculate_sum_sq=True,
+            )
         )
         assert (
             global_sum is not None
@@ -552,35 +566,35 @@ class TrainingMixin:
     def compute_logprobs_from_logits(
         logits: torch.Tensor,
         actions: torch.LongTensor,
-        loss_masks: Optional[torch.Tensor] = None,
+        loss_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute log probabilities of actions.
 
         Args:
             logits (torch.Tensor): Raw logits for sequence token ids, shape [batch_size, seq_len, vocab_size]
             actions (torch.LongTensor): Action token ids, shape [batch_size, seq_len]
-            loss_masks (Optional[torch.Tensor]): Loss mask corresponding to the sequence, shape [batch_size, seq_len]
+            loss_mask (Optional[torch.Tensor]): Loss mask corresponding to the sequence, shape [batch_size, seq_len]
 
         Returns:
             torch.Tensor: Log probabilities of actions, shape [batch_size, seq_len]
         """
 
-        assert logits.dim() == 3, (
-            "Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]"
-        )
-        assert actions.dim() == 2, (
-            "Actions tensor must have 2 dimensions: [batch_size, seq_len]"
-        )
-        assert logits.shape[:2] == actions.shape, (
-            "Logits tensor shape must match actions shape for batch_size and seq_len"
-        )
-        if loss_masks is not None:
-            assert loss_masks.dim() == 2, (
-                "Loss masks tensor must have 2 dimensions: [batch_size, seq_len]"
-            )
-            assert loss_masks.shape == actions.shape, (
-                "Loss masks shape must match logits shape for batch_size and seq_len"
-            )
+        assert (
+            logits.dim() == 3
+        ), 'Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]'
+        assert (
+            actions.dim() == 2
+        ), 'Actions tensor must have 2 dimensions: [batch_size, seq_len]'
+        assert (
+            logits.shape[:2] == actions.shape
+        ), 'Logits tensor shape must match actions shape for batch_size and seq_len'
+        if loss_mask is not None:
+            assert (
+                loss_mask.dim() == 2
+            ), 'Loss masks tensor must have 2 dimensions: [batch_size, seq_len]'
+            assert (
+                loss_mask.shape == actions.shape
+            ), 'Loss masks shape must match logits shape for batch_size and seq_len'
 
         # Process log_softmax and gather operations one sample at a time to avoid CUDA OOM
         batch_size = logits.shape[0]
@@ -597,37 +611,37 @@ class TrainingMixin:
             sample_logprobs.append(sample_logprob)
 
         # Concatenate results
-        logrobs = torch.stack(sample_logprobs, dim=0)
-        if loss_masks is not None:
-            logrobs = logrobs * loss_masks.float()
+        logprobs = torch.stack(sample_logprobs, dim=0)
+        if loss_mask is not None:
+            logprobs = logprobs * loss_mask.float()
 
-        return logrobs
+        return logprobs
 
     @staticmethod
     def compute_entropy_from_logits(
-        logits: torch.Tensor, loss_masks: Optional[torch.Tensor] = None
+        logits: torch.Tensor, loss_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Compute entropy.
 
         Args:
             logits (torch.Tensor): Raw logits for sequence token ids, shape [batch_size, seq_len, vocab_size]
-            loss_masks (Optional[torch.Tensor]): Loss mask corresponding to the sequence, shape [batch_size, seq_len]
+            loss_mask (Optional[torch.Tensor]): Loss mask corresponding to the sequence, shape [batch_size, seq_len]
 
         Returns:
             torch.Tensor: Entropy, shape [batch_size, seq_len]
         """
 
         # Check input dimensions
-        assert logits.dim() == 3, (
-            "Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]"
-        )
-        if loss_masks is not None:
-            assert loss_masks.dim() == 2, (
-                "Loss masks tensor must have 2 dimensions: [batch_size, seq_len]"
-            )
-            assert loss_masks.shape == logits.shape[:2], (
-                "Loss masks shape must match logits shape for batch_size and seq_len"
-            )
+        assert (
+            logits.dim() == 3
+        ), 'Logits tensor must have 3 dimensions: [batch_size, seq_len, vocab_size]'
+        if loss_mask is not None:
+            assert (
+                loss_mask.dim() == 2
+            ), 'Loss masks tensor must have 2 dimensions: [batch_size, seq_len]'
+            assert (
+                loss_mask.shape == logits.shape[:2]
+            ), 'Loss masks shape must match logits shape for batch_size and seq_len'
 
         # Compute log probabilities in a numerically stable way
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
@@ -638,8 +652,8 @@ class TrainingMixin:
         entropy = -(probs * log_probs).sum(dim=-1)
 
         # Apply loss mask if provided
-        if loss_masks is not None:
-            entropy = entropy * loss_masks.float()
+        if loss_mask is not None:
+            entropy = entropy * loss_mask.float()
 
         return entropy
 
@@ -660,9 +674,11 @@ class TrainingMixin:
                 for assistant turns and zeros for user turns
         """
         # Input validation
-        assert rewards.dim() == mask.dim() == 1, "Inputs must be 1-dimensional"
-        assert rewards.size(0) == mask.size(0), "Rewards and mask must have same length"
-        assert gamma > 0.0 and gamma <= 1.0, "Discount factor must be in (0, 1]"
+        assert rewards.dim() == mask.dim() == 1, 'Inputs must be 1-dimensional'
+        assert rewards.size(0) == mask.size(
+            0
+        ), 'Rewards and mask must have same length'
+        assert gamma > 0.0 and gamma <= 1.0, 'Discount factor must be in (0, 1]'
 
         # Initialize returns tensor
         returns = torch.zeros_like(mask, dtype=rewards.dtype)
@@ -702,14 +718,14 @@ class TrainingMixin:
             Tuple[torch.Tensor, torch.Tensor]: Tensors containing the returns and advantage estimates.
         """
 
-        assert rewards.shape == values.shape == mask.shape, (
-            "Tensors have mismatched shapes"
-        )
-        assert rewards.dtype == values.dtype, "Tensors have mismatched dtypes"
-        assert rewards.dim() == 1, "Tensors must be 1D"
-        assert mask.dtype == torch.bool, "Mask must be a bool tensor"
-        assert 0 < gamma <= 1.0, "Invalid gamma, must be (0, 10]"
-        assert 0 < gae_lambda <= 1.0, "Invalid gae_lambda, must be (0, 10]"
+        assert (
+            rewards.shape == values.shape == mask.shape
+        ), 'Tensors have mismatched shapes'
+        assert rewards.dtype == values.dtype, 'Tensors have mismatched dtypes'
+        assert rewards.dim() == 1, 'Tensors must be 1D'
+        assert mask.dtype == torch.bool, 'Mask must be a bool tensor'
+        assert 0 < gamma <= 1.0, 'Invalid gamma, must be (0, 10]'
+        assert 0 < gae_lambda <= 1.0, 'Invalid gae_lambda, must be (0, 10]'
 
         device = rewards.device
         torch_dtype = rewards.dtype
@@ -720,9 +736,9 @@ class TrainingMixin:
 
         # Handle empty completion sequence case
         if r_t.numel() == 0:
-            return torch.zeros_like(rewards, dtype=torch_dtype), torch.zeros_like(
+            return torch.zeros_like(
                 rewards, dtype=torch_dtype
-            )
+            ), torch.zeros_like(rewards, dtype=torch_dtype)
 
         # Pad value at terminal step T to have zero
         v_tp1 = torch.zeros_like(v_t, dtype=torch_dtype, device=device)

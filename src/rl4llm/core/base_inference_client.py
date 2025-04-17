@@ -9,8 +9,6 @@ from typing import Any, Dict, List, Optional, Union
 
 import requests
 
-from rl4llm.constants import LOGGER_NAME
-
 
 class InferenceClientError(Exception):
     """Custom exception for Inference client errors."""
@@ -59,7 +57,7 @@ class InferenceClient(ABC):
         self._release_called = False
         self._resume_called = False
 
-        self.logger = logging.getLogger(LOGGER_NAME)
+        self.logger = logging.getLogger(__name__)
 
         self.session = requests.Session()
         if self.api_key:

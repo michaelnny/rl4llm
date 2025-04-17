@@ -13,10 +13,9 @@ from transformers import (
     PreTrainedTokenizer,
 )
 
-from rl4llm.constants import LOGGER_NAME
 from rl4llm.models import AutoModelWithValueHead
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
 def build_value_model_and_tokenizer(
@@ -49,7 +48,12 @@ def build_value_model_and_tokenizer(
         ),
         'local_files_only': True if checkpoint_path else False,
         'torch_dtype': torch_dtype,
-        # "attn_implementation": ("flash_attention_2" if flash_attention else "eager"),
+        'use_cache': False,
+        # 'attn_implementation': (
+        #     'flash_attention_2' if flash_attention else 'eager'
+        # ),
+        # 'pad_token_id': tokenizer.pad_token_id,
+        # 'eos_token_id': tokenizer.eos_token_id,
     }
 
     if load_in_4bit:

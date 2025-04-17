@@ -9,14 +9,14 @@ from torch import nn
 
 from rl4llm.core.training_mixin import TrainingMixin
 
-DIST_OPS_PATH = "rl4llm.core.distributed.DistributedOps"
+DIST_OPS_PATH = 'rl4llm.core.distributed.DistributedOps'
 
 
 # --- Fixtures  ---
 @pytest.fixture
 def mock_dist_ops():
     """Provides a MagicMock object simulating DistributedOps."""
-    mock = MagicMock(name="MockDistributedOps")
+    mock = MagicMock(name='MockDistributedOps')
     type(mock).world_size = PropertyMock(return_value=1)
 
     def mock_all_reduce(tensor, op=dist.ReduceOp.SUM):
@@ -56,7 +56,7 @@ def test_clean_up():
 
 
 @pytest.mark.parametrize(
-    "dim, expected", [(None, torch.tensor(9.0)), (1, torch.tensor([4.0, 5.0]))]
+    'dim, expected', [(None, torch.tensor(9.0)), (1, torch.tensor([4.0, 5.0]))]
 )
 def test_masked_sum(sample_tensor_data, dim, expected):
     """Test masked sum computation for global and dimension-wise cases."""
@@ -66,7 +66,7 @@ def test_masked_sum(sample_tensor_data, dim, expected):
 
 
 @pytest.mark.parametrize(
-    "dim, expected",
+    'dim, expected',
     [(None, torch.tensor(3.0)), (1, torch.tensor([[2.0], [5.0]]))],
 )
 def test_masked_mean(sample_tensor_data, dim, expected):
@@ -76,7 +76,7 @@ def test_masked_mean(sample_tensor_data, dim, expected):
     assert torch.allclose(result, expected, atol=1e-8)
 
 
-@pytest.mark.parametrize("shift_mean", [True, False])
+@pytest.mark.parametrize('shift_mean', [True, False])
 def test_whiten(sample_tensor_data, shift_mean):
     """Test whitening normalizes data appropriately based on shift_mean."""
     values, _ = sample_tensor_data
@@ -104,7 +104,9 @@ def test_masked_whiten(sample_tensor_data):
                     (3 - 2) / torch.sqrt(torch.tensor(1.0 + epsilon)),
                 ]
             ),
-            torch.tensor([4.0, (5 - 5) / torch.sqrt(torch.tensor(epsilon)), 6.0]),
+            torch.tensor(
+                [4.0, (5 - 5) / torch.sqrt(torch.tensor(epsilon)), 6.0]
+            ),
         ]
     )
     assert torch.allclose(whitened, expected, atol=1e-5)
@@ -120,13 +122,13 @@ def logits_and_actions():
         ]
     )
     actions = torch.tensor([[0, 1, 2], [3, 2, 1]])
-    loss_masks = torch.tensor([[1, 0, 1], [0, 1, 0]], dtype=torch.bool)
-    return logits, actions, loss_masks
+    loss_mask = torch.tensor([[1, 0, 1], [0, 1, 0]], dtype=torch.bool)
+    return logits, actions, loss_mask
 
 
 def test_compute_logprobs_from_logits(logits_and_actions):
     """Test log probabilities computation from logits with and without masks."""
-    logits, actions, loss_masks = logits_and_actions
+    logits, actions, loss_mask = logits_and_actions
     expected_logprobs = torch.stack(
         [
             torch.gather(
@@ -142,16 +144,16 @@ def test_compute_logprobs_from_logits(logits_and_actions):
     assert torch.allclose(result, expected_logprobs, atol=1e-5)
 
     result_masked = TrainingMixin.compute_logprobs_from_logits(
-        logits, actions, loss_masks=loss_masks
+        logits, actions, loss_mask=loss_mask
     )
     assert torch.allclose(
-        result_masked, expected_logprobs * loss_masks.float(), atol=1e-5
+        result_masked, expected_logprobs * loss_mask.float(), atol=1e-5
     )
 
 
 def test_compute_entropy_from_logits(logits_and_actions):
     """Test entropy computation from logits with and without masks."""
-    logits, _, loss_masks = logits_and_actions
+    logits, _, loss_mask = logits_and_actions
     log_probs = F.log_softmax(logits, dim=-1)
     probs = torch.exp(log_probs)
     expected_entropy = -(probs * log_probs).sum(dim=-1)
@@ -160,15 +162,15 @@ def test_compute_entropy_from_logits(logits_and_actions):
     assert torch.allclose(result, expected_entropy, atol=1e-5)
 
     result_masked = TrainingMixin.compute_entropy_from_logits(
-        logits, loss_masks=loss_masks
+        logits, loss_mask=loss_mask
     )
     assert torch.allclose(
-        result_masked, expected_entropy * loss_masks.float(), atol=1e-5
+        result_masked, expected_entropy * loss_mask.float(), atol=1e-5
     )
 
 
 @pytest.mark.parametrize(
-    "rewards, mask, gamma, expected",
+    'rewards, mask, gamma, expected',
     [
         (
             torch.tensor([1.0, 2.0, 3.0, 4.0]),
@@ -197,7 +199,7 @@ def test_masked_monte_carlo_returns(rewards, mask, gamma, expected):
 
 
 @pytest.mark.parametrize(
-    "rewards, mask, gamma",
+    'rewards, mask, gamma',
     [
         (torch.tensor([[1.0, 2.0]]), torch.tensor([[True, False]]), 1.0),
         (torch.tensor([1.0, 2.0]), torch.tensor([True, True]), 0.0),
@@ -219,7 +221,9 @@ def test_masked_returns_and_gae_advantages_calculation():
     rewards = torch.tensor(
         [0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 1.5], dtype=torch.float32
     )
-    values = torch.tensor([0.1, 0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 1.0], dtype=torch.float32)
+    values = torch.tensor(
+        [0.1, 0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 1.0], dtype=torch.float32
+    )
     mask = torch.tensor([False, False, False, True, True, True, True, True])
     # Expected results based on manual calculation (see previous explanation)
     expected_advantages = torch.tensor(
@@ -245,7 +249,9 @@ def test_masked_returns_and_gae_advantages_calculation():
     assert advantages.dtype == rewards.dtype
     assert returns.device == rewards.device
     assert advantages.device == rewards.device
-    torch.testing.assert_close(advantages, expected_advantages, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        advantages, expected_advantages, rtol=1e-5, atol=1e-5
+    )
     torch.testing.assert_close(returns, expected_returns, rtol=1e-5, atol=1e-5)
 
 
@@ -275,8 +281,12 @@ def test_masked_returns_and_gae_advantages_all_completion():
     values = torch.tensor([0.3, 0.4, 0.6], dtype=torch.float32)
     mask = torch.tensor([True, True, True])
     # Expected results based on manual calculation (see previous explanation)
-    expected_advantages = torch.tensor([0.190003, 0.09995, -0.1], dtype=torch.float32)
-    expected_returns = torch.tensor([0.490003, 0.49995, 0.5], dtype=torch.float32)
+    expected_advantages = torch.tensor(
+        [0.190003, 0.09995, -0.1], dtype=torch.float32
+    )
+    expected_returns = torch.tensor(
+        [0.490003, 0.49995, 0.5], dtype=torch.float32
+    )
 
     gamma, gae_lambda = 0.99, 0.95
 
@@ -284,7 +294,9 @@ def test_masked_returns_and_gae_advantages_all_completion():
         rewards, values, mask, gamma, gae_lambda
     )
 
-    torch.testing.assert_close(advantages, expected_advantages, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        advantages, expected_advantages, rtol=1e-5, atol=1e-5
+    )
     torch.testing.assert_close(returns, expected_returns, rtol=1e-5, atol=1e-5)
     assert returns.shape == rewards.shape
     assert advantages.shape == rewards.shape
@@ -296,7 +308,9 @@ def test_masked_returns_and_gae_advantages_gamma_one():
     rewards = torch.tensor(
         [0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 1.5], dtype=torch.float32
     )
-    values = torch.tensor([0.1, 0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 1.0], dtype=torch.float32)
+    values = torch.tensor(
+        [0.1, 0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 1.0], dtype=torch.float32
+    )
     mask = torch.tensor([False, False, False, True, True, True, True, True])
 
     # Set discount factors for this test
@@ -308,10 +322,12 @@ def test_masked_returns_and_gae_advantages_gamma_one():
     # adv_t = [1.4959656, 1.4694375, 1.33625, 0.775, 0.5]
     # return_t = adv_t + v_t[mask] = [1.7959656, 1.8694375, 1.93625, 1.475, 1.5]
     expected_advantages = torch.tensor(
-        [0.0, 0.0, 0.0, 1.4959656, 1.4694375, 1.33625, 0.775, 0.5], dtype=torch.float32
+        [0.0, 0.0, 0.0, 1.4959656, 1.4694375, 1.33625, 0.775, 0.5],
+        dtype=torch.float32,
     )
     expected_returns = torch.tensor(
-        [0.0, 0.0, 0.0, 1.7959656, 1.8694375, 1.93625, 1.475, 1.5], dtype=torch.float32
+        [0.0, 0.0, 0.0, 1.7959656, 1.8694375, 1.93625, 1.475, 1.5],
+        dtype=torch.float32,
     )
 
     # Call the function under test
@@ -324,7 +340,9 @@ def test_masked_returns_and_gae_advantages_gamma_one():
     assert advantages.shape == rewards.shape
     assert returns.dtype == rewards.dtype
     assert advantages.dtype == rewards.dtype
-    torch.testing.assert_close(advantages, expected_advantages, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        advantages, expected_advantages, rtol=1e-5, atol=1e-5
+    )
     torch.testing.assert_close(returns, expected_returns, rtol=1e-5, atol=1e-5)
 
 
@@ -352,7 +370,7 @@ def train_mixin_instance(mock_dist_ops):
         mixin = TrainingMixin(dist_ops=mock_dist_ops)
 
     # Fallback: Directly assign the mock if the above fails or isn't the desired setup
-    if not hasattr(mixin, "dist_ops") or mixin.dist_ops is not mock_dist_ops:
+    if not hasattr(mixin, 'dist_ops') or mixin.dist_ops is not mock_dist_ops:
         mixin.dist_ops = mock_dist_ops
 
     return mixin
@@ -396,9 +414,9 @@ def assert_mock_tensor_call(mock_method, expected_tensor, **kwargs):
 def assert_mock_tensor_calls(mock_method, expected_calls):
     """Asserts a mock was called with a list of specific tensors/kwargs."""
     actual_calls = mock_method.call_args_list
-    assert len(actual_calls) == len(expected_calls), (
-        f"Expected {len(expected_calls)} calls, but got {len(actual_calls)}"
-    )
+    assert len(actual_calls) == len(
+        expected_calls
+    ), f"Expected {len(expected_calls)} calls, but got {len(actual_calls)}"
 
     matched_actual_indices = set()
 
@@ -449,7 +467,7 @@ def assert_mock_tensor_calls(mock_method, expected_calls):
 
 
 # Test dist_masked_sum
-@pytest.mark.parametrize("dim", [None, 0, 1])
+@pytest.mark.parametrize('dim', [None, 0, 1])
 def test_dist_masked_sum_multi_process(
     train_mixin_instance, sample_data, mock_dist_ops, dim
 ):
@@ -472,7 +490,7 @@ def test_dist_masked_sum_multi_process(
 
 
 # Test dist_masked_mean
-@pytest.mark.parametrize("dim", [None, 0, 1])
+@pytest.mark.parametrize('dim', [None, 0, 1])
 def test_dist_masked_mean_multi_process(
     train_mixin_instance, sample_data, mock_dist_ops, dim
 ):
@@ -488,7 +506,9 @@ def test_dist_masked_mean_multi_process(
 
     expected_global_sum = local_sum * world_size
     expected_global_count = local_count * world_size
-    expected_global_mean = expected_global_sum / (expected_global_count + epsilon)
+    expected_global_mean = expected_global_sum / (
+        expected_global_count + epsilon
+    )
     if dim is not None:
         expected_global_mean = torch.where(
             expected_global_count.view_as(expected_global_mean) > 0,
@@ -502,19 +522,21 @@ def test_dist_masked_mean_multi_process(
         values, mask, dim=dim, epsilon=epsilon
     )
 
-    torch.testing.assert_close(dist_result, expected_global_mean, rtol=1e-8, atol=1e-8)
+    torch.testing.assert_close(
+        dist_result, expected_global_mean, rtol=1e-8, atol=1e-8
+    )
     assert mock_dist_ops.all_reduce_tensor.call_count == 2
     # Use helper to check calls with tensors
     expected_calls = [
-        (local_sum, {"op": dist.ReduceOp.SUM}),
-        (local_count, {"op": dist.ReduceOp.SUM}),
+        (local_sum, {'op': dist.ReduceOp.SUM}),
+        (local_count, {'op': dist.ReduceOp.SUM}),
     ]
     assert_mock_tensor_calls(mock_dist_ops.all_reduce_tensor, expected_calls)
 
 
 # Test dist_masked_whiten
-@pytest.mark.parametrize("shift_mean", [True, False])
-@pytest.mark.parametrize("dim", [-1, 0])
+@pytest.mark.parametrize('shift_mean', [True, False])
+@pytest.mark.parametrize('dim', [-1, 0])
 def test_dist_masked_whiten_multi_process(
     train_mixin_instance, sample_data, mock_dist_ops, shift_mean, dim
 ):
@@ -549,7 +571,9 @@ def test_dist_masked_whiten_multi_process(
     )
 
     # Calculate expected output
-    expected_whitened = (values - global_mean) * torch.rsqrt(global_var + epsilon)
+    expected_whitened = (values - global_mean) * torch.rsqrt(
+        global_var + epsilon
+    )
     if not shift_mean:
         expected_whitened += global_mean
     expected_output = torch.where(broadcast_mask, expected_whitened, values)
@@ -559,13 +583,15 @@ def test_dist_masked_whiten_multi_process(
         values, mask, shift_mean=shift_mean, dim=dim, epsilon=epsilon
     )
 
-    torch.testing.assert_close(dist_result, expected_output, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        dist_result, expected_output, rtol=1e-5, atol=1e-5
+    )
     assert mock_dist_ops.all_reduce_tensor.call_count == 3
     # Use helper to check calls with tensors
     expected_calls = [
-        (sum_local, {"op": dist.ReduceOp.SUM}),
-        (sum_sq_local, {"op": dist.ReduceOp.SUM}),
-        (num_valid_local, {"op": dist.ReduceOp.SUM}),
+        (sum_local, {'op': dist.ReduceOp.SUM}),
+        (sum_sq_local, {'op': dist.ReduceOp.SUM}),
+        (num_valid_local, {'op': dist.ReduceOp.SUM}),
     ]
     assert_mock_tensor_calls(mock_dist_ops.all_reduce_tensor, expected_calls)
 
@@ -605,11 +631,15 @@ def test_dist_masked_mean_single_process(
 
     dist_result = train_mixin_instance.dist_masked_mean(values, mask)
 
-    torch.testing.assert_close(dist_result, expected_local_mean, rtol=1e-8, atol=1e-8)
+    torch.testing.assert_close(
+        dist_result, expected_local_mean, rtol=1e-8, atol=1e-8
+    )
     mock_dist_ops.all_reduce_tensor.assert_not_called()
 
 
-def test_dist_masked_mean_zero_count_multi_process(train_mixin_instance, mock_dist_ops):
+def test_dist_masked_mean_zero_count_multi_process(
+    train_mixin_instance, mock_dist_ops
+):
     """Tests dist_masked_mean handles zero global count correctly."""
     world_size = 2
     type(mock_dist_ops).world_size = PropertyMock(return_value=world_size)
@@ -636,7 +666,7 @@ def test_dist_masked_whiten_single_process(
 
 
 @patch.object(
-    TrainingMixin, "dist_masked_whiten", autospec=True
+    TrainingMixin, 'dist_masked_whiten', autospec=True
 )  # Mock the target method directly
 def test_dist_whiten_calls_masked_whiten(
     mock_dist_masked_whiten, train_mixin_instance, mock_dist_ops
@@ -655,11 +685,11 @@ def test_dist_whiten_calls_masked_whiten(
     mock_dist_masked_whiten.assert_called_once()
     call_args = mock_dist_masked_whiten.call_args
     passed_self = call_args[0][0]
-    passed_values = call_args.kwargs.get("values")
-    passed_mask = call_args.kwargs.get("mask")
-    passed_shift_mean = call_args.kwargs.get("shift_mean")
-    passed_dim = call_args.kwargs.get("dim")
-    passed_epsilon = call_args.kwargs.get("epsilon")
+    passed_values = call_args.kwargs.get('values')
+    passed_mask = call_args.kwargs.get('mask')
+    passed_shift_mean = call_args.kwargs.get('shift_mean')
+    passed_dim = call_args.kwargs.get('dim')
+    passed_epsilon = call_args.kwargs.get('epsilon')
 
     assert passed_self is train_mixin_instance
     torch.testing.assert_close(passed_values, values)
@@ -670,8 +700,8 @@ def test_dist_whiten_calls_masked_whiten(
     assert passed_epsilon == epsilon
 
 
-@pytest.mark.parametrize("dim", [None, 0, 1])
-@pytest.mark.parametrize("keepdim", [False, True])
+@pytest.mark.parametrize('dim', [None, 0, 1])
+@pytest.mark.parametrize('keepdim', [False, True])
 def test_dist_masked_var_multi_process(
     train_mixin_instance,
     sample_data,
@@ -682,7 +712,7 @@ def test_dist_masked_var_multi_process(
     """Tests dist_masked_var aggregates correctly across processes."""
     # Skip invalid combinations (keepdim=True has no effect if dim=None)
     if dim is None and keepdim:
-        pytest.skip("keepdim=True has no effect when dim is None")
+        pytest.skip('keepdim=True has no effect when dim is None')
 
     world_size = 3
     epsilon = 1e-8
@@ -734,9 +764,11 @@ def test_dist_masked_var_multi_process(
         values, mask, dim=dim, keepdim=keepdim, epsilon=epsilon
     )
     # Check the calculated variance value
-    torch.testing.assert_close(dist_result, expected_global_var, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(
+        dist_result, expected_global_var, rtol=1e-5, atol=1e-6
+    )
 
     # Check that all_reduce was called exactly 3 times (for sum, count, sum_sq)
-    assert mock_dist_ops.all_reduce_tensor.call_count == 3, (
-        f"Expected 3 calls to all_reduce_tensor, but got {mock_dist_ops.all_reduce_tensor.call_count}"
-    )
+    assert (
+        mock_dist_ops.all_reduce_tensor.call_count == 3
+    ), f"Expected 3 calls to all_reduce_tensor, but got {mock_dist_ops.all_reduce_tensor.call_count}"

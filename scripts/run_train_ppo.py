@@ -162,7 +162,8 @@ def main():
     policy_model_config = job_config['policy_model']
     value_model_config = job_config['value_model']
     policy_model_name = policy_model_config['pretrained_model']
-    deepspeed_config = job_config['deepspeed']
+    policy_deepspeed_config = job_config['policy_deepspeed']
+    value_deepspeed_config = job_config['value_deepspeed']
     ppo_config = PPOConfig(**job_config['ppo'])
 
     set_seed(seed)
@@ -171,13 +172,17 @@ def main():
     deepspeed.init_distributed(verbose=False)
     local_rank = int(os.environ['LOCAL_RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
-    bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
+    bf16_enabled = policy_deepspeed_config.get('bf16', {}).get('enabled')
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
 
-    deepspeed_config['train_micro_batch_size_per_gpu'] = (
+    policy_deepspeed_config['train_micro_batch_size_per_gpu'] = (
         ppo_config.train_micro_batch_size
     )
-    deepspeed_config['train_batch_size'] = ppo_config.train_batch_size
+    policy_deepspeed_config['train_batch_size'] = ppo_config.train_batch_size
+    value_deepspeed_config['train_micro_batch_size_per_gpu'] = (
+        ppo_config.train_micro_batch_size
+    )
+    value_deepspeed_config['train_batch_size'] = ppo_config.train_batch_size
 
     # Prepare datasets
     train_dataset, eval_dataset = load_multiple_datasets(
@@ -213,12 +218,12 @@ def main():
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
         model_parameters=policy_model.parameters(),
-        config_params=deepspeed_config,
+        config_params=policy_deepspeed_config,
     )
     value_engine, *_ = deepspeed.initialize(
         model=value_model,
         model_parameters=value_model.parameters(),
-        config_params=deepspeed_config,
+        config_params=value_deepspeed_config,
     )
 
     # Create reference model and optionally use deepspeed sharding

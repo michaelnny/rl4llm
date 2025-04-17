@@ -237,7 +237,6 @@ def grpo_trainer(
 
     # Manually set device and dtype for consistency in tests
     trainer.device = torch.device('cpu')
-    trainer.torch_dtype = torch.float32
     trainer.initialize_trainer()  # Initialize trainer specific settings
     return trainer
 

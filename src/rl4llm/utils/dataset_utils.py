@@ -4,9 +4,7 @@ from typing import Any, Dict, List, Sequence, TypeVar, Union
 import torch
 from torch.utils.data import Dataset, Subset
 
-from rl4llm.constants import LOGGER_NAME
-
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
 # Define a TypeVar to represent the input dataset type, making the return type more precise

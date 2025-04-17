@@ -12,14 +12,33 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_inference_client import InferenceClient
-from rl4llm.core.base_trainer import RewardTransform, RLConfig, RLTrainer
+from rl4llm.core.base_trainer import (
+    BaseRLConfig,
+    BaseRLTrainer,
+    RewardTransform,
+)
 from rl4llm.envs import EpisodeData, LocalLLMEnv
 
 
-class PPOConfig(RLConfig):
+class PPOConfig(BaseRLConfig):
     """PPO config instance for RL LLM"""
 
+    policy_num_updates: int = Field(
+        1,
+        ge=1,
+        le=5,
+        description='PPO policy update epochs for a collection of samples',
+    )
+    value_num_updates: int = Field(
+        4,
+        ge=1,
+        le=5,
+        description='PPO value update epochs for a collection of samples',
+    )
     gae_lambda: float = Field(0.95, gt=0.0, le=1.0, description='GAE lambda')
+    clip_eps: float = Field(
+        0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon'
+    )
     value_clip_eps: float = Field(
         0.2, ge=0.0, le=1.0, description='PPO value loss clip epsilon'
     )
@@ -89,7 +108,7 @@ class TransitionData(BaseModel):
         arbitrary_types_allowed = True
 
 
-class PPOTrainer(RLTrainer):
+class PPOTrainer(BaseRLTrainer):
     """PPO trainer for LLM"""
 
     def __init__(
@@ -247,9 +266,9 @@ class PPOTrainer(RLTrainer):
         pg_loss = self.dist_masked_mean(pg_losses, loss_mask, dim=1).mean()
 
         # Compute entropy for the policy
-        dist = torch.distributions.Categorical(logits=pi_logits)
-        entropies = dist.entropy()
-        entropies = entropies * loss_mask
+        entropies = self.compute_entropy_from_logits(
+            logits=pi_logits, loss_mask=loss_mask
+        )
         entropy = entropies.mean()
         entropy_loss = -(self.config.entropy_loss_coef * entropy)
 
@@ -299,11 +318,12 @@ class PPOTrainer(RLTrainer):
         Returns:
             torch.Tensor: The total loss tensor
         """
+
         # values = experience_batch.values.to(self.device)
         returns = experience_batch.returns.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
-        # Value loss
+        # # Compute clipped value loss as in standard RLHF
         # vpred_clipped = torch.clamp(
         #     pred_values,
         #     values - self.config.value_clip_eps,
@@ -313,8 +333,13 @@ class PPOTrainer(RLTrainer):
         # vf_losses2 = torch.square(vpred_clipped - returns)
         # losses = 0.5 * torch.max(vf_losses1, vf_losses2)
         # loss = self.dist_masked_mean(losses, loss_mask, dim=1).mean()
+        # with torch.no_grad():
+        #     clipfrac = self.dist_masked_mean(
+        #         torch.gt(vf_losses2, vf_losses1), loss_mask, dim=1
+        #     ).mean()
+        # self.logger.log_scalar('value/clipfrac', clipfrac.detach().item())
 
-        # Value loss
+        # Value loss using MC returns
         losses = 0.5 * torch.square(returns - pred_values)
         loss = self.dist_masked_mean(losses, loss_mask, dim=1).mean()
 
@@ -324,15 +349,11 @@ class PPOTrainer(RLTrainer):
                 loss_mask,
                 dim=1,
             ).mean()
-            # clipfrac = self.dist_masked_mean(
-            #     torch.gt(vf_losses2, vf_losses1), loss_mask, dim=1
-            # ).mean()
             returns_var = self.masked_var(returns, loss_mask, dim=1).mean()
             var_explained = (1 - pred_error / (returns_var + 1e-8)).item()
 
         self.logger.log_scalar('train/vf_loss', loss.detach().item())
         self.logger.log_scalar('value/error', pred_error.detach().item())
-        # self.logger.log_scalar('value/clipfrac', clipfrac.detach().item())
         self.logger.log_scalar('value/returns_var', returns_var.detach().item())
         self.logger.log_scalar('value/var_explained', var_explained)
 
@@ -453,7 +474,9 @@ class PPOTrainer(RLTrainer):
         rewards = self.transform_batch_rewards(episodes).cpu()
 
         if self.config.normalize_rewards:
-            rewards = self.whiten(rewards, shift_mean=False)
+            normed_rewards = self.whiten(rewards, shift_mean=False)
+        else:
+            normed_rewards = rewards
 
         # Prepare batched sequences for model forward pass
         sequences = [
@@ -559,10 +582,12 @@ class PPOTrainer(RLTrainer):
             # Rewards are all zero for non-terminal step, and use the normalized reward for terminal step
             seq_rewards = torch.zeros_like(actions, dtype=self.torch_dtype)
             seq_rewards[-1] = rewards[i]
+            seq_rewards_for_adv = seq_rewards.clone()
+            seq_rewards_for_adv[-1] = normed_rewards[i]
 
-            # Compute GAE advantages
+            # Compute GAE advantages for policy update
             _, advantages = self.masked_returns_and_gae_advantages(
-                seq_rewards,
+                seq_rewards_for_adv,
                 values,
                 loss_mask,
                 self.config.gamma,
@@ -570,12 +595,13 @@ class PPOTrainer(RLTrainer):
             )
 
             # Don't mix advantage estimations for value function
+            # like GRPO, but we only use the MC returns to train value model
             returns = self.masked_monte_carlo_returns(
                 seq_rewards,
                 loss_mask,
                 self.config.gamma,
             )
-            # advantages = returns
+            # advantages = returns # <--- this is exactly what GRPO does
 
             assert (
                 states.shape
@@ -603,8 +629,8 @@ class PPOTrainer(RLTrainer):
         return transitions
 
     def _train_policy_step(self, train_dataloader: DataLoader):
-        """Performs the policy update using collected rollout."""
-        for _ in range(self.config.num_updates):
+        """Performs the policy model update using collected rollout."""
+        for _ in range(self.config.policy_num_updates):
             for i, micro_batch in enumerate(train_dataloader):
                 input_ids = micro_batch.states.to(self.device)
                 attention_mask = (
@@ -633,8 +659,8 @@ class PPOTrainer(RLTrainer):
                     )
 
     def _train_value_step(self, train_dataloader: DataLoader):
-        """Performs the value update using collected rollout."""
-        for _ in range(self.config.num_updates):
+        """Performs the value model update using collected rollout."""
+        for _ in range(self.config.value_num_updates):
             for i, micro_batch in enumerate(train_dataloader):
                 input_ids = micro_batch.states.to(self.device)
                 attention_mask = (
@@ -664,19 +690,19 @@ class PPOTrainer(RLTrainer):
 
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""
-        pad_token_id = self.tokenizer.pad_token_id
+        eos_token_id = self.tokenizer.eos_token_id
         torch_dtype = self.torch_dtype
 
         # Pad states and actions (long tensors)
         batch_states = pad_sequence(
             [item.states for item in batch],
             batch_first=True,
-            padding_value=pad_token_id,
+            padding_value=eos_token_id,
         ).long()
         batch_actions = pad_sequence(
             [item.actions for item in batch],
             batch_first=True,
-            padding_value=pad_token_id,
+            padding_value=eos_token_id,
         ).long()
 
         # Pad loss_mask (boolean tensor)

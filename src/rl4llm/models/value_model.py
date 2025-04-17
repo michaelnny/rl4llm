@@ -1,5 +1,3 @@
-"""Custom model wrapper around pretrained model with a value head."""
-
 import logging
 import math
 import os
@@ -8,8 +6,15 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel, PreTrainedModel
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    PretrainedConfig,
+    PreTrainedModel,
+)
 from transformers.modeling_outputs import ModelOutput
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,46 +34,112 @@ class AutoModelWithValueHead(PreTrainedModel):
 
     This model is useful for tasks like reinforcement learning (e.g., PPO) where
     a value prediction is needed alongside the base model's outputs.
+
+    When loading from a checkpoint containing only the base model weights
+    (e.g., 'gpt2'), use `AutoModelWithValueHead.from_pretrained('gpt2', ignore_mismatched_sizes=True)`.
+    The value head will be initialized using the logic in `_init_weights`.
+
+    When loading from a checkpoint saved by `model.save_pretrained('./my_checkpoint')`
+    (which contains both base and value head weights), use
+    `AutoModelWithValueHead.from_pretrained('./my_checkpoint')`. The saved value head
+    weights will be loaded correctly.
     """
 
     supports_gradient_checkpointing = True
     _supports_sdpa = True
     _supports_flash_attn_2 = True
+    config_class = AutoConfig  # Use AutoConfig to be flexible
 
-    def __init__(self, config: AutoConfig):
+    def __init__(self, config: PretrainedConfig):
         """Initializes the model with a base model and a value head."""
-        super().__init__(config)
-        self.model = AutoModel.from_config(config)
-        if hasattr(self.model, 'lm_head'):
-            # Check for tied weights before deleting
-            is_tied = getattr(self.config, 'tie_word_embeddings', False)
-            output_embeddings = getattr(
-                self.model, 'get_output_embeddings', lambda: None
-            )()
-            if not is_tied or output_embeddings is None:
-                print(
-                    'Deleting lm_head found on base model after AutoModel.from_config.'
+        # Ensure config is PretrainedConfig (though AutoConfig usually inherits)
+        if not isinstance(config, PretrainedConfig):
+            # If loaded via AutoConfig, it might be a dict-like object initially
+            # Let's try to load it properly if it looks like one
+            try:
+                config = AutoConfig.for_model(**config.to_dict())
+            except Exception as e:
+                raise TypeError(
+                    f"config must be a PretrainedConfig or convertible, got {type(config)}. Error: {e}"
                 )
+        # This calls self.post_init() -> self.init_weights() -> self.apply(self._init_weights)
+        super().__init__(config)
+
+        # Load the base model structure using the config
+        # Weights will be loaded later by from_pretrained if applicable
+        self.model = AutoModel.from_config(config)
+
+        # --- Handle potential LM head in base model ---
+        # Check if the config suggests an LM head exists and might be tied
+        has_lm_head_attr = hasattr(self.model, 'lm_head')
+        output_embeddings = getattr(
+            self.model, 'get_output_embeddings', lambda: None
+        )()
+        is_tied = (
+            getattr(self.config, 'tie_word_embeddings', False)
+            and output_embeddings is not None
+        )
+
+        if (
+            has_lm_head_attr
+            and getattr(self.model, 'lm_head', None) is not None
+        ):
+            if not is_tied:
+                logger.info(
+                    'Deleting non-tied lm_head found on base model after AutoModel.from_config.'
+                )
+                # Use delattr for safer deletion
                 try:
-                    del self.model.lm_head
+                    delattr(self.model, 'lm_head')
                 except AttributeError:
-                    print(
+                    logger.info(  # Should not happen if has_lm_head_attr is true, but good practice
                         'Could not delete lm_head, attribute might not exist directly.'
                     )
             else:
-                print('Keeping tied lm_head (will not be used by value head).')
-        self.value_head = nn.Linear(config.hidden_size, 1, bias=False)
-        self.post_init()
+                logger.info(
+                    'Keeping tied lm_head (will not be used by value head, but needed for base model consistency).'
+                )
+        # --- End LM head handling ---
 
-    def _init_value_head_weights(self):
-        """Initializes the value head weights with scaled normal distribution."""
-        std_dev = 0.02
-        if hasattr(self.config, 'num_hidden_layers'):
-            std_dev /= math.sqrt(2.0 * self.config.num_hidden_layers)
-        print('Initialize value head weights...')
-        nn.init.normal_(self.value_head.weight, mean=0.0, std=std_dev)
-        if self.value_head.bias is not None:
-            nn.init.zeros_(self.value_head.bias)
+        # Define the value head
+        self.value_head = nn.Linear(config.hidden_size, 1, bias=False)
+
+        # Note: Initialization of value_head happens in _init_weights
+        # self.post_init() is called by super().__init__(), no need to call it again
+
+    # Override _init_weights for custom initialization of the value head
+    def _init_weights(self, module):
+        """Initialize the weights."""
+        # Let the base class handle standard initializations first (optional, depends on desired behavior)
+        # super()._init_weights(module) # Usually not needed unless modifying base behavior
+
+        # Custom initialization for the value head
+        if isinstance(module, nn.Linear) and module is self.value_head:
+            std_dev = 0.02
+            # Use config attributes safely
+            num_hidden_layers = getattr(self.config, 'num_hidden_layers', None)
+            if num_hidden_layers:
+                # Check if num_hidden_layers is a valid number > 0
+                if (
+                    isinstance(num_hidden_layers, (int, float))
+                    and num_hidden_layers > 0
+                ):
+                    std_dev /= math.sqrt(2.0 * num_hidden_layers)
+                else:
+                    logger.warning(
+                        f"num_hidden_layers found in config but is not a positive number: {num_hidden_layers}. Using default std_dev."
+                    )
+
+            logger.info(
+                f'Initializing value head weights with std_dev: {std_dev}'
+            )
+            nn.init.normal_(module.weight, mean=0.0, std=std_dev)
+            if module.bias is not None:
+                logger.info('Initializing value head bias to zeros.')
+                nn.init.zeros_(module.bias)
+        # You might need to initialize other custom layers here if you add more
+        # elif isinstance(module, (nn.LayerNorm, nn.Embedding)): # Example if needed
+        #     module.weight.data.fill_(1.0) # Example
 
     def get_input_embeddings(self):
         """Returns the input embeddings layer from the base model."""
@@ -86,92 +157,66 @@ class AutoModelWithValueHead(PreTrainedModel):
     ) -> ValueOutput:
         """
         Performs a forward pass through the base model and the value head.
-
-        Args:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Indices of input sequence tokens in the vocabulary.
-            attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices.
-            **kwargs: Additional arguments passed to the base model.
-
-        Returns:
-            ValueOutput: An object containing the predicted values and optionally
-                         hidden states and attentions from the base model.
         """
+        # Ensure internal calls use return_dict=True for consistent output access
         kwargs['return_dict'] = True
-        kwargs['output_hidden_states'] = kwargs.get(
-            'output_hidden_states', False
-        )
-        kwargs['output_attentions'] = kwargs.get('output_attentions', False)
+        # Preserve user's request for hidden_states/attentions if passed
+        output_hidden_states = kwargs.get('output_hidden_states', False)
+        output_attentions = kwargs.get('output_attentions', False)
+        kwargs['output_hidden_states'] = output_hidden_states
+        kwargs['output_attentions'] = output_attentions
+
         outputs = self.model(
-            input_ids=input_ids, attention_mask=attention_mask, **kwargs
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **kwargs,
         )
+
+        # Get the last hidden state
+        # BaseModelOutputWithPooling often has 'pooler_output', but for RL value heads,
+        # using the last hidden state of the sequence is more common.
+        # Check if last_hidden_state exists, otherwise log an error or adapt.
+        if not hasattr(outputs, 'last_hidden_state'):
+            raise AttributeError(
+                "The base model output does not contain 'last_hidden_state'. "
+                'Check the base model type and its forward pass implementation.'
+            )
         last_hidden_state = outputs.last_hidden_state
+
+        # Pass the last hidden state through the value head
+        # Typically, for value prediction in RL, you might want the value for the *last* token
+        # or an average, depending on your setup. Here, we calculate it for all tokens.
+        # Squeeze the last dimension (size 1)
         values = self.value_head(last_hidden_state).squeeze(-1)
+
         return ValueOutput(
             values=values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
+            hidden_states=(
+                outputs.hidden_states if output_hidden_states else None
+            ),
+            attentions=outputs.attentions if output_attentions else None,
         )
 
-    # TODO: does this correctly save/load the model after training?
-    @classmethod
-    def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: str,
-        *model_args,
-        **kwargs,
-    ):
-        """
-        Loads a pretrained model instance.
-
-        Args:
-            pretrained_model_name_or_path (str): Identifier for the pretrained model
-                                                 (Hub name or local path).
-            *model_args: Positional arguments passed to the underlying `from_pretrained`.
-            **kwargs: Keyword arguments passed to the underlying `from_pretrained`.
-
-        Returns:
-            AutoModelWithValueHead: The loaded model instance.
-        """
-
-        config = AutoConfig.from_pretrained(
-            pretrained_model_name_or_path, **kwargs
-        )
-        if os.path.isdir(pretrained_model_name_or_path):
-            try:
-                print(
-                    f"Attempting to load model from local path: {pretrained_model_name_or_path}"
-                )
-                model = super().from_pretrained(
-                    pretrained_model_name_or_path,
-                    *model_args,
-                    config=config,
-                    **kwargs,
-                )
-                print('Successfully loaded model from local path.')
-                return model
-            except Exception as e:
-                print(
-                    f"Could not load model from local path {pretrained_model_name_or_path}: {e}. "
-                    f"Falling back to loading base model and initializing value head."
-                )
-        print(
-            f"Loading base model weights from {pretrained_model_name_or_path}"
-        )
-        base_model = AutoModel.from_pretrained(
-            pretrained_model_name_or_path, *model_args, **kwargs
-        )
-        model = cls(config)
-        model.model = base_model
-        model._init_value_head_weights()
-        print(
-            f"Initialized value head for model loaded from {pretrained_model_name_or_path}"
-        )
-        return model
-
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs):
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         """Enable gradient checkpointing on the base model"""
-        self.model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
-        )
+        if not self.supports_gradient_checkpointing:
+            logger.warning(
+                f"{self. MRO} does not support gradient checkpointing."
+            )
+            return
+        # Pass gradient_checkpointing_kwargs if provided, otherwise default behavior
+        if gradient_checkpointing_kwargs is None:
+            gradient_checkpointing_kwargs = {
+                'use_reentrant': True
+            }  # Default often needed
+
+        # Check if the base model actually has the method
+        if hasattr(self.model, 'gradient_checkpointing_enable'):
+            self.model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+            )
+            logger.info('Gradient checkpointing enabled on the base model.')
+        else:
+            logger.warning(
+                "Base model does not have 'gradient_checkpointing_enable' method."
+            )

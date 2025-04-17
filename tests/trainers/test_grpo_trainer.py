@@ -238,7 +238,6 @@ def grpo_trainer(
 
     # Manually set device and dtype for consistency in tests
     trainer.device = torch.device('cpu')
-    trainer.torch_dtype = torch.float32
     trainer.initialize_trainer()  # Initialize trainer specific settings
     return trainer
 
@@ -515,7 +514,9 @@ def test_compute_loss_with_advantage_norm(
     grpo_trainer.config.normalize_advantages = True
     # Mock masked_whiten to check it's called
     with patch.object(
-        grpo_trainer, 'masked_whiten', wraps=grpo_trainer.masked_whiten
+        grpo_trainer,
+        'dist_masked_whiten',
+        wraps=grpo_trainer.dist_masked_whiten,
     ) as mock_whiten:
         loss = grpo_trainer.compute_loss(**loss_inputs)
         assert isinstance(loss, torch.Tensor)

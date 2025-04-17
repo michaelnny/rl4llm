@@ -6,12 +6,12 @@ from typing import List, Optional
 import torch
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from rl4llm.core.base_trainer import RLConfig
+from rl4llm.core.base_trainer import BaseRLConfig
 from rl4llm.envs import EpisodeData
 from rl4llm.trainers.grpo_trainer import GRPOTrainer, TransitionData
 
 
-class ExtendedGRPOConfig(RLConfig):
+class ExtendedGRPOConfig(BaseRLConfig):
     """GRPO config instance for RL LLM"""
 
     filter_low_reward_std: Optional[bool] = Field(

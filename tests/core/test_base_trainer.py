@@ -7,14 +7,14 @@ import torch
 from deepspeed import DeepSpeedEngine
 
 from rl4llm.constants import TRAIN_PHASE
-from rl4llm.core.base_trainer import RLConfig, RLTrainer
+from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 from rl4llm.envs import EpisodeData
 
 
 @pytest.fixture
 def mock_config():
-    """Provides a minimal RLConfig for testing."""
-    config = MagicMock(spec=RLConfig)
+    """Provides a minimal BaseRLConfig for testing."""
+    config = MagicMock(spec=BaseRLConfig)
     config.train_rollout_size = 8
     config.kl_loss_coef = 0.0
     config.max_steps = 1
@@ -101,9 +101,9 @@ def mock_reward_transform_fn() -> MagicMock:
 def trainer_base(
     mock_config, mock_policy_engine, mock_dist_ops, mock_logger, mocker
 ):
-    """Provides a dummy RLTrainer subclass for testing."""
+    """Provides a dummy BaseRLTrainer subclass for testing."""
 
-    class DummyTrainer(RLTrainer):
+    class DummyTrainer(BaseRLTrainer):
         def initialize_trainer(self):
             pass
 
@@ -124,6 +124,9 @@ def trainer_base(
 
         def is_cohost_inference_engine(self):
             return False
+
+        def save_checkpoint(self, tag):
+            pass
 
         def clean_up(self):
             pass
@@ -332,12 +335,6 @@ def test_prepare_for_training(trainer_base, mock_model):
     trainer_base.clean_up.assert_called_once()
 
 
-def test_checkpoint_saving(trainer_base):
-    """Saves policy engine checkpoint at given step."""
-    trainer_base.save_checkpoint(1)
-    trainer_base.policy_engine.save_checkpoint.assert_called()
-
-
 def test_sync_reference_model_no_ref_model(trainer_base):
     """Tests that sync does nothing if reference_model is None."""
     trainer_base.reference_model = None
@@ -443,7 +440,7 @@ def test_sync_reference_model_deepspeed_zero3_master(
 def test_sync_policy_model_inference_disabled(trainer_base, mocker):
     """Tests that sync does nothing if inference engine is disabled."""
     mocker.patch(
-        'rl4llm.core.base_trainer.RLTrainer.is_inference_engine_enabled',
+        'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
         return_value=False,
     )
     trainer_base.save_weights_hf_pretrained = MagicMock()
@@ -458,7 +455,7 @@ def test_sync_policy_model_inference_disabled(trainer_base, mocker):
 def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
     """Tests successful policy sync on the master rank."""
     mocker.patch(
-        'rl4llm.core.base_trainer.RLTrainer.is_inference_engine_enabled',
+        'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
         return_value=True,
     )
     mock_tempdir.return_value.__enter__.return_value = (
@@ -485,7 +482,7 @@ def test_sync_policy_model_success_non_master(
 ):
     """Tests successful policy sync on a non-master rank."""
     mocker.patch(
-        'rl4llm.core.base_trainer.RLTrainer.is_inference_engine_enabled',
+        'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
         return_value=True,
     )
     mock_tempdir.return_value.__enter__.return_value = '/fake/temp/path'

@@ -1,7 +1,7 @@
 """
 Base RL trainer for LLMs in distributed training setup.
 
-This module defines an abstract `RLTrainer` class that provides the foundational
+This module defines an abstract `BaseRLTrainer` class that provides the foundational
 infrastructure for reinforcement learning algorithms with LLM environments,
 including training loop, checkpointing, model sync, and logging.
 """
@@ -47,7 +47,7 @@ RewardTransform: TypeAlias = Optional[
 ]
 
 
-class RLConfig(BaseModel):
+class BaseRLConfig(BaseModel):
     """Basic config for RL fine-tuning for LLM"""
 
     """For RL sample generation"""
@@ -89,12 +89,12 @@ class RLConfig(BaseModel):
         le=5120,
         description='Number of samples to collect before update policy',
     )
-    num_updates: int = Field(
-        4,
-        ge=1,
-        le=5,
-        description='PPO update epochs for a collection of samples',
-    )
+    # num_updates: int = Field(
+    #     4,
+    #     ge=1,
+    #     le=5,
+    #     description='PPO update epochs for a collection of samples',
+    # )
     train_micro_batch_size: int = Field(
         4,
         ge=1,
@@ -107,16 +107,16 @@ class RLConfig(BaseModel):
         le=1024,
         description='Global batch size across devices/ranks for training',
     )
-    clip_eps: float = Field(
-        0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon'
-    )
+    # clip_eps: float = Field(
+    #     0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon'
+    # )
     gamma: float = Field(
         1.0,
         ge=0.0,
         le=1.0,
         description='Default discount factor for compute returns',
     )
-    normalize_rewards: bool = Field(True, description='Normalized rewards')
+    normalize_rewards: bool = Field(False, description='Normalized rewards')
     normalize_advantages: bool = Field(
         False, description='Normalized advantages before compute PG loss'
     )
@@ -159,17 +159,17 @@ class RLConfig(BaseModel):
             raise ValueError(
                 'Global train batch size must be divisible by mini batch size'
             )
-        # if values.normalize_advantages and values.train_micro_batch_size < 4:
-        #     raise ValueError(
-        #         'Mini batch size must be at least 4 when normalize advantages is True'
-        #     )
+        if values.normalize_advantages and values.train_micro_batch_size < 4:
+            raise ValueError(
+                'Mini batch size must be at least 4 when normalize advantages is True'
+            )
         return values
 
     class Config:
         arbitrary_types_allowed = True
 
 
-class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
+class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     """
     Base class for training RL algorithms on LLM environments using DeepSpeed.
     """
@@ -180,7 +180,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
     def __init__(
         self,
-        config: RLConfig,
+        config: BaseRLConfig,
         tokenizer: PreTrainedTokenizer,
         policy_engine: DeepSpeedEngine,
         log_config: Dict[str, Any],
