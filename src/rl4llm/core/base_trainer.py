@@ -625,14 +625,25 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 f"{token_metric_key}/prompt_length", ep.prompt_length
             )
 
-    # def save_checkpoint(self, step: int):
-    #     """Saves a model checkpoint."""
-    #     tag = f"iteration_{step}"
-    #     save_path = os.path.join(self.checkpoint_dir, tag)
-    #     self.logger.info(f"Saving checkpoint to {save_path}...")
-    #     self.policy_engine.save_checkpoint(save_path)
-    #     self.dist_ops.barrier()
-    #     self.logger.info('Checkpoint saved.')
+    def extract_state_action_sequences(
+        self, episodes: List[EpisodeData]
+    ) -> Tuple[List[int], List[List[int]], List[List[int]]]:
+        """Extract state and action sequences from the episode list"""
+
+        # Prepare batched sequences for model forward pass
+        sequences = [
+            torch.concat([ep.prompt_tokens, ep.completion_tokens]).long()
+            for ep in episodes
+        ]
+        sequence_lengths = [
+            len(seq) for seq in sequences
+        ]  # Total length (prompt + completion)
+
+        # States: tokens 0 to N-1; Actions: tokens 1 to N
+        state_sequences = [seq[:-1] for seq in sequences]
+        action_sequences = [seq[1:] for seq in sequences]
+
+        return sequence_lengths, state_sequences, action_sequences
 
     def train(self, job_config: Dict):
         """
@@ -681,7 +692,7 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     self.clean_up()
                 self.dist_ops.barrier()
 
-                self.logger.info('Starting model training step...')
+                self.logger.info('Starting train model...')
                 with self.logger.timer('train_step'):
                     self._prepare_for_training()
                     self.train_step(train_dataloader)

@@ -643,13 +643,31 @@ class TrainingMixin:
                 loss_mask.shape == logits.shape[:2]
             ), 'Loss masks shape must match logits shape for batch_size and seq_len'
 
-        # Compute log probabilities in a numerically stable way
-        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-        # Convert log probabilities to probabilities
-        probs = torch.exp(log_probs)
+        # # Compute log probabilities in a numerically stable way
+        # log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+        # # Convert log probabilities to probabilities
+        # probs = torch.exp(log_probs)
 
-        # Compute entropy: sum over the class dimension
-        entropy = -(probs * log_probs).sum(dim=-1)
+        # # Compute entropy: sum over the class dimension
+        # entropy = -(probs * log_probs).sum(dim=-1)
+
+        # Working on one item at a time to avoid CUDA OOM
+        batch_size = logits.size(0)
+        entropies = []
+
+        for i in range(batch_size):
+            # grab a single [seq_len, vocab_size] slice
+            sample_logits = logits[i].float()
+            # log‑softmax → [L, V]
+            logp = torch.nn.functional.log_softmax(sample_logits, dim=-1)
+            # p = exp(logp) → [L, V]
+            p = logp.exp()
+            # entropy = –Σ p * log p along V → [L]
+            sample_entropy = -(p * logp).sum(dim=-1)
+            entropies.append(sample_entropy)
+
+        # stack back to [B, L]
+        entropy = torch.stack(entropies, dim=0)
 
         # Apply loss mask if provided
         if loss_mask is not None:

@@ -57,7 +57,7 @@ def inference_env(dummy_dataset, dummy_reward, mock_tokenizer):
         explore_steps=0,
         explore_top_k=20,
         explore_skip_n=0,
-        explore_decay_rate=0.9,
+        explore_decay=0.9,
         continue_special_tokens=['<CONT>'],
         continue_max_retry=2,
         continue_prob=0.5,

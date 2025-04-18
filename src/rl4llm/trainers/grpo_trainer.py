@@ -220,18 +220,18 @@ class GRPOTrainer(BaseRLTrainer):
         with torch.no_grad():
             approxkl = (
                 0.5
-                * self.dist_masked_mean(
+                * self.masked_mean(
                     torch.square(pi_logprobs - behavior_logprobs),
                     loss_mask,
                     dim=1,
                 ).mean()
             )
-            clipfrac = self.dist_masked_mean(
+            clipfrac = self.masked_mean(
                 torch.lt(pg_losses2, pg_losses1), loss_mask, dim=1
             ).mean()
 
         # First average over the sequence length, then average over the batch
-        pg_loss = self.dist_masked_mean(pg_losses, loss_mask, dim=1).mean()
+        pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
 
         # Compute entropy for the policy
         entropies = self.compute_entropy_from_logits(
@@ -251,7 +251,7 @@ class GRPOTrainer(BaseRLTrainer):
         loss = pg_loss + entropy_loss
         # Compute KL divergence if coefficient is positive
         if self.config.kl_loss_coef > 0:
-            # We add the kl  as an auxiliary loss instead of mixing pre-token KL to the rewards
+            # We add the kl as auxiliary loss instead of mixing pre-token KL to the rewards
             ref_logprobs = experience_batch.ref_logprobs.to(self.device)
             # Compute the KL divergence between the model and the reference model
             per_token_kl = (
@@ -260,7 +260,7 @@ class GRPOTrainer(BaseRLTrainer):
                 - 1
             )
 
-            kl = self.dist_masked_mean(per_token_kl, loss_mask, dim=1).mean()
+            kl = self.masked_mean(per_token_kl, loss_mask, dim=1).mean()
             kl_loss = self.config.kl_loss_coef * kl
 
             loss += kl_loss
@@ -367,7 +367,7 @@ class GRPOTrainer(BaseRLTrainer):
         )
         collected_episodes: List[List[EpisodeData]] = []
         local_count = 0
-
+        step_count = 0
         with self.unwrapped_model_for_generation() as policy_model:
             while local_count < local_rollout_size:
                 outputs = self.train_env.rollout(
@@ -379,10 +379,20 @@ class GRPOTrainer(BaseRLTrainer):
                     # as we need to normalize the rewards on group level
                     collected_episodes.extend([outputs])
                     local_count += len(outputs)
-
+                    step_count += 1
                     self.log_batch_episodes(
                         self._train_phase, outputs, self.global_step
                     )
+
+                    # Log progress every 50 valid steps or at completion
+                    if (
+                        step_count % 50 == 0
+                        or local_count >= local_rollout_size
+                    ):
+                        progress = (local_count / local_rollout_size) * 100
+                        self.logger.info(
+                            f"Progress: {progress:.2f}% ({local_count}/{local_rollout_size} episodes collected)"
+                        )
 
         return collected_episodes
 
@@ -412,17 +422,10 @@ class GRPOTrainer(BaseRLTrainer):
         )
 
         # Prepare batched sequences for model forward pass
-        sequences = [
-            torch.concat([ep.prompt_tokens, ep.completion_tokens]).long()
-            for ep in episodes
-        ]
-        sequence_lengths = [
-            len(seq) for seq in sequences
-        ]  # Total length (prompt + completion)
+        sequence_lengths, state_sequences, action_sequences = (
+            self.extract_state_action_sequences(episodes)
+        )
 
-        # States: tokens 0 to N-1; Actions: tokens 1 to N
-        state_sequences = [seq[:-1] for seq in sequences]
-        action_sequences = [seq[1:] for seq in sequences]
         batch_states = pad_sequence(
             state_sequences,
             batch_first=True,
@@ -564,19 +567,19 @@ class GRPOTrainer(BaseRLTrainer):
 
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""
-        eos_token_id = self.tokenizer.eos_token_id
+        pad_token_id = self.tokenizer.pad_token_id
         torch_dtype = self.torch_dtype
 
         # Pad states and actions (long tensors)
         batch_states = pad_sequence(
             [item.states for item in batch],
             batch_first=True,
-            padding_value=eos_token_id,
+            padding_value=pad_token_id,
         ).long()
         batch_actions = pad_sequence(
             [item.actions for item in batch],
             batch_first=True,
-            padding_value=eos_token_id,
+            padding_value=pad_token_id,
         ).long()
 
         # Pad loss_mask (boolean tensor)

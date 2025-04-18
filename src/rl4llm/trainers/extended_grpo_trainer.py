@@ -54,7 +54,7 @@ class ExtendedGRPOConfig(BaseRLConfig):
     explore_top_k: Optional[int] = Field(
         0, ge=0, le=500, description='Explore start top-k'
     )
-    explore_decay_rate: Optional[float] = Field(
+    explore_decay: Optional[float] = Field(
         0.8, gt=0, le=1, description='Rate to decay explore top-k'
     )
     continue_max_retry: Optional[int] = Field(

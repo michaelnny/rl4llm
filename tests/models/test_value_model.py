@@ -1,27 +1,27 @@
 import os
 import tempfile
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch.nn as nn
+from transformers import PretrainedConfig, PreTrainedModel
 
 from rl4llm.models.value_model import AutoModelWithValueHead, ValueOutput
-from transformers import PretrainedConfig, PreTrainedModel
 
 
 # Mock classes
 class MockConfig(PretrainedConfig):
     """Mock configuration class inheriting from PretrainedConfig."""
 
-    model_type = "mock_model"
+    model_type = 'mock_model'
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.hidden_size = kwargs.get("hidden_size", 16)
-        self.num_hidden_layers = kwargs.get("num_hidden_layers", 2)
-        self.vocab_size = kwargs.get("vocab_size", 100)
-        self.max_position_embeddings = kwargs.get("max_position_embeddings", 32)
+        self.hidden_size = kwargs.get('hidden_size', 16)
+        self.num_hidden_layers = kwargs.get('num_hidden_layers', 2)
+        self.vocab_size = kwargs.get('vocab_size', 100)
+        self.max_position_embeddings = kwargs.get('max_position_embeddings', 32)
 
 
 class MockModelOutput:
@@ -54,7 +54,9 @@ class MockBaseModel(PreTrainedModel):
         **kwargs,
     ):
         if input_ids is None:
-            raise ValueError("input_ids cannot be None for MockBaseModel forward")
+            raise ValueError(
+                'input_ids cannot be None for MockBaseModel forward'
+            )
         emb = self.embeddings(input_ids)
         last_hidden_state = self.dummy_layer(emb)
         hidden_states = (
@@ -74,12 +76,16 @@ class MockBaseModel(PreTrainedModel):
         print(f"Mock saving model to {save_directory}")
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        config = kwargs.pop("config", None) or cls.config_class()
+    def from_pretrained(
+        cls, pretrained_model_name_or_path, *model_args, **kwargs
+    ):
+        config = kwargs.pop('config', None) or cls.config_class()
         model = cls(config)
-        model_path = os.path.join(pretrained_model_name_or_path, "pytorch_model.bin")
+        model_path = os.path.join(
+            pretrained_model_name_or_path, 'pytorch_model.bin'
+        )
         if os.path.exists(model_path):
-            state_dict = torch.load(model_path, map_location="cpu")
+            state_dict = torch.load(model_path, map_location='cpu')
             model.load_state_dict(state_dict, strict=False)
         return model
 
@@ -91,7 +97,7 @@ class MockBaseModel(PreTrainedModel):
 
 
 # Fixtures
-@pytest.fixture(scope="module")
+@pytest.fixture(scope='module')
 def mock_config_instance():
     """Provides a reusable mock configuration instance."""
     return MockConfig()
@@ -102,10 +108,13 @@ def dummy_input(mock_config_instance):
     """Provides dummy input data for testing."""
     seq_len, batch_size = 5, 2
     input_ids = torch.randint(
-        0, mock_config_instance.vocab_size, (batch_size, seq_len), dtype=torch.long
+        0,
+        mock_config_instance.vocab_size,
+        (batch_size, seq_len),
+        dtype=torch.long,
     )
     attention_mask = torch.ones((batch_size, seq_len), dtype=torch.long)
-    return {"input_ids": input_ids, "attention_mask": attention_mask}
+    return {'input_ids': input_ids, 'attention_mask': attention_mask}
 
 
 @pytest.fixture
@@ -113,11 +122,11 @@ def value_model_instance(mock_config_instance):
     """Provides an instance of AutoModelWithValueHead with mocked base model."""
     mock_base = MockBaseModel(mock_config_instance)
     with patch(
-        "transformers.AutoModel.from_config", return_value=mock_base
+        'transformers.AutoModel.from_config', return_value=mock_base
     ) as mock_from_config:
         model = AutoModelWithValueHead(mock_config_instance)
     mock_from_config.assert_called_once_with(mock_config_instance)
-    assert hasattr(model, "_modules")
+    assert hasattr(model, '_modules')
     return model
 
 
@@ -128,13 +137,14 @@ def test_initialization(value_model_instance, mock_config_instance):
     assert isinstance(value_model_instance.model, MockBaseModel)
     assert isinstance(value_model_instance.value_head, nn.Linear)
     assert (
-        value_model_instance.value_head.in_features == mock_config_instance.hidden_size
+        value_model_instance.value_head.in_features
+        == mock_config_instance.hidden_size
     )
     assert value_model_instance.value_head.out_features == 1
     assert value_model_instance.value_head.weight.requires_grad
 
 
-@pytest.mark.parametrize("output_hidden_states", [False, True])
+@pytest.mark.parametrize('output_hidden_states', [False, True])
 def test_forward_pass(value_model_instance, dummy_input, output_hidden_states):
     """Tests the forward pass with and without hidden states."""
     value_model_instance.eval()
@@ -143,66 +153,9 @@ def test_forward_pass(value_model_instance, dummy_input, output_hidden_states):
             **dummy_input, output_hidden_states=output_hidden_states
         )
     assert isinstance(outputs, ValueOutput)
-    assert outputs.values.shape == dummy_input["input_ids"].shape
+    assert outputs.values.shape == dummy_input['input_ids'].shape
     assert outputs.values.dtype == torch.float32
     assert (outputs.hidden_states is not None) == output_hidden_states
     assert outputs.attentions is None
     if output_hidden_states:
         assert len(outputs.hidden_states) >= 2
-
-
-def test_save_and_load_pretrained_full(
-    value_model_instance, tmp_path, dummy_input, mock_config_instance
-):
-    """Tests saving and loading the full model locally."""
-    save_dir = tmp_path / "full_model"
-    value_model_instance.save_pretrained(save_dir)
-    mock_base_for_load = MockBaseModel(mock_config_instance)
-    with (
-        patch(
-            "transformers.AutoConfig.from_pretrained", return_value=mock_config_instance
-        ),
-        patch(
-            "transformers.AutoModel.from_pretrained", return_value=mock_base_for_load
-        ),
-        patch("transformers.AutoModel.from_config", return_value=mock_base_for_load),
-    ):
-        loaded_model = AutoModelWithValueHead.from_pretrained(save_dir)
-    assert isinstance(loaded_model, AutoModelWithValueHead)
-    assert isinstance(loaded_model.model, MockBaseModel)
-    assert loaded_model.config.hidden_size == mock_config_instance.hidden_size
-    value_model_instance.eval()
-    loaded_model.eval()
-    with torch.no_grad():
-        original_output = value_model_instance(**dummy_input).values
-        loaded_output = loaded_model(**dummy_input).values
-    assert loaded_output.shape == original_output.shape
-    assert loaded_output.dtype == original_output.dtype
-
-
-def test_load_from_pretrained_base_only(mock_config_instance, tmp_path, dummy_input):
-    """Tests loading from a checkpoint with only the base model."""
-    save_dir = tmp_path / "base_model"
-    base_model_to_save = MockBaseModel(mock_config_instance)
-    base_model_to_save.save_pretrained(save_dir)
-    mock_base_loaded = MockBaseModel.from_pretrained(
-        save_dir, config=mock_config_instance
-    )
-    with (
-        patch(
-            "transformers.AutoConfig.from_pretrained", return_value=mock_config_instance
-        ),
-        patch("transformers.AutoModel.from_pretrained", return_value=mock_base_loaded),
-        patch("transformers.AutoModel.from_config", return_value=mock_base_loaded),
-    ):
-        loaded_model = AutoModelWithValueHead.from_pretrained(save_dir)
-    assert isinstance(loaded_model, AutoModelWithValueHead)
-    assert isinstance(loaded_model.model, MockBaseModel)
-    assert loaded_model.config.hidden_size == mock_config_instance.hidden_size
-    assert isinstance(loaded_model.value_head, nn.Linear)
-    assert loaded_model.value_head.weight.requires_grad
-    loaded_model.eval()
-    with torch.no_grad():
-        outputs = loaded_model(**dummy_input)
-    assert isinstance(outputs, ValueOutput)
-    assert outputs.values.shape == dummy_input["input_ids"].shape

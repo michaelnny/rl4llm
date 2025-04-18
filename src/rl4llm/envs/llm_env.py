@@ -219,7 +219,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
         explore_steps: int,
         explore_top_k: int,
         explore_skip_n: int,
-        explore_decay_rate: float,
+        explore_decay: float,
         replace_source_tokens: List[int],
         replace_target_tokens: List[int],
         replace_prevent_patterns: List[List[int]],
@@ -236,7 +236,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
         self.explore_steps = explore_steps
         self.explore_top_k = explore_top_k
         self.explore_skip_n = explore_skip_n
-        self.explore_decay_rate = explore_decay_rate
+        self.explore_decay = explore_decay
         self.replace_source_tokens = replace_source_tokens
         self.replace_target_tokens = replace_target_tokens
         self.replace_prevent_patterns = replace_prevent_patterns
@@ -305,7 +305,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
                 explore_steps=self.explore_steps,
                 explore_skip_n=self.explore_skip_n,
                 explore_top_k=self.explore_top_k,
-                explore_decay_rate=self.explore_decay_rate,
+                explore_decay=self.explore_decay,
                 replace_source_tokens=self.replace_source_tokens,
                 replace_target_tokens=self.replace_target_tokens,
                 replace_prevent_patterns=self.replace_prevent_patterns,

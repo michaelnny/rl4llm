@@ -42,7 +42,7 @@ def default_config(mock_tokenizer):
         'explore_steps': 0,
         'explore_skip_n': 0,
         'explore_top_k': 20,
-        'explore_decay_rate': 0.9,
+        'explore_decay': 0.9,
         'replace_source_tokens': None,
         'replace_target_tokens': None,
         'replace_prevent_patterns': None,
@@ -114,8 +114,8 @@ def test_initialization_valid(default_config):
         ('explore_steps', -1, ValueError),
         ('explore_skip_n', -1, ValueError),
         ('explore_top_k', 0, ValueError),
-        ('explore_decay_rate', 0.0, ValueError),
-        ('explore_decay_rate', 1.1, ValueError),
+        ('explore_decay', 0.0, ValueError),
+        ('explore_decay', 1.1, ValueError),
         ('replace_source_tokens', 'not_a_list', TypeError),
         ('replace_target_tokens', 'not_a_list', TypeError),
         ('replace_prevent_patterns', 'not_a_list', TypeError),
@@ -353,7 +353,7 @@ def test_exploration_decay(default_config, input_ids, scores, sequence_indices):
     config['explore_steps'] = 3
     config['explore_skip_n'] = 0
     config['explore_top_k'] = 20
-    config['explore_decay_rate'] = 0.5
+    config['explore_decay'] = 0.5
     processor = HfExploreLogitsProcessor(**config)
 
     # Step 0
@@ -362,7 +362,7 @@ def test_exploration_decay(default_config, input_ids, scores, sequence_indices):
     scores_0 = processor(
         ids_0, scores.clone(), sequence_indices=sequence_indices
     )
-    k_0 = int(config['explore_top_k'] * (config['explore_decay_rate'] ** 0))
+    k_0 = int(config['explore_top_k'] * (config['explore_decay'] ** 0))
     assert (~torch.isinf(scores_0[0])).sum().item() == k_0  # 20
 
     # Step 1
@@ -371,7 +371,7 @@ def test_exploration_decay(default_config, input_ids, scores, sequence_indices):
     scores_1 = processor(
         ids_1, scores.clone(), sequence_indices=sequence_indices
     )
-    k_1 = int(config['explore_top_k'] * (config['explore_decay_rate'] ** 1))
+    k_1 = int(config['explore_top_k'] * (config['explore_decay'] ** 1))
     assert (~torch.isinf(scores_1[0])).sum().item() == k_1  # 10
 
     # Step 2
@@ -380,7 +380,7 @@ def test_exploration_decay(default_config, input_ids, scores, sequence_indices):
     scores_2 = processor(
         ids_2, scores.clone(), sequence_indices=sequence_indices
     )
-    k_2 = int(config['explore_top_k'] * (config['explore_decay_rate'] ** 2))
+    k_2 = int(config['explore_top_k'] * (config['explore_decay'] ** 2))
     assert (~torch.isinf(scores_2[0])).sum().item() == k_2  # 5
 
     # Step 3 (after exploration)

@@ -15,6 +15,9 @@ from rl4llm.envs.sgl_env import EnvState, InferenceEnv
 from rl4llm.generation.hf_explore_processor import HfExploreLogitsProcessor
 from rl4llm.generation.sgl_explore_procesor import SglExploreLogitProcessor
 
+# from rl4llm.patches.sgl_patch_custom_sampler import apply_patch_explore_sampler
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,7 +35,7 @@ class ExploreInferenceEnv(InferenceEnv):
         explore_steps: int,
         explore_top_k: int,
         explore_skip_n: int,
-        explore_decay_rate: float,
+        explore_decay: float,
         continue_special_tokens: List[str],
         continue_max_retry: int,
         continue_prob: float,
@@ -56,7 +59,7 @@ class ExploreInferenceEnv(InferenceEnv):
         self.explore_steps = explore_steps
         self.explore_top_k = explore_top_k
         self.explore_skip_n = explore_skip_n
-        self.explore_decay_rate = explore_decay_rate
+        self.explore_decay = explore_decay
         self.continue_special_tokens = continue_special_tokens
         self.continue_max_retry = continue_max_retry
         self.continue_prob = continue_prob
@@ -79,11 +82,10 @@ class ExploreInferenceEnv(InferenceEnv):
         # This logic is self-contained setup, so keeping it separate is reasonable.
         if explore_prob > 0 and random.random() < explore_prob:
             explore_logit_processor = SglExploreLogitProcessor(
-                temperatures=self.temperatures,
                 explore_steps=self.explore_steps,
-                explore_skip_n=self.explore_skip_n,
+                skip_n=self.explore_skip_n,
                 explore_top_k=self.explore_top_k,
-                explore_decay_rate=self.explore_decay_rate,
+                decay=self.explore_decay,
             )
             return explore_logit_processor.to_str()
         return None
@@ -186,6 +188,11 @@ class ExploreInferenceEnv(InferenceEnv):
         ground_truths = state.ground_truth
         batch_size = len(original_prompts)
 
+        custom_params = [
+            {'temperature': float(self.temperatures[i]), 'step': 0}
+            for i in range(batch_size)
+        ]
+
         # State tracking for each item in the batch
         # Stores the full accumulated completion text, including special tokens
         current_full_completions = [''] * batch_size
@@ -234,6 +241,7 @@ class ExploreInferenceEnv(InferenceEnv):
                 prompts=prompts_for_pass,
                 sampling_params=sampling_params,
                 custom_logit_processor=current_logit_processor,
+                custom_params=custom_params,
             )
 
             if len(output_batch) != len(prompts_for_pass):
@@ -371,7 +379,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
         explore_steps: int,
         explore_top_k: int,
         explore_skip_n: int,
-        explore_decay_rate: float,
+        explore_decay: float,
         replace_source_tokens: List[int],
         replace_target_tokens: List[int],
         replace_prevent_patterns: List[List[int]],
@@ -388,7 +396,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
         self.explore_steps = explore_steps
         self.explore_top_k = explore_top_k
         self.explore_skip_n = explore_skip_n
-        self.explore_decay_rate = explore_decay_rate
+        self.explore_decay = explore_decay
         self.replace_source_tokens = replace_source_tokens
         self.replace_target_tokens = replace_target_tokens
         self.replace_prevent_patterns = replace_prevent_patterns
@@ -457,7 +465,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
                 explore_steps=self.explore_steps,
                 explore_skip_n=self.explore_skip_n,
                 explore_top_k=self.explore_top_k,
-                explore_decay_rate=self.explore_decay_rate,
+                explore_decay=self.explore_decay,
                 replace_source_tokens=self.replace_source_tokens,
                 replace_target_tokens=self.replace_target_tokens,
                 replace_prevent_patterns=self.replace_prevent_patterns,

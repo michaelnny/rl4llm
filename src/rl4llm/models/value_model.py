@@ -54,8 +54,6 @@ class AutoModelWithValueHead(PreTrainedModel):
         """Initializes the model with a base model and a value head."""
         # Ensure config is PretrainedConfig (though AutoConfig usually inherits)
         if not isinstance(config, PretrainedConfig):
-            # If loaded via AutoConfig, it might be a dict-like object initially
-            # Let's try to load it properly if it looks like one
             try:
                 config = AutoConfig.for_model(**config.to_dict())
             except Exception as e:
@@ -104,13 +102,8 @@ class AutoModelWithValueHead(PreTrainedModel):
         # Define the value head
         self.value_head = nn.Linear(config.hidden_size, 1, bias=False)
 
-        # Note: Initialization of value_head happens in _init_weights
-        # self.post_init() is called by super().__init__(), no need to call it again
-
-    # Override _init_weights for custom initialization of the value head
     def _init_weights(self, module):
         """Initialize the weights."""
-        # Let the base class handle standard initializations first (optional, depends on desired behavior)
         # super()._init_weights(module) # Usually not needed unless modifying base behavior
 
         # Custom initialization for the value head
@@ -137,9 +130,6 @@ class AutoModelWithValueHead(PreTrainedModel):
             if module.bias is not None:
                 logger.info('Initializing value head bias to zeros.')
                 nn.init.zeros_(module.bias)
-        # You might need to initialize other custom layers here if you add more
-        # elif isinstance(module, (nn.LayerNorm, nn.Embedding)): # Example if needed
-        #     module.weight.data.fill_(1.0) # Example
 
     def get_input_embeddings(self):
         """Returns the input embeddings layer from the base model."""
@@ -158,7 +148,6 @@ class AutoModelWithValueHead(PreTrainedModel):
         """
         Performs a forward pass through the base model and the value head.
         """
-        # Ensure internal calls use return_dict=True for consistent output access
         kwargs['return_dict'] = True
         # Preserve user's request for hidden_states/attentions if passed
         output_hidden_states = kwargs.get('output_hidden_states', False)
@@ -173,9 +162,6 @@ class AutoModelWithValueHead(PreTrainedModel):
         )
 
         # Get the last hidden state
-        # BaseModelOutputWithPooling often has 'pooler_output', but for RL value heads,
-        # using the last hidden state of the sequence is more common.
-        # Check if last_hidden_state exists, otherwise log an error or adapt.
         if not hasattr(outputs, 'last_hidden_state'):
             raise AttributeError(
                 "The base model output does not contain 'last_hidden_state'. "
@@ -183,10 +169,7 @@ class AutoModelWithValueHead(PreTrainedModel):
             )
         last_hidden_state = outputs.last_hidden_state
 
-        # Pass the last hidden state through the value head
-        # Typically, for value prediction in RL, you might want the value for the *last* token
-        # or an average, depending on your setup. Here, we calculate it for all tokens.
-        # Squeeze the last dimension (size 1)
+        # Shape [batch_size, seq_len]
         values = self.value_head(last_hidden_state).squeeze(-1)
 
         return ValueOutput(
@@ -206,9 +189,7 @@ class AutoModelWithValueHead(PreTrainedModel):
             return
         # Pass gradient_checkpointing_kwargs if provided, otherwise default behavior
         if gradient_checkpointing_kwargs is None:
-            gradient_checkpointing_kwargs = {
-                'use_reentrant': True
-            }  # Default often needed
+            gradient_checkpointing_kwargs = {'use_reentrant': True}
 
         # Check if the base model actually has the method
         if hasattr(self.model, 'gradient_checkpointing_enable'):

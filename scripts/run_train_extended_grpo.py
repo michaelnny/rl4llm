@@ -180,7 +180,7 @@ def prepare_explore_processor_config(
         'explore_steps': grpo_config.explore_steps,
         'explore_top_k': grpo_config.explore_top_k,
         'explore_skip_n': explore_skip_n,
-        'explore_decay_rate': grpo_config.explore_decay_rate,
+        'explore_decay': grpo_config.explore_decay,
         'continue_special_tokens': special_tokens,
         'continue_max_retry': grpo_config.continue_max_retry,
         'continue_prob': grpo_config.continue_prob,

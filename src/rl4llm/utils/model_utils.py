@@ -49,11 +49,11 @@ def build_value_model_and_tokenizer(
         'local_files_only': True if checkpoint_path else False,
         'torch_dtype': torch_dtype,
         'use_cache': False,
-        # 'attn_implementation': (
-        #     'flash_attention_2' if flash_attention else 'eager'
-        # ),
-        # 'pad_token_id': tokenizer.pad_token_id,
-        # 'eos_token_id': tokenizer.eos_token_id,
+        'attn_implementation': (
+            'flash_attention_2' if flash_attention else 'eager'
+        ),
+        'pad_token_id': tokenizer.pad_token_id,
+        'eos_token_id': tokenizer.eos_token_id,
     }
 
     if load_in_4bit:

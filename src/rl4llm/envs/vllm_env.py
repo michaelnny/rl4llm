@@ -144,7 +144,7 @@ class vLLMExplorationLogitsProcessor:
         explore_steps: int = 0,
         explore_skip_n: int = 0,
         explore_top_k: int = 20,
-        explore_decay_rate: float = 0.9,
+        explore_decay: float = 0.9,
         replace_source_tokens: Optional[List[int]] = None,
         replace_target_tokens: Optional[List[int]] = None,
         replace_prevent_patterns: Optional[List[List[int]]] = None,
@@ -161,7 +161,7 @@ class vLLMExplorationLogitsProcessor:
         self.explore_steps: int = explore_steps
         self.explore_skip_n: int = explore_skip_n
         self.explore_top_k: int = explore_top_k
-        self.explore_decay_rate: float = explore_decay_rate
+        self.explore_decay: float = explore_decay
         self.replace_source_tokens: List[int] = replace_source_tokens or []
         self.replace_target_tokens: List[int] = replace_target_tokens or []
         self.replace_prevent_patterns: List[List[int]] = (
@@ -205,10 +205,7 @@ class vLLMExplorationLogitsProcessor:
             effective_steps = max(0, generated_len - self.explore_skip_n)
             current_explore_top_k = max(
                 10,
-                int(
-                    self.explore_top_k
-                    * (self.explore_decay_rate**effective_steps)
-                ),
+                int(self.explore_top_k * (self.explore_decay**effective_steps)),
             )
             explore_k = min(10, current_explore_top_k)
             exp_top_k_values, exp_top_k_indices = torch.topk(
@@ -289,7 +286,7 @@ class ExploreVLLMEnv(VLLMEnv):
         explore_steps: int,
         explore_top_k: int,
         explore_skip_n: int,
-        explore_decay_rate: float,
+        explore_decay: float,
         replace_source_tokens: List[int],
         replace_target_tokens: List[int],
         replace_prevent_patterns: List[List[int]],
@@ -306,7 +303,7 @@ class ExploreVLLMEnv(VLLMEnv):
         self.explore_steps = explore_steps
         self.explore_top_k = explore_top_k
         self.explore_skip_n = explore_skip_n
-        self.explore_decay_rate = explore_decay_rate
+        self.explore_decay = explore_decay
         self.replace_source_tokens = replace_source_tokens
         self.replace_target_tokens = replace_target_tokens
         self.replace_prevent_patterns = replace_prevent_patterns
@@ -365,7 +362,7 @@ class ExploreVLLMEnv(VLLMEnv):
                 explore_steps=self.explore_steps,
                 explore_skip_n=self.explore_skip_n,
                 explore_top_k=self.explore_top_k,
-                explore_decay_rate=self.explore_decay_rate,
+                explore_decay=self.explore_decay,
                 replace_source_tokens=self.replace_source_tokens,
                 replace_target_tokens=self.replace_target_tokens,
                 replace_prevent_patterns=self.replace_prevent_patterns,

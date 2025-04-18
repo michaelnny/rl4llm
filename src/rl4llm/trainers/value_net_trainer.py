@@ -12,41 +12,16 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.core.base_inference_client import InferenceClient
-from rl4llm.core.base_trainer import BaseRLTrainer, RewardTransform
+from rl4llm.core.base_trainer import (
+    BaseRLConfig,
+    BaseRLTrainer,
+    RewardTransform,
+)
 from rl4llm.envs import EpisodeData, LocalLLMEnv
 
 
-class ValueNetConfig(BaseModel):
+class ValueNetConfig(BaseRLConfig):
     """Value model config instance"""
-
-    """For sample generation"""
-    max_prompt_tokens: Optional[int] = Field(
-        1024,
-        ge=256,
-        le=10240,
-        description='Skip sample with prompt length greater than this to avoid peak memory spikes',
-    )
-    max_completion_tokens: Optional[int] = Field(
-        4096, ge=10, description='Maximum number of new tokens to generate'
-    )
-    temperature: Optional[float] = Field(
-        0.9, gt=0.0, le=1.0, description='Sampling temperature for generation'
-    )
-    repetition_penalty: Optional[float] = Field(
-        1.0, gt=0.0, le=2.0, description='Repetition penalty for generation'
-    )
-    top_p: Optional[float] = Field(
-        1.0, ge=0.0, le=1.0, description='Sampling top-p for generation'
-    )
-    top_k: Optional[int] = Field(
-        50, ge=-1, le=1000, description='Sampling top-k for generation'
-    )
-    group_size: int = Field(
-        8,
-        ge=4,
-        le=256,
-        description='Number of group outcomes for single question',
-    )
 
     """Training specific"""
     train_rollout_size: int = Field(
@@ -265,15 +240,12 @@ class ValueNetTrainer(BaseRLTrainer):
         returns = experience_batch.returns.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
-        # pred_values = pred_values.float()
-        # returns = returns.float()
-
         # Value loss
         losses = 0.5 * torch.square(returns - pred_values)
-        loss = self.dist_masked_mean(losses, loss_mask, dim=1).mean()
+        loss = self.masked_mean(losses, loss_mask, dim=1).mean()
 
         with torch.no_grad():
-            pred_error = self.dist_masked_mean(
+            pred_error = self.masked_mean(
                 torch.square(pred_values.detach() - returns.detach()),
                 loss_mask,
                 dim=1,
@@ -282,9 +254,9 @@ class ValueNetTrainer(BaseRLTrainer):
             var_explained = (1 - pred_error / (returns_var + 1e-8)).item()
 
         self.logger.log_scalar('train/loss', loss.detach().item())
-        self.logger.log_scalar('train/error', pred_error.detach().item())
-        self.logger.log_scalar('train/returns_var', returns_var.detach().item())
-        self.logger.log_scalar('train/var_explained', var_explained)
+        self.logger.log_scalar('value/error', pred_error.detach().item())
+        self.logger.log_scalar('value/returns_var', returns_var.detach().item())
+        self.logger.log_scalar('value/var_explained', var_explained)
 
         return loss
 

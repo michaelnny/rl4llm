@@ -234,11 +234,18 @@ def check_expressions_equivalent(
 
 
 def math_problem_grader(
-    full_answer: str, ground_truth: Union[str, float, int], **kwargs
+    full_answer: str,
+    ground_truth: Union[str, float, int],
+    max_score: Optional[float] = 1.0,
+    min_score: Optional[float] = -1.0,
+    **kwargs,
 ) -> float:
     """
     Enhanced grader that handles multiple answer formats and extraction methods.
     """
+
+    assert max_score > 0
+    assert max_score > min_score
 
     last_n = kwargs.get('last_n', 1)
 
@@ -246,22 +253,22 @@ def math_problem_grader(
         logger.warning(
             f"Missing full answer or ground_truth. {full_answer} {ground_truth}"
         )
-        return 0.0
+        return min_score
 
     logger.debug(f"Processing answer: {full_answer}")
     logger.debug(f"Ground truth: {ground_truth}")
 
     if check_repetition(full_answer):
-        return 0.0
+        return min_score
 
     # 1. Try boxed answers
     boxed_answer = extract_math_answer_from_last_boxed(full_answer)
     if boxed_answer is not None:
         logger.debug(f"Found boxed answer: {boxed_answer}")
         if check_expressions_equivalent(boxed_answer, ground_truth):
-            return 1.0
+            return max_score
         else:
-            return 0.0
+            return min_score
 
     # 2. Fallback to last N numerical values
     if last_n is not None and last_n >= 1:
@@ -269,6 +276,6 @@ def math_problem_grader(
         if number_list:
             for num in number_list:
                 if check_expressions_equivalent(num, ground_truth):
-                    return 1.0
+                    return max_score
 
-    return 0.0
+    return min_score

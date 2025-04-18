@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_run2_value_net_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_value_net_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -17,15 +17,15 @@ dataset:
 
 value_model:
   pretrained_model: "Qwen/Qwen2.5-0.5B"
-  checkpoint_path: "./runs/test_value_net_qwen2.5_0.5b_gsm8k/checkpoints/epoch_0"    
+  # checkpoint_path: "./runs/test_value_net_qwen2.5_0.5b_gsm8k/checkpoints/epoch_0"    
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
   model_max_length: 4000
 
 value_net_config:
-  train_rollout_size: 1024
-  num_epochs: 5
+  train_rollout_size: 20480
+  num_epochs: 2
   train_micro_batch_size: 8
   train_batch_size: 128
   gamma: 1.0                            # discount
@@ -50,7 +50,7 @@ deepspeed:
   optimizer:
     type: Adam
     params:
-      lr: 1.0e-6                   
+      lr: 5.0e-6                   
       betas: [0.9, 0.999]
       eps: 1.0e-8
       weight_decay: 0.0
@@ -59,8 +59,8 @@ deepspeed:
     params:
       warmup_num_steps: 20
       total_num_steps: 1000
-      warmup_min_lr: 1.0e-8
-      warmup_max_lr: 1.0e-6
+      warmup_min_lr: 1.0e-7
+      warmup_max_lr: 5.0e-6
   zero_optimization:
     stage: 3
     contiguous_gradients: true

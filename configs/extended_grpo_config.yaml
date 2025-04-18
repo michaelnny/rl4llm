@@ -28,7 +28,7 @@ grpo:
   max_steps: 100
   train_rollout_size: 512
   num_updates: 1
-  train_micro_batch_size: 8
+  train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
   clip_eps: 0.2                         # PPO-style policy clip parameter
@@ -38,7 +38,7 @@ grpo:
   entropy_loss_coef: 0.0
   sync_reference_interval: 0            # every N global steps
 
-  # for sample generation
+  # for train rollout
   max_prompt_tokens: 512                # skip sample question that's too long
   group_size: 16                        # for each sample we generate a group of answers
   max_completion_tokens: 800
@@ -63,18 +63,18 @@ grpo:
   max_temperature: 1.0
 
   # control rate of explore
-  explore_init_epsilon: 0.8             # exploration epsilon decay
+  explore_init_epsilon: 0.9             # exploration epsilon decay
   explore_min_epsilon: 0.0
   explore_decay_steps: 50
 
   # exploring start
   explore_steps: 10                     # initial start steps to do random sampling
   explore_top_k: 100                    # Top K tokens to random sample during initial start steps
-  explore_decay_rate: 0.9
+  explore_decay: 0.9
   
   # continue generation with failed outcomes
-  continue_prob: 0.5
-  continue_max_retry: 2                 # max number of retry by adding the special token and continue generation
+  continue_prob: 0.0
+  continue_max_retry: 0                 # max number of retry by adding the special token and continue generation
 
 
 deepspeed:
@@ -86,13 +86,12 @@ deepspeed:
   bf16:
     enabled: true
   optimizer:
-    type: Adam
+    type: AdamW
     params:
       lr: 1.0e-6                   
       betas: [0.9, 0.999]
       eps: 1.0e-8
       weight_decay: 0.0
-      adam_w_mode: true
   # scheduler:
   #   type: "WarmupDecayLR"
   #   params:

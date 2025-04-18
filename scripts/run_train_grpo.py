@@ -129,7 +129,12 @@ class AccuracyRewardFunction(BaseRewardFunction):
             )
 
         return [
-            math_problem_grader(full_answer=answer, ground_truth=truth)
+            math_problem_grader(
+                full_answer=answer,
+                ground_truth=truth,
+                min_score=-1.0,
+                max_score=1.0,
+            )
             for answer, truth in zip(completions, ground_truths)
         ]
 

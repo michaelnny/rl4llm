@@ -49,24 +49,26 @@ class MetricHandler(BaseHandler):
             np.percentile(x.astype(float), 99) if is_valid_array(x) else np.nan
         ),
         'count': lambda x: len(x) if isinstance(x, np.ndarray) else 0,
+        'accuracy_rate': lambda x: (
+            (np.sum(x == np.max(x)) / x.size) if is_valid_array(x) else np.nan
+        ),
     }
 
     BASE_DEFAULT_METRICS_AGGREGATION_CONFIG = {
         # Non-regex keywords
-        'prompt_length': ['mean', 'std'],
-        'completion_length': ['mean', 'std', 'p50', 'p90'],
-        'reward': ['mean', 'std', 'p50', 'p90'],
-        'accuracy_reward': ['mean', 'std', 'p50', 'p90'],
+        'prompt_length': ['mean', 'var'],
+        'completion_length': ['mean', 'var', 'p75', 'p90'],
+        'accuracy_reward': ['mean', 'var', 'accuracy_rate'],
         'loss': ['mean'],
         'learning_rate': ['last'],
         'lr': ['last'],
         'grad_norm': ['mean', 'max'],
         'gradient_norm': ['mean', 'max'],
         'entropy': ['mean'],
-        'kl': ['mean', 'std'],
-        'kl_divergence': ['mean', 'std'],
-        'return': ['mean', 'std'],
-        'advantage': ['mean', 'std'],
+        'kl': ['mean', 'var'],
+        'kl_divergence': ['mean', 'var'],
+        'return': ['mean', 'var'],
+        'advantage': ['mean', 'var'],
         'accuracy': ['mean'],
         'perplexity': ['mean'],
         'policy_update': ['last'],
@@ -74,7 +76,7 @@ class MetricHandler(BaseHandler):
         'reference_update': ['last'],
         'global_step': ['last'],
         # Regex patterns
-        r'.*_reward$': ['mean', 'std'],
+        r'.*_reward$': ['mean'],
         r'.*_count$': ['sum'],
         r'.*_total$': ['sum'],
         r'.*_update$': ['last'],
@@ -333,12 +335,38 @@ class MetricHandler(BaseHandler):
                         try:
                             computed_value = aggregator_func(values_array)
                             log_key = key
-                            if (
-                                method_name != 'last'
-                                or not key.startswith('time/')
-                                or not key.endswith('count')
-                                or not key.endswith('total')
-                            ) and len(aggregation_methods) > 1:
+
+                            # create a cleaner final key like '.../accuracy_rate'.
+                            if method_name == 'accuracy_rate' and key.endswith(
+                                '_reward'
+                            ):
+                                # Find the part before the reward name (e.g., "objective/train/")
+                                base_key_part = (
+                                    key.rsplit('/', 1)[0] + '/'
+                                    if '/' in key
+                                    else ''
+                                )
+                                # Construct the new key (e.g., "objective/train/accuracy_rate")
+                                # Assumes the part before _reward is the descriptive name
+                                reward_name = key.rsplit('/', 1)[-1]
+                                metric_name_base = reward_name[
+                                    : -len('_reward')
+                                ]
+                                log_key = (
+                                    f"{base_key_part}{metric_name_base}_rate"
+                                )
+                                self._logger.debug(
+                                    f"Applying specific naming rule for '{method_name}' on key '{key}', resulting in '{log_key}'."
+                                )
+
+                            # Avoid appending if only one method is used OR if it's the default 'mean' for simplicity.
+                            elif (
+                                len(aggregation_methods) > 1
+                                and log_key == key
+                                and not key.startswith('time/')
+                                and not key.endswith('count')
+                                and not key.endswith('total')
+                            ):
                                 log_key = f"{key}_{method_name}"
 
                             if np.isfinite(computed_value):
