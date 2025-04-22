@@ -541,8 +541,6 @@ class PPOTrainer(BaseRLTrainer):
         del batch_states, batch_actions, batch_attention_mask
 
         # Move results back to CPU for per-episode processing and storage
-        # batch_states = batch_states.cpu()
-        # batch_actions = batch_actions.cpu()
         batch_values = batch_values.cpu()
         batch_pi_logprobs = batch_pi_logprobs.cpu()
         batch_ref_logprobs = batch_ref_logprobs.cpu()
@@ -580,13 +578,11 @@ class PPOTrainer(BaseRLTrainer):
 
             # Rewards are all zero for non-terminal step, and use the normalized reward for terminal step
             seq_rewards = torch.zeros_like(actions, dtype=self.torch_dtype)
-            seq_rewards[-1] = rewards[i]
-            seq_rewards_for_adv = seq_rewards.clone()
-            seq_rewards_for_adv[-1] = normed_rewards[i]
+            seq_rewards[-1] = normed_rewards[i]
 
             # Compute GAE advantages for policy update
             returns, advantages = self.masked_returns_and_gae_advantages(
-                seq_rewards_for_adv,
+                seq_rewards,
                 values,
                 loss_mask,
                 self.config.gamma,

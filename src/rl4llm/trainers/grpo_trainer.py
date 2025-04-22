@@ -470,11 +470,9 @@ class GRPOTrainer(BaseRLTrainer):
             # Using policy logprobs ensures KL is zero if ref model not used
             batch_ref_logprobs = batch_pi_logprobs.clone()
 
-        del batch_attention_mask
+        del batch_states, batch_actions, batch_attention_mask
 
         # Move results back to CPU for per-episode processing and storage
-        batch_states = batch_states.cpu()
-        batch_actions = batch_actions.cpu()
         batch_pi_logprobs = batch_pi_logprobs.cpu()
         batch_ref_logprobs = batch_ref_logprobs.cpu()
 

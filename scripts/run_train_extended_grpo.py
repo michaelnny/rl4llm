@@ -158,8 +158,15 @@ def prepare_explore_processor_config(
 ) -> Dict:
     """Creates the exploration logits processor needed config"""
 
-    special_tokens = [
-        f' {kwd}' for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
+    replace_source_tokens = (
+        [tokenizer.encode('</think>')[0]]
+        if xml_format
+        else [tokenizer.eos_token_id]
+    )
+
+    replace_target_tokens = [
+        tokenizer.encode(f' {kwd}')[0]
+        for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
     ]
     explore_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
 
@@ -169,7 +176,7 @@ def prepare_explore_processor_config(
             grpo_config.max_temperature,
             steps=grpo_config.group_size,
         )
-        temperatures = torch.round(temperatures, decimals=2)
+        temperatures = torch.round(temperatures, decimals=4)
     else:
         temperatures = (
             torch.ones((grpo_config.group_size,)) * grpo_config.temperature
@@ -181,9 +188,11 @@ def prepare_explore_processor_config(
         'explore_top_k': grpo_config.explore_top_k,
         'explore_skip_n': explore_skip_n,
         'explore_decay': grpo_config.explore_decay,
-        'continue_special_tokens': special_tokens,
-        'continue_max_retry': grpo_config.continue_max_retry,
-        'continue_prob': grpo_config.continue_prob,
+        'replace_source_tokens': replace_source_tokens,
+        'replace_target_tokens': replace_target_tokens,
+        'replace_check_top_k': grpo_config.replace_check_top_k,
+        'replace_max_count': grpo_config.replace_max_count,
+        'replace_prob': grpo_config.replace_prob,
     }
 
 

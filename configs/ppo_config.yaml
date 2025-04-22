@@ -27,27 +27,27 @@ policy_model:
 
 value_model:
   pretrained_model: "Qwen/Qwen2.5-0.5B"
-  # checkpoint_path: "./runs/test_value_net_qwen2.5_0.5b_gsm8k/checkpoints/epoch_1"    
+  checkpoint_path: "./runs/test_value_net_qwen2.5_0.5b_gsm8k/checkpoints/epoch_1"    
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
   model_max_length: 4000
 
 ppo:
-  max_steps: 200
+  max_steps: 100
   train_rollout_size: 512
   policy_num_updates: 1
-  value_num_updates: 2
+  value_num_updates: 3
   train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
-  gae_lambda: 0.95
+  gae_lambda: 0.97
   clip_eps: 0.2                         # policy clip parameter
   value_clip_eps: 0.2                   # value clip parameter
-  normalize_rewards: false               
-  normalize_advantages: false
+  normalize_rewards: true               
+  normalize_advantages: true
   kl_loss_coef: 0.0
-  entropy_loss_coef: 0.0
+  entropy_loss_coef: 0.001
   sync_reference_interval: 0            # every N global steps
 
   # for sample generation
@@ -77,9 +77,9 @@ policy_deepspeed:
   bf16:
     enabled: true
   optimizer:
-    type: Adam
+    type: AdamW
     params:
-      lr: 1.0e-6                   
+      lr: 5.0e-7                   
       betas: [0.9, 0.999]
       eps: 1.0e-8
       weight_decay: 0.0
@@ -120,9 +120,9 @@ value_deepspeed:
   bf16:
     enabled: true
   optimizer:
-    type: Adam
+    type: AdamW
     params:
-      lr: 5.0e-6                   
+      lr: 1.0e-6                   
       betas: [0.9, 0.999]
       eps: 1.0e-8
       weight_decay: 0.0

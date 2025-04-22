@@ -8,10 +8,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from rl4llm.core.base_trainer import BaseRLConfig
 from rl4llm.envs import EpisodeData
-from rl4llm.trainers.grpo_trainer import GRPOTrainer, TransitionData
+from rl4llm.trainers.grpo_trainer import GRPOConfig, GRPOTrainer, TransitionData
 
 
-class ExtendedGRPOConfig(BaseRLConfig):
+class ExtendedGRPOConfig(GRPOConfig):
     """GRPO config instance for RL LLM"""
 
     filter_low_reward_std: Optional[bool] = Field(
@@ -57,13 +57,19 @@ class ExtendedGRPOConfig(BaseRLConfig):
     explore_decay: Optional[float] = Field(
         0.8, gt=0, le=1, description='Rate to decay explore top-k'
     )
-    continue_max_retry: Optional[int] = Field(
+    replace_check_top_k: Optional[int] = Field(
+        10,
+        ge=1,
+        le=20,
+        description='Check for special source token during token replacement',
+    )
+    replace_max_count: Optional[int] = Field(
         0,
         ge=0,
         le=10,
         description='Maximum number of continue generation by adding the special token and continue generation',
     )
-    continue_prob: Optional[float] = Field(
+    replace_prob: Optional[float] = Field(
         0,
         ge=0,
         le=1.0,
@@ -124,7 +130,7 @@ class ExtendedGRPOTrainer(GRPOTrainer):
             while local_count < local_rollout_size:
                 # control explore logit
                 custom_kwargs = {
-                    'explore_probability': self._get_exploration_epsilon(),
+                    'exploration_epsilon': self._get_exploration_epsilon(),
                 }
                 outputs = self.train_env.rollout(
                     policy_model, train_sampling_params, **custom_kwargs

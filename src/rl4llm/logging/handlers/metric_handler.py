@@ -56,8 +56,8 @@ class MetricHandler(BaseHandler):
 
     BASE_DEFAULT_METRICS_AGGREGATION_CONFIG = {
         # Non-regex keywords
-        'prompt_length': ['mean', 'var'],
-        'completion_length': ['mean', 'var', 'p75', 'p90'],
+        'prompt_length': ['mean', 'std'],
+        'completion_length': ['mean', 'std', 'p75', 'p90'],
         'accuracy_reward': ['mean', 'var', 'accuracy_rate'],
         'loss': ['mean'],
         'learning_rate': ['last'],

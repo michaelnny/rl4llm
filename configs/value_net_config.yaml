@@ -24,7 +24,7 @@ value_model:
   model_max_length: 4000
 
 value_net_config:
-  train_rollout_size: 20480
+  train_rollout_size: 8192
   num_epochs: 2
   train_micro_batch_size: 8
   train_batch_size: 128
@@ -48,7 +48,7 @@ deepspeed:
   bf16:
     enabled: true
   optimizer:
-    type: Adam
+    type: AdamW
     params:
       lr: 5.0e-6                   
       betas: [0.9, 0.999]
@@ -58,7 +58,7 @@ deepspeed:
     type: "WarmupDecayLR"
     params:
       warmup_num_steps: 20
-      total_num_steps: 1000
+      total_num_steps: 500
       warmup_min_lr: 1.0e-7
       warmup_max_lr: 5.0e-6
   zero_optimization:

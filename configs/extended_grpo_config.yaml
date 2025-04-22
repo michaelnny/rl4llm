@@ -32,7 +32,7 @@ grpo:
   train_batch_size: 128
   gamma: 1.0                            # discount
   clip_eps: 0.2                         # PPO-style policy clip parameter
-  group_reward_zero_mean: true         # group reward is normalized to have a zero mean without standard deviation scaling
+  group_reward_zero_mean: false         # group reward is normalized to have a zero mean without standard deviation scaling
   normalize_advantages: false
   kl_loss_coef: 0.0
   entropy_loss_coef: 0.0
@@ -40,7 +40,7 @@ grpo:
 
   # for train rollout
   max_prompt_tokens: 512                # skip sample question that's too long
-  group_size: 16                        # for each sample we generate a group of answers
+  group_size: 8                        # for each sample we generate a group of answers
   max_completion_tokens: 800
   temperature: 0.9                      # not used if using group_temperature
   repetition_penalty: 1.0
@@ -68,13 +68,14 @@ grpo:
   explore_decay_steps: 50
 
   # exploring start
-  explore_steps: 10                     # initial start steps to do random sampling
-  explore_top_k: 100                    # Top K tokens to random sample during initial start steps
+  explore_steps: 3                     # initial start steps to do random sampling
+  explore_top_k: 20                    # Top K tokens to random sample during initial start steps
   explore_decay: 0.9
   
   # continue generation with failed outcomes
-  continue_prob: 0.0
-  continue_max_retry: 0                 # max number of retry by adding the special token and continue generation
+  replace_check_top_k: 10
+  replace_prob: 0.0
+  replace_max_count: 0                 # max number of retry by adding the special token and continue generation
 
 
 deepspeed:

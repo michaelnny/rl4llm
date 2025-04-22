@@ -36,9 +36,11 @@ class ExploreInferenceEnv(InferenceEnv):
         explore_top_k: int,
         explore_skip_n: int,
         explore_decay: float,
-        continue_special_tokens: List[str],
-        continue_max_retry: int,
-        continue_prob: float,
+        replace_source_tokens: Optional[List[int]] = None,
+        replace_target_tokens: Optional[List[int]] = None,
+        replace_check_top_k: int = 10,
+        replace_max_count: int = 3,
+        replace_prob: float = 0.5,
         **kwargs,
     ):
 
@@ -48,34 +50,21 @@ class ExploreInferenceEnv(InferenceEnv):
         if any(t < 0 for t in temperatures):
             raise ValueError('temperature values cannot be negative')
         assert len(temperatures) >= 1
-        if not isinstance(continue_prob, float) or not (
-            0.0 <= continue_prob < 1.0
+        if not isinstance(replace_prob, float) or not (
+            0.0 <= replace_prob < 1.0
         ):
-            raise ValueError(
-                'continue_prob must be a float between (0.0, 1.0).'
-            )
+            raise ValueError('replace_prob must be a float between (0.0, 1.0).')
 
         self.temperatures = temperatures
         self.explore_steps = explore_steps
         self.explore_top_k = explore_top_k
         self.explore_skip_n = explore_skip_n
         self.explore_decay = explore_decay
-        self.continue_special_tokens = continue_special_tokens
-        self.continue_max_retry = continue_max_retry
-        self.continue_prob = continue_prob
-
-        self.accuracy_fn = None
-        for fn in self.reward_functions:
-            if fn.name == 'accuracy_reward':
-                self.accuracy_fn = fn
-                break
-
-        if not self.continue_special_tokens:
-            logger.warning('No special tokens provided for retry mechanism.')
-        if not self.accuracy_fn:
-            logger.warning(
-                "No 'accuracy_reward' function found. Retry mechanism will not activate."
-            )
+        self.replace_source_tokens = replace_source_tokens
+        self.replace_target_tokens = replace_target_tokens
+        self.replace_check_top_k = replace_check_top_k
+        self.replace_max_count = replace_max_count
+        self.replace_prob = replace_prob
 
     def _prepare_logits_processor(self, explore_prob: float) -> Optional[str]:
         """Creates the explore logits processor string if conditions are met."""
@@ -83,83 +72,16 @@ class ExploreInferenceEnv(InferenceEnv):
         if explore_prob > 0 and random.random() < explore_prob:
             explore_logit_processor = SglExploreLogitProcessor(
                 explore_steps=self.explore_steps,
-                skip_n=self.explore_skip_n,
                 explore_top_k=self.explore_top_k,
-                decay=self.explore_decay,
+                explore_skip_n=self.explore_skip_n,
+                explore_decay=self.explore_decay,
+                replace_source_tokens=self.replace_source_tokens,
+                replace_target_tokens=self.replace_target_tokens,
+                replace_check_top_k=self.replace_check_top_k,
+                replace_max_count=self.replace_max_count,
             )
             return explore_logit_processor.to_str()
         return None
-
-    def _finalize_outputs(
-        self,
-        final_texts: List[str],
-        last_outputs: List[Optional[Dict[str, Any]]],
-    ) -> Tuple[List[str], List[torch.Tensor], List[int]]:
-        """
-        Tokenizes final texts, handles EOS token addition based on finish reason,
-        and returns the required tuple format.
-
-        Args:
-            final_texts: The list of fully generated completion strings.
-            last_outputs: List containing the last output dictionary from the LLM
-                          for each item, or None if never generated (shouldn't happen here).
-
-        Returns:
-            Tuple containing:
-            - List of final completion strings.
-            - List of final completion token tensors (unpadded).
-            - List of final completion lengths.
-        """
-        completion_ids_list = []
-        completion_lengths = []
-        batch_size = len(final_texts)
-
-        for i in range(batch_size):
-            text = final_texts[i]
-            token_ids = self.tokenizer(
-                text,
-                padding=False,
-                truncation=False,
-                add_special_tokens=False,  # Usually False for completions
-            )['input_ids']
-
-            # Determine finish reason from the last relevant output for this item
-            finish_reason_type = None
-            if last_outputs[i]:  # Should always be populated by the end
-                meta_info = last_outputs[i].get('meta_info', {})
-                finish_reason = meta_info.get('finish_reason', {})
-                finish_reason_type = finish_reason.get('type')
-
-            # Append EOS if generation stopped naturally (not by length limit)
-            # and EOS is not already the last token.
-            if (
-                finish_reason_type != 'length'
-                and token_ids  # Check if list is not empty
-                and token_ids[-1] != self.tokenizer.eos_token_id
-            ):
-                token_ids.append(self.tokenizer.eos_token_id)
-
-            completion_ids_list.append(
-                torch.tensor(token_ids, dtype=torch.long)
-            )
-            completion_lengths.append(len(token_ids))
-
-        # The final texts are already assembled
-        return final_texts, completion_ids_list, completion_lengths
-
-    def _should_retry(self, is_correct: bool, retry_attempts_left: int) -> bool:
-        """Determine if an item should retry based on accuracy, retries left, and probability."""
-        # Retry if: not correct AND has attempts left AND retry mechanism enabled AND probability check passes
-        return (
-            not is_correct
-            and retry_attempts_left
-            >= 0  # Allows the last retry when attempts == 0
-            and self.continue_prob > 0.0
-            and self.accuracy_fn
-            is not None  # Ensure accuracy check is possible
-            and self.continue_special_tokens  # Ensure tokens are available
-            and random.random() < self.continue_prob
-        )
 
     def _generate_completions(
         self,
@@ -182,187 +104,46 @@ class ExploreInferenceEnv(InferenceEnv):
             - completion_tokens: List of final completion token tensors.
             - completion_lengths: List of final lengths for each completion.
         """
-        explore_prob = kwargs.get('explore_probability', 0.0)
-        logit_processors = self._prepare_logits_processor(explore_prob)
-        original_prompts = state.prompt
-        ground_truths = state.ground_truth
-        batch_size = len(original_prompts)
+        explore_eps = kwargs.get('exploration_epsilon', 0.0)
+        logit_processor = self._prepare_logits_processor(explore_eps)
 
-        custom_params = [
-            {'temperature': float(self.temperatures[i]), 'step': 0}
-            for i in range(batch_size)
-        ]
+        if explore_eps > 0:
+            batch_size = state.input_ids.shape[0]
+            batched_sampling_params = []
 
-        # State tracking for each item in the batch
-        # Stores the full accumulated completion text, including special tokens
-        current_full_completions = [''] * batch_size
-        retry_attempts_left = [self.continue_max_retry] * batch_size
-        is_correct = [False] * batch_size
-        # Stores the last raw output dict from the LLM for finish_reason check
-        last_llm_outputs: List[Optional[Dict[str, Any]]] = [None] * batch_size
-        # Indices of items still needing generation/retry
-        active_indices = list(range(batch_size))
+            for i in range(batch_size):
+                sp = {
+                    'temperature': 1.0,  # Set to 1.0 here, actual temp applied in processor
+                    'top_p': sampling_params.get('top_p', 0.95),
+                    'top_k': sampling_params.get('top_k', -1),
+                    'repetition_penalty': sampling_params.get(
+                        'repetition_penalty', 1.0
+                    ),
+                    'max_new_tokens': sampling_params.get(
+                        'max_new_tokens', 4096
+                    ),
+                    'custom_params': {
+                        'temperature': float(self.temperatures[i]),
+                        'step': 0,
+                        'replace_prob': self.replace_prob,
+                        'replace_count': 0,
+                    },
+                }
+                batched_sampling_params.append(sp)
+        else:
+            batched_sampling_params = sampling_params
 
-        current_pass = 0
-        # Max passes = initial pass + max retries
-        max_passes = 1 + self.continue_max_retry
-
-        while active_indices and current_pass < max_passes:
-            logger.debug(
-                f"Starting Pass {current_pass + 1}/{max_passes}. "
-                f"Active indices: {active_indices}"
-            )
-
-            # Prepare prompts for the active items in this pass
-            prompts_for_pass = []
-            # Keep track of original batch indices corresponding to prompts_for_pass
-            indices_in_pass = list(active_indices)
-
-            for original_idx in indices_in_pass:
-                # Prompt = Original Prompt + Accumulated Completion (incl. special tokens)
-                prompt = (
-                    original_prompts[original_idx]
-                    + current_full_completions[original_idx]
-                )
-                prompts_for_pass.append(prompt)
-
-            if not prompts_for_pass:
-                logger.warning(
-                    'No prompts generated for active indices. Breaking loop.'
-                )
-                break
-
-            # Generate completions for the active prompts
-            # Apply exploration only on the first pass
-            current_logit_processor = (
-                logit_processors if current_pass == 0 else None
-            )
-            output_batch = llm.generate(
-                prompts=prompts_for_pass,
-                sampling_params=sampling_params,
-                custom_logit_processor=current_logit_processor,
-                custom_params=custom_params,
-            )
-
-            if len(output_batch) != len(prompts_for_pass):
-                # Handle potential errors if LLM output size doesn't match input size
-                logger.error(
-                    f"LLM output batch size ({len(output_batch)}) mismatch with "
-                    f"input prompt batch size ({len(prompts_for_pass)}) in pass {current_pass + 1}. "
-                    f"Indices in pass: {indices_in_pass}. Active indices: {active_indices}."
-                    'Skipping update for this pass.'
-                )
-                # Decide how to handle this: break, continue, skip updates?
-                # For now, let's break to avoid index errors.
-                break  # Or implement more robust error handling
-
-            # Process results for each item generated in this pass
-            next_active_indices = []
-            for i, original_idx in enumerate(indices_in_pass):
-                output = output_batch[i]
-                # Newly generated text segment from this pass
-                generated_text_segment = output.get('text', '')
-                last_llm_outputs[original_idx] = (
-                    output  # Store latest output info
-                )
-
-                # Append the *newly* generated text segment
-                current_full_completions[original_idx] += generated_text_segment
-
-                # Check accuracy using the *full* current completion if retry is possible
-                item_is_correct = False
-                if self.accuracy_fn and self.continue_prob > 0.0:
-                    try:
-                        # Ensure ground truth exists for the index
-                        if original_idx >= len(ground_truths):
-                            raise IndexError(
-                                f"Ground truth index {original_idx} out of bounds."
-                            )
-
-                        accuracy_result = self.accuracy_fn(
-                            [
-                                current_full_completions[original_idx]
-                            ],  # Pass as list
-                            [ground_truths[original_idx]],  # Pass as list
-                        )
-                        # Ensure result format is as expected (e.g., list of floats)
-                        if (
-                            isinstance(accuracy_result, list)
-                            and len(accuracy_result) == 1
-                        ):
-                            accuracy = accuracy_result[0]
-                            item_is_correct = accuracy == 1.0
-                        else:
-                            logger.warning(
-                                f"Unexpected accuracy result format for index {original_idx}: {accuracy_result}. Treating as incorrect."
-                            )
-                            item_is_correct = False
-
-                        logger.debug(
-                            f" Index {original_idx}: Pass {current_pass + 1}. Accuracy Check. Correct: {item_is_correct}. "
-                            f"Full Completion: '{current_full_completions[original_idx]}'"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Error during accuracy check for index {original_idx} in pass {current_pass + 1}: {e}. Treating as incorrect."
-                        )
-                        item_is_correct = False
-                else:
-                    # If no accuracy function or retry disabled, consider it "correct" to stop retries
-                    item_is_correct = True
-                    logger.debug(
-                        f" Index {original_idx}: Pass {current_pass + 1}. No accuracy check needed/possible."
-                    )
-
-                is_correct[original_idx] = (
-                    item_is_correct  # Update final correctness state
-                )
-
-                # Decide whether to retry this item
-                should_retry_item = False
-                if not item_is_correct:
-                    # Decrement attempts *before* checking if retry is possible
-                    retry_attempts_left[original_idx] -= 1
-                    logger.debug(
-                        f" Index {original_idx}: Incorrect. Retries left: {retry_attempts_left[original_idx]}"
-                    )
-
-                    if self._should_retry(
-                        item_is_correct, retry_attempts_left[original_idx]
-                    ):
-                        should_retry_item = True
-                        logger.debug(f" Index {original_idx}: Will retry.")
-                    else:
-                        logger.debug(
-                            f" Index {original_idx}: Will not retry (max attempts, probability, or config)."
-                        )
-                else:
-                    logger.debug(
-                        f" Index {original_idx}: Correct. No retry needed."
-                    )
-
-                # If retrying, append a special token and keep it active
-                if should_retry_item:
-                    # *** THE KEY FIX: Append the special token to the stored completion ***
-                    special_token = random.choice(self.continue_special_tokens)
-                    current_full_completions[original_idx] += special_token
-                    logger.debug(
-                        f" Index {original_idx}: Appended special token '{special_token}'."
-                    )
-                    next_active_indices.append(original_idx)
-                # Otherwise, the item is finished for this generation cycle
-
-            # Update the list of active indices for the next pass
-            active_indices = next_active_indices
-            current_pass += 1
-
-        logger.info(f"Generation loop finished after {current_pass} passes.")
-        logger.debug(f"Final full completions: {current_full_completions}")
-
-        # Finalize outputs using the accumulated completions (which now include special tokens)
-        return self._finalize_outputs(
-            current_full_completions, last_llm_outputs
+        output = llm.generate(
+            prompts=state.prompt,
+            sampling_params=batched_sampling_params,
+            custom_logit_processor=logit_processor,
         )
+
+        # Unpack completions
+        completion_texts, completion_ids = self._process_llm_output(output)
+
+        actual_lengths = [len(item) for item in completion_ids]
+        return completion_texts, completion_ids, actual_lengths
 
 
 # --- Using local HF LLM ---
@@ -383,7 +164,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
         replace_source_tokens: List[int],
         replace_target_tokens: List[int],
         replace_prevent_patterns: List[List[int]],
-        replace_max_per_seq: int,
+        replace_max_count: int,
         replace_prob: float,
         **kwargs,
     ):
@@ -400,7 +181,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
         self.replace_source_tokens = replace_source_tokens
         self.replace_target_tokens = replace_target_tokens
         self.replace_prevent_patterns = replace_prevent_patterns
-        self.replace_max_per_seq = replace_max_per_seq
+        self.replace_max_count = replace_max_count
         self.replace_prob = replace_prob
 
         self.accuracy_fn = None
@@ -469,7 +250,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
                 replace_source_tokens=self.replace_source_tokens,
                 replace_target_tokens=self.replace_target_tokens,
                 replace_prevent_patterns=self.replace_prevent_patterns,
-                replace_max_per_seq=self.replace_max_per_seq,
+                replace_max_count=self.replace_max_count,
                 replace_prob=self.replace_prob,
                 correctness_callback=correctness_callback,
             )
