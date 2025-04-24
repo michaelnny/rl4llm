@@ -31,31 +31,37 @@ class ExploreInferenceEnv(InferenceEnv):
 
     def __init__(
         self,
-        temperatures: torch.Tensor,
+        group_temperature: torch.Tensor,
+        group_top_p: torch.Tensor,
         explore_steps: int,
         explore_top_k: int,
         explore_skip_n: int,
         explore_decay: float,
         replace_source_tokens: Optional[List[int]] = None,
         replace_target_tokens: Optional[List[int]] = None,
-        replace_check_top_k: int = 10,
+        replace_check_top_k: int = 1,
         replace_max_count: int = 3,
         replace_prob: float = 0.5,
         **kwargs,
     ):
 
         super().__init__(**kwargs)
-        if not isinstance(temperatures, torch.Tensor):
-            raise ValueError('temperature must be a tensor')
-        if any(t < 0 for t in temperatures):
-            raise ValueError('temperature values cannot be negative')
-        assert len(temperatures) >= 1
+        if not isinstance(group_temperature, torch.Tensor):
+            raise ValueError('group_temperature must be a tensor')
+        if not isinstance(group_top_p, torch.Tensor):
+            raise ValueError('group_top_p must be a tensor')
+        if any(t < 0 for t in group_temperature):
+            raise ValueError('group_temperature values cannot be negative')
+        if any(p < 0 for p in group_top_p):
+            raise ValueError('group_top_p values cannot be negative')
+        assert len(group_top_p) == len(group_temperature) >= 1
         if not isinstance(replace_prob, float) or not (
             0.0 <= replace_prob < 1.0
         ):
             raise ValueError('replace_prob must be a float between (0.0, 1.0).')
 
-        self.temperatures = temperatures
+        self.group_temperature = group_temperature
+        self.group_top_p = group_top_p
         self.explore_steps = explore_steps
         self.explore_top_k = explore_top_k
         self.explore_skip_n = explore_skip_n
@@ -107,31 +113,25 @@ class ExploreInferenceEnv(InferenceEnv):
         explore_eps = kwargs.get('exploration_epsilon', 0.0)
         logit_processor = self._prepare_logits_processor(explore_eps)
 
-        if explore_eps > 0:
-            batch_size = state.input_ids.shape[0]
-            batched_sampling_params = []
+        batch_size = state.input_ids.shape[0]
+        batched_sampling_params = []
 
-            for i in range(batch_size):
-                sp = {
-                    'temperature': 1.0,  # Set to 1.0 here, actual temp applied in processor
-                    'top_p': sampling_params.get('top_p', 0.95),
-                    'top_k': sampling_params.get('top_k', -1),
-                    'repetition_penalty': sampling_params.get(
-                        'repetition_penalty', 1.0
-                    ),
-                    'max_new_tokens': sampling_params.get(
-                        'max_new_tokens', 4096
-                    ),
-                    'custom_params': {
-                        'temperature': float(self.temperatures[i]),
-                        'step': 0,
-                        'replace_prob': self.replace_prob,
-                        'replace_count': 0,
-                    },
-                }
-                batched_sampling_params.append(sp)
-        else:
-            batched_sampling_params = sampling_params
+        for i in range(batch_size):
+            sp = {
+                'temperature': float(self.group_temperature[i]),
+                'top_p': float(self.group_top_p[i]),
+                'top_k': sampling_params.get('top_k', -1),
+                'repetition_penalty': sampling_params.get(
+                    'repetition_penalty', 1.0
+                ),
+                'max_new_tokens': sampling_params.get('max_new_tokens', 4096),
+                'custom_params': {
+                    'step': 0,
+                    'replace_prob': self.replace_prob,
+                    'replace_count': 0,
+                },
+            }
+            batched_sampling_params.append(sp)
 
         output = llm.generate(
             prompts=state.prompt,

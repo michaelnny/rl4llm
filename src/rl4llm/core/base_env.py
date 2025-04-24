@@ -293,22 +293,22 @@ class BaseEnv(ABC):
 
     def _tokenize_dataset(self, dataset: Dataset) -> Dataset:
         """
-        Tokenizes the 'prompt' column of the dataset.
+        Tokenizes the 'prompt' column of the dataset, skipping samples that exceed max_prompt_length.
 
         Args:
             dataset: The input dataset with a 'prompt' column.
 
         Returns:
             A new dataset with 'input_ids' and 'attention_mask' columns,
-            containing unpadded tokenized prompts. Original columns are kept.
+            containing unpadded tokenized prompts for valid samples. Original columns are kept.
         """
         logger.info(f"Rank {self.rank}: Starting dataset tokenization...")
 
-        def tokenize_fn(examples):
+        def tokenize_fn(item):
+            # Tokenize prompt without truncation
             tokenized = self.tokenizer(
-                examples['prompt'],
-                truncation=True,
-                max_length=self.max_prompt_length,
+                item['prompt'],
+                truncation=False,
                 padding=False,
             )
             return {
@@ -316,13 +316,25 @@ class BaseEnv(ABC):
                 'attention_mask': tokenized['attention_mask'],
             }
 
+        # Tokenize the dataset
         tokenized_dataset = dataset.map(
             tokenize_fn,
-            batched=True,
+            batched=False,
             num_proc=self.num_workers if self.num_workers > 0 else None,
             desc=f"Rank {self.rank} Tokenizing prompts",
         )
-        logger.info(f"Rank {self.rank}: Dataset tokenization complete.")
+
+        # Filter out samples where input_ids length exceeds max_prompt_length
+        tokenized_dataset = tokenized_dataset.filter(
+            lambda x: len(x['input_ids']) <= self.max_prompt_length,
+            num_proc=self.num_workers if self.num_workers > 0 else None,
+            desc=f"Rank {self.rank} Filtering long prompts",
+        )
+
+        logger.info(
+            f"Rank {self.rank}: Dataset tokenization complete. "
+            f"Kept {len(tokenized_dataset)} samples after filtering."
+        )
         return tokenized_dataset
 
     def _collate_fn(self, batch: List[Dict]) -> Dict[str, Any]:

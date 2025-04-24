@@ -20,21 +20,29 @@ class ExtendedGRPOConfig(GRPOConfig):
     )
 
     # enhancements to encourage exploration
-    group_temperature: Optional[bool] = Field(
-        False,
-        description='Use group temperatures to sample tokens during generation',
-    )
     min_temperature: Optional[float] = Field(
         0.6,
         ge=0.0,
         le=1.0,
-        description='Minimum sampling temperature for group temperature',
+        description='Minimum sampling temperature for group generation',
     )
     max_temperature: Optional[float] = Field(
         1.2,
         gt=0.0,
         le=2.0,
-        description='Maximum sampling temperature for group temperature',
+        description='Maximum sampling temperature for group generation',
+    )
+    min_top_p: Optional[float] = Field(
+        0.9,
+        ge=0.0,
+        le=1.0,
+        description='Minimum sampling top p for group generation',
+    )
+    max_top_p: Optional[float] = Field(
+        1.0,
+        gt=0.0,
+        le=1.0,
+        description='Maximum sampling top p for group generation',
     )
     explore_init_epsilon: Optional[float] = Field(
         0.0, ge=0.0, le=1.0, description='Initial exploration epsilon'

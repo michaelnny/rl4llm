@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_extended_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_extended_grpo_llama3.2_1b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -18,7 +18,7 @@ dataset:
   # max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-0.5B"
+  pretrained_model: "meta-llama/Llama-3.2-1B"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
@@ -40,10 +40,10 @@ grpo:
 
   # for train rollout
   max_prompt_tokens: 512                # skip sample question that's too long
-  group_size: 8                        # for each sample we generate a group of answers
-  max_completion_tokens: 800
-  temperature: 0.9                      # not used if using group_temperature
-  repetition_penalty: 1.0
+  group_size: 16                        # for each sample we generate a group of answers
+  max_completion_tokens: 1024
+  temperature: 0.9                      # not used
+  repetition_penalty: 1.0               # not used
   top_p: 0.95
   top_k: -1                             # -1 to disable
 
@@ -58,24 +58,25 @@ grpo:
   filter_low_reward_std: false          # filter out group samples with near identical rewards
 
   # exploration generation
-  group_temperature: true               # group temperature where we balance exploration and exploitation
+  min_top_p: 0.9
+  max_top_p: 1.0
   min_temperature: 0.6
-  max_temperature: 1.0
+  max_temperature: 1.2
 
   # control rate of explore
   explore_init_epsilon: 0.9             # exploration epsilon decay
   explore_min_epsilon: 0.0
-  explore_decay_steps: 50
+  explore_decay_steps: 100
 
   # exploring start
-  explore_steps: 3                     # initial start steps to do random sampling
-  explore_top_k: 20                    # Top K tokens to random sample during initial start steps
+  explore_steps: 1                     # initial start steps to do random sampling
+  explore_top_k: 100                    # Top K tokens to random sample during initial start steps
   explore_decay: 0.9
   
   # continue generation with failed outcomes
-  replace_check_top_k: 10
-  replace_prob: 0.0
-  replace_max_count: 0                 # max number of retry by adding the special token and continue generation
+  replace_check_top_k: 1
+  replace_prob: 0.5
+  replace_max_count: 2                 # max number of retry by adding the special token and continue generation
 
 
 deepspeed:
@@ -109,9 +110,9 @@ deepspeed:
     # offload_param:
     #   device: cpu
     #   pin_memory: false
-    # offload_optimizer:
-    #   device: cpu
-    #   pin_memory: false
+    offload_optimizer:
+      device: cpu
+      pin_memory: false
   activation_checkpointing:
     partition_activations: true
     cpu_checkpointing: true

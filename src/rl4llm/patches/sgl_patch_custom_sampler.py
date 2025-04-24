@@ -32,15 +32,6 @@ _DEFAULTS = dict(
 )
 
 
-# # Optional correctness fn
-# def correctness_callback(text: str) -> float:
-#     """Return <1.0 if sequence is 'incorrect'; 1.0 if OK."""
-#     return 0.0
-
-
-# ---------------------------------------------------------------------
-
-
 # ------ helpers ------------------------------------------------------
 def _uniform_topk_sample(row: torch.Tensor, k: int) -> int:
     k = min(k, row.size(0))
@@ -129,13 +120,6 @@ def apply_patch_explore_sampler(**user_cfg):
                 tok_id in cfg['replace_source_tokens']
                 and repl < cfg['replace_max']
                 and not _patterns_exist(hist, cfg['replace_prevent_patterns'])
-                # and (
-                #     correctness_callback is None
-                #     or correctness_callback(
-                #         samp_info.tokenizer.decode(hist + [tok_id])
-                #     )
-                #     < 1.0
-                # )
                 and random.random() < cfg['replace_prob']
             ):
 

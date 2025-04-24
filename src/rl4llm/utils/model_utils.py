@@ -39,8 +39,12 @@ def build_value_model_and_tokenizer(
     if model_max_length:
         tokenizer.model_max_length = model_max_length
 
-    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 1
-    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
+    if not tokenizer.pad_token_id:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.pad_token_id
+
+    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 0
+    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 0
 
     model_args = {
         'pretrained_model_name_or_path': (
@@ -96,8 +100,12 @@ def build_policy_model_and_tokenizer(
     if model_max_length:
         tokenizer.model_max_length = model_max_length
 
-    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 1
-    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 1
+    if not tokenizer.pad_token_id:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.pad_token_id
+
+    assert tokenizer.eos_token_id is not None and tokenizer.eos_token_id >= 0
+    assert tokenizer.pad_token_id is not None and tokenizer.pad_token_id >= 0
 
     model_args = {
         'pretrained_model_name_or_path': (

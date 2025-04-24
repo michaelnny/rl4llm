@@ -27,6 +27,11 @@ class InferenceEnv(BaseEnv):
     ) -> Union[str, torch.Tensor]:
         """Convert text to token IDs, ensuring EOS token if appropriate."""
         text = item['text']
+
+        if not text:
+            # Use some default text to ensure code will not break
+            text = "I can't help with this question."
+
         meta_info = item.get('meta_info')
         token_ids = list(
             self.tokenizer(

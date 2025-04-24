@@ -53,7 +53,7 @@ class BaseRLConfig(BaseModel):
     """For RL sample generation"""
     max_prompt_tokens: Optional[int] = Field(
         1024,
-        ge=256,
+        ge=20,
         le=10240,
         description='Skip sample with prompt length greater than this to avoid peak memory spikes',
     )

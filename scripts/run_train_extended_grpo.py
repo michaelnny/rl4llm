@@ -81,22 +81,28 @@ def parse_args():
     return args
 
 
-PROMPT_TEMPLATE_EASY = """Question:
+PROMPT_TEMPLATE = """Question:
 {question}
 
 Answer:
-Let's think step by step.
 """
 
-PROMPT_TEMPLATE = """<|im_start|>system
-You are a helpful assistant.<|im_end|>
-<|im_start|>user
-Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
+# PROMPT_TEMPLATE = """Question:
+# {question}
 
-Question:
-{question}<|im_end|>
-<|im_start|>assistant
-"""
+# Answer:
+# Let's think step by step.
+# """
+
+# PROMPT_TEMPLATE = """<|im_start|>system
+# You are a helpful assistant.<|im_end|>
+# <|im_start|>user
+# Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
+
+# Question:
+# {question}<|im_end|>
+# <|im_start|>assistant
+# """
 
 
 def apply_prompt_template(item: Dict, template: str) -> Dict:
@@ -170,20 +176,21 @@ def prepare_explore_processor_config(
     ]
     explore_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
 
-    if grpo_config.group_temperature:
-        temperatures = torch.linspace(
-            grpo_config.min_temperature,
-            grpo_config.max_temperature,
-            steps=grpo_config.group_size,
-        )
-        temperatures = torch.round(temperatures, decimals=4)
-    else:
-        temperatures = (
-            torch.ones((grpo_config.group_size,)) * grpo_config.temperature
-        )
+    group_temperature = torch.linspace(
+        grpo_config.min_temperature,
+        grpo_config.max_temperature,
+        steps=grpo_config.group_size,
+    )
+
+    group_top_p = torch.linspace(
+        grpo_config.min_top_p,
+        grpo_config.max_top_p,
+        steps=grpo_config.group_size,
+    )
 
     return {
-        'temperatures': temperatures,
+        'group_temperature': group_temperature,
+        'group_top_p': group_top_p,
         'explore_steps': grpo_config.explore_steps,
         'explore_top_k': grpo_config.explore_top_k,
         'explore_skip_n': explore_skip_n,
@@ -244,13 +251,8 @@ def main():
         model_config, torch_dtype
     )
 
-    if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
-        template = PROMPT_TEMPLATE_EASY
-    else:
-        template = PROMPT_TEMPLATE
-
     # Define the function with fixed template using partial
-    apply_prompt = partial(apply_prompt_template, template=template)
+    apply_prompt = partial(apply_prompt_template, template=PROMPT_TEMPLATE)
 
     train_dataset = train_dataset.map(apply_prompt)
     eval_dataset = eval_dataset.map(apply_prompt)

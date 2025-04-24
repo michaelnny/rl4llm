@@ -151,13 +151,13 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
                 self.target_tokens_tensor = self.target_tokens_tensor.to(device)
             target_tokens_dev = self.target_tokens_tensor
 
-        temps = []
         for row in range(bsz):
             cfg = custom_param_list[row]
             step = int(cfg.get('step', 0))
             replace_prob = float(cfg.get('replace_prob', 0.0))
             replace_count = int(cfg.get('replace_count', 0))
 
+            # Exploring start
             if (
                 self.explore_steps > 0
                 and self.explore_skip_n
@@ -177,6 +177,7 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
                 mask[top_k_indices] = 100.0
                 logits[row] = mask
 
+            # Special token 'replacement'
             if (
                 source_tokens_dev is not None
                 and target_tokens_dev is not None
@@ -198,15 +199,5 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
                     cfg['replace_count'] = replace_count + 1
 
             cfg['step'] = step + 1
-            temps.append(float(cfg.get('temperature', 1.0)))
-
-        temps_tensor = torch.tensor(
-            temps, dtype=logits.dtype, device=device
-        ).unsqueeze(1)
-        temps_tensor = torch.clamp(temps_tensor, min=1e-6)
-        finite_mask = torch.isfinite(logits)
-        logits[finite_mask] = (
-            logits[finite_mask] / temps_tensor.expand_as(logits)[finite_mask]
-        )
 
         return logits
