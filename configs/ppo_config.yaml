@@ -37,7 +37,7 @@ ppo:
   max_steps: 100
   train_rollout_size: 512
   policy_num_updates: 1
-  value_num_updates: 3
+  value_num_updates: 4
   train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
@@ -52,7 +52,7 @@ ppo:
 
   # for sample generation
   max_prompt_tokens: 512                # skip sample question that's too long
-  group_size: 8                         # for each sample we generate a group of answers
+  group_size: 16                         # for each sample we generate a group of answers
   max_completion_tokens: 800
   temperature: 0.9                      
   repetition_penalty: 1.0

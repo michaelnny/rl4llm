@@ -9,7 +9,7 @@ import torch
 from transformers import PreTrainedTokenizer
 
 # Objects under test
-from rl4llm.envs import EpisodeData
+from rl4llm.core.base_env import EpisodeData, EpisodeMetadata
 from rl4llm.trainers.extended_grpo_trainer import (
     ExtendedGRPOConfig,
     ExtendedGRPOTrainer,
@@ -115,19 +115,10 @@ def mock_logger() -> MagicMock:
 
 @pytest.fixture
 def mock_train_env() -> MagicMock:
-    """Provides a mock LocalLLMEnv for training."""
+    """Provides a mock HfMDPEnv for training."""
     env = MagicMock()
     env.reward_functions = {'reward1': Mock()}
     return env
-
-
-@pytest.fixture
-def mock_reward_transform_fn() -> MagicMock:
-    """Provides a mock reward transformation function."""
-    fn = MagicMock()
-    # Simple sum aggregation for testing
-    fn.side_effect = lambda rewards_dict: sum(rewards_dict.values())
-    return fn
 
 
 @pytest.fixture
@@ -140,15 +131,27 @@ def sample_episode_data(
     # Use the mock tokenizer's encode method
     prompt_tokens = mock_tokenizer.encode(prompt, return_tensors='pt')
     completion_tokens = mock_tokenizer.encode(completion, return_tensors='pt')
-    return EpisodeData(
-        prompt_text=prompt,
-        completion_text=completion,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
+    full_seq = torch.concat([prompt_tokens, completion_tokens])
+    states = full_seq[:-1]
+    actions = full_seq[1:]
+    loss_mask = torch.zeros_like(actions, dtype=torch.bool)
+    loss_mask[len(prompt_tokens) - 1 :] = True
+
+    meta = EpisodeMetadata(
+        prompt=prompt,
+        completion=completion,
         prompt_length=len(prompt_tokens),
         completion_length=len(completion_tokens),
         reward_dict={'reward1': 1.5},
-        meta_data={},
+        ground_truth='123',
+    )
+
+    return EpisodeData(
+        states=states,
+        actions=actions,
+        loss_mask=loss_mask,
+        terminal_reward=1.5,
+        metadata=meta,
     )
 
 
@@ -157,13 +160,13 @@ def sample_group_episodes(sample_episode_data) -> List[EpisodeData]:
     """Provides a list of sample EpisodeData instances for a group."""
     # Create slightly different rewards for testing normalization/std check
     ep1 = sample_episode_data.model_copy(deep=True)
-    ep1.reward_dict = {'reward1': 1.5}
+    ep1.terminal_reward = 1.5
     ep2 = sample_episode_data.model_copy(deep=True)
-    ep2.reward_dict = {'reward1': 2.0}
+    ep2.terminal_reward = 2.0
     ep3 = sample_episode_data.model_copy(deep=True)
-    ep3.reward_dict = {'reward1': 1.0}
+    ep3.terminal_reward = 1.0
     ep4 = sample_episode_data.model_copy(deep=True)
-    ep4.reward_dict = {'reward1': 2.5}
+    ep4.terminal_reward = 2.5
     return [ep1, ep2, ep3, ep4]
 
 
@@ -199,14 +202,9 @@ def grpo_trainer(
     mock_logger: MagicMock,
     mock_train_env: MagicMock,
     mock_ref_model: MagicMock,
-    mock_reward_transform_fn: MagicMock,
     mocker,
 ) -> ExtendedGRPOTrainer:
     """Provides a ExtendedGRPOTrainer instance with mocked dependencies."""
-    # Mock the reward transform function only if needed (multiple rewards)
-    reward_fn = None
-    if len(mock_train_env.reward_functions) > 1:
-        reward_fn = mock_reward_transform_fn
 
     mocker.patch(
         'rl4llm.core.distributed.DistributedOps.get_instance',
@@ -231,7 +229,6 @@ def grpo_trainer(
         log_config={'output_dir': '/tmp/test_rl_trainer'},
         train_env=mock_train_env,
         ref_model=mock_ref_model,
-        reward_transform_fn=reward_fn,
         seed=42,
     )
 
@@ -285,52 +282,3 @@ def test_get_exploration_epsilon_no_decay(grpo_trainer: ExtendedGRPOTrainer):
     grpo_trainer.config.explore_init_epsilon = 0.5
     grpo_trainer.global_step = 50
     assert grpo_trainer._get_exploration_epsilon() == 0.0
-
-
-def test_check_group_episodes(
-    grpo_trainer: ExtendedGRPOTrainer, sample_group_episodes: List[EpisodeData]
-):
-    """Tests the validity check for a group of episodes."""
-    # Mock the transform function to return rewards with sufficient std dev
-    with patch.object(
-        grpo_trainer,
-        'transform_batch_rewards',
-        return_value=torch.tensor([1.0, 2.0, 3.0, 4.0]),
-    ):
-        assert grpo_trainer._check_group_episodes(sample_group_episodes) is True
-
-
-@pytest.mark.parametrize(
-    'episodes, expected_result',
-    [
-        ([], False),  # Empty list
-        ([Mock()] * 3, False),  # List too short
-    ],
-)
-def test_check_group_episodes_invalid_size(
-    grpo_trainer: ExtendedGRPOTrainer, episodes: List, expected_result: bool
-):
-    """Tests the group check fails for invalid list sizes."""
-    assert grpo_trainer._check_group_episodes(episodes) is expected_result
-
-
-def test_check_group_episodes_low_std(
-    grpo_trainer: ExtendedGRPOTrainer, sample_group_episodes: List[EpisodeData]
-):
-    """Tests the group check fails for rewards with low standard deviation."""
-    # Mock transform to return rewards with very low std dev
-    low_std_rewards = torch.tensor([1.0, 1.0, 1.0, 1.01])  # Low std
-    grpo_trainer.group_reward_std_threshold = (
-        low_std_rewards.std(unbiased=False) + 0.01
-    )  # Ensure threshold is higher
-
-    with patch.object(
-        grpo_trainer, 'transform_batch_rewards', return_value=low_std_rewards
-    ):
-        assert (
-            grpo_trainer._check_group_episodes(sample_group_episodes) is False
-        )
-        grpo_trainer.logger.debug.assert_called_once()
-        grpo_trainer.logger.log_scalar.assert_called_with(
-            'other/skipped_sample_count', len(low_std_rewards)
-        )

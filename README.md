@@ -56,10 +56,10 @@ Here’s a simple diagram:
 └──────────────────────┘
 ```
 
-### How it works - InferenceEnv and InferenceClient
+### How it works - SglMDPEnv and InferenceClient
 
 > [!TIP]
-> Check the example at `scripts/run_train_grpo.py` on how to use the `SGLangClient` that uses HTTP to call the inference server, and an `InferenceEnv` that can handle sample generation.
+> Check the example at `scripts/run_train_grpo.py` on how to use the `SGLangClient` that uses HTTP to call the inference server, and an `SglMDPEnv` that can handle sample generation.
 
 > [!TIP]
 > Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-hosting mode`.

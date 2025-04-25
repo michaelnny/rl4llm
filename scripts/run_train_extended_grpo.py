@@ -13,10 +13,10 @@ from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.core.distributed import DistributedOps
 from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import (
-    ExploreInferenceEnv,
-    ExploreLocalLLMEnv,
-    InferenceEnv,
-    LocalLLMEnv,
+    ExploreHfMDPEnv,
+    ExploreSglMDPEnv,
+    HfMDPEnv,
+    SglMDPEnv,
 )
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
@@ -81,18 +81,21 @@ def parse_args():
     return args
 
 
-PROMPT_TEMPLATE = """Question:
-{question}
+PROMPT_TEMPLATE = """
+Question: {question}
 
-Answer:
+Answer: Let's think step by step.
 """
 
-# PROMPT_TEMPLATE = """Question:
-# {question}
 
-# Answer:
-# Let's think step by step.
+# PROMPT_TEMPLATE = """
+# Please first think about the reasoning process step by step, and conclude by providing your final answer within LaTeX-formatted box: \\boxed{{}}.
+
+# Question: {question}
+
+# Answer: Let's think step by step.
 # """
+
 
 # PROMPT_TEMPLATE = """<|im_start|>system
 # You are a helpful assistant.<|im_end|>
@@ -105,13 +108,13 @@ Answer:
 # """
 
 
-def apply_prompt_template(item: Dict, template: str) -> Dict:
+def apply_prompt_template(item: Dict) -> Dict:
     """Apply the prompt template for sample, assume the template has a 'question' place holder"""
     question = item['question']
 
-    prompt = template.format(question=question)
+    prompt = PROMPT_TEMPLATE.format(question=question)
 
-    return {'prompt': prompt}
+    return {'prompt': prompt.strip()}
 
 
 class AccuracyRewardFunction(BaseRewardFunction):
@@ -251,11 +254,8 @@ def main():
         model_config, torch_dtype
     )
 
-    # Define the function with fixed template using partial
-    apply_prompt = partial(apply_prompt_template, template=PROMPT_TEMPLATE)
-
-    train_dataset = train_dataset.map(apply_prompt)
-    eval_dataset = eval_dataset.map(apply_prompt)
+    train_dataset = train_dataset.map(apply_prompt_template)
+    eval_dataset = eval_dataset.map(apply_prompt_template)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
@@ -287,29 +287,34 @@ def main():
             )
             ref_model.eval()
 
+    # Create envs
+    env_args = {
+        'reward_functions': [AccuracyRewardFunction()],
+        'reward_transform_fn': reward_transform_fn,
+        'tokenizer': tokenizer,
+        'rank': local_rank,
+        'world_size': world_size,
+    }
+
     explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
     inference_client = None
 
-    env_reward_functions = [AccuracyRewardFunction()]
-    eval_env_cls = LocalLLMEnv
-    train_env_cls = ExploreLocalLLMEnv
+    eval_env_cls = HfMDPEnv
+    train_env_cls = ExploreHfMDPEnv
     if args.use_infer_server:
         inference_client = SGLangClient(
             host=args.infer_host,
             port=args.infer_port,
             cohost_mode=args.infer_cohost_mode,
         )
-        eval_env_cls = InferenceEnv
-        train_env_cls = ExploreInferenceEnv
+        eval_env_cls = SglMDPEnv
+        train_env_cls = ExploreSglMDPEnv
 
     train_env = train_env_cls(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
         group_size=grpo_config.group_size,
-        tokenizer=tokenizer,
-        reward_functions=env_reward_functions,
-        rank=local_rank,
-        world_size=world_size,
+        **env_args,
         **explore_env_args,
     )
 
@@ -317,10 +322,7 @@ def main():
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
-        tokenizer=tokenizer,
-        reward_functions=env_reward_functions,
-        rank=local_rank,
-        world_size=world_size,
+        **env_args,
     )
 
     trainer = ExtendedGRPOTrainer(
@@ -332,7 +334,6 @@ def main():
         eval_env=eval_env,
         inference_client=inference_client,
         ref_model=ref_model,
-        reward_transform_fn=reward_transform_fn,
         seed=seed,
     )
 

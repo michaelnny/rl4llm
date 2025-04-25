@@ -6,23 +6,17 @@ infrastructure for reinforcement learning algorithms with LLM environments,
 including training loop, checkpointing, model sync, and logging.
 """
 
-import logging
 import os
-import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from copy import deepcopy
 from typing import (
     Any,
-    Callable,
     Dict,
     Generator,
     List,
     Optional,
     Tuple,
-    TypeAlias,
-    TypedDict,
     Union,
 )
 
@@ -37,14 +31,8 @@ from rl4llm.constants import EVAL_PHASE, LOGGING_PHASES, TRAIN_PHASE
 from rl4llm.core.base_env import BaseEnv, EpisodeData
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.deepspeed_mixin import DeepSpeedUtilsMixin
-from rl4llm.core.distributed import DistributedOps
 from rl4llm.core.training_mixin import TrainingMixin
 from rl4llm.logging import LoggingManager
-
-# Define the custom type
-RewardTransform: TypeAlias = Optional[
-    Callable[[Dict[str, List[float]]], torch.Tensor]
-]
 
 
 class BaseRLConfig(BaseModel):
@@ -89,12 +77,6 @@ class BaseRLConfig(BaseModel):
         le=5120,
         description='Number of samples to collect before update policy',
     )
-    # num_updates: int = Field(
-    #     4,
-    #     ge=1,
-    #     le=5,
-    #     description='PPO update epochs for a collection of samples',
-    # )
     train_micro_batch_size: int = Field(
         4,
         ge=1,
@@ -107,9 +89,6 @@ class BaseRLConfig(BaseModel):
         le=1024,
         description='Global batch size across devices/ranks for training',
     )
-    # clip_eps: float = Field(
-    #     0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon'
-    # )
     gamma: float = Field(
         1.0,
         ge=0.0,
@@ -188,7 +167,6 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         eval_env: Optional[BaseEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
         value_engine: Optional[DeepSpeedEngine] = None,
-        reward_transform_fn: Optional[RewardTransform] = None,
         inference_client: Optional[InferenceClient] = None,
         seed: Optional[int] = 175,
         **kwargs: Any,
@@ -196,11 +174,6 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         """Initialize the base trainer with DistributedOps instance"""
 
         TrainingMixin.__init__(self)
-
-        if len(train_env.reward_functions) > 1 and not reward_transform_fn:
-            raise ValueError(
-                'Reward aggregator is required when using mixed reward functions.'
-            )
 
         self.config = config
         self.tokenizer = tokenizer
@@ -227,7 +200,6 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         ] = ref_model
 
         self.inference_client = inference_client
-        self.reward_transform_fn = reward_transform_fn
 
         self.global_step = 0
         self.policy_update_count = 0
@@ -411,48 +383,6 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 f"Failed to release inference engine memory, error: {str(e)}"
             )
 
-    def transform_batch_rewards(
-        self, episodes: List[EpisodeData]
-    ) -> torch.Tensor:
-        """
-        Aggregate and transform rewards for a batch of episodes, handling multiple reward functions.
-
-        Args:
-            episodes: List of EpisodeData objects containing reward dictionaries
-
-        Returns:
-            torch.Tensor containing transformed rewards
-        """
-        if not episodes:
-            raise ValueError('Episodes list cannot be empty')
-
-        try:
-            reward_names: List[str] = episodes[0].reward_dict.keys()
-        except AttributeError:
-            raise ValueError(
-                'EpisodeData objects must have reward_dict attribute'
-            )
-
-        num_episodes = len(episodes)
-        flattened: Dict[str, torch.Tensor] = {
-            name: torch.zeros(num_episodes, dtype=self.torch_dtype)
-            for name in reward_names
-        }
-
-        for i, ep in enumerate(episodes):
-            for name in reward_names:
-                flattened[name][i] = ep.reward_dict[name]
-
-        # Early return for single reward case
-        if len(reward_names) == 1:
-            return flattened[next(iter(reward_names))]
-
-        # Apply transformation function
-        try:
-            return self.reward_transform_fn(flattened)
-        except Exception as e:
-            raise RuntimeError(f"Reward transformation failed: {str(e)}")
-
     def sync_reference_model(self):
         """Copies current policy weights to reference model."""
         if not self.reference_model:
@@ -604,25 +534,19 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             # Save data to external file
             data_to_log = {
                 'rank': self.dist_ops.global_rank,
-                'timestamp': ep.timestamp,
-                'prompt_length': ep.prompt_length,
-                'completion_length': ep.completion_length,
-                'prompt_text': ep.prompt_text,
-                'completion_text': ep.completion_text,
-                **ep.reward_dict,
+                **ep.metadata.model_dump(),
             }
-            if ep.raw_data and 'ground_truth' in ep.raw_data:
-                data_to_log['ground_truth'] = ep.raw_data['ground_truth']
             self.logger.log_sample(phase, data_to_log, step)
 
             # Logging metrics
-            for k, v in ep.reward_dict.items():
+            for k, v in ep.metadata.reward_dict.items():
                 self.logger.log_scalar(f"{metric_key}/{k}", v)
             self.logger.log_scalar(
-                f"{token_metric_key}/completion_length", ep.completion_length
+                f"{token_metric_key}/completion_length",
+                ep.metadata.completion_length,
             )
             self.logger.log_scalar(
-                f"{token_metric_key}/prompt_length", ep.prompt_length
+                f"{token_metric_key}/prompt_length", ep.metadata.prompt_length
             )
 
     def extract_state_action_sequences(

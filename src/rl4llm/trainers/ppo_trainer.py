@@ -11,13 +11,9 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
+from rl4llm.core.base_env import BaseEnv, EpisodeData
 from rl4llm.core.base_inference_client import InferenceClient
-from rl4llm.core.base_trainer import (
-    BaseRLConfig,
-    BaseRLTrainer,
-    RewardTransform,
-)
-from rl4llm.envs import EpisodeData, LocalLLMEnv
+from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 
 
 class PPOConfig(BaseRLConfig):
@@ -118,11 +114,10 @@ class PPOTrainer(BaseRLTrainer):
         policy_engine: DeepSpeedEngine,
         value_engine: DeepSpeedEngine,
         log_config: Dict[str, Any],
-        train_env: LocalLLMEnv,
-        eval_env: Optional[LocalLLMEnv] = None,
+        train_env: BaseEnv,
+        eval_env: Optional[BaseEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
         inference_client: Optional[InferenceClient] = None,
-        reward_transform_fn: Optional[RewardTransform] = None,
         seed: Optional[int] = 175,
     ):
         """Initialize the PPO trainer instance"""
@@ -137,7 +132,6 @@ class PPOTrainer(BaseRLTrainer):
             ref_model=ref_model,
             value_engine=value_engine,
             inference_client=inference_client,
-            reward_transform_fn=reward_transform_fn,
             seed=seed,
         )
 
@@ -425,7 +419,7 @@ class PPOTrainer(BaseRLTrainer):
                 'top_p': self.config.top_p,
                 'top_k': self.config.top_k,
                 'repetition_penalty': self.config.repetition_penalty,
-                'num_return_sequences': 1,  # we handle the group size inside the LocalLLMEnv
+                'num_return_sequences': 1,  # we handle the group size inside the HfMDPEnv
                 'do_sample': True,
             }
 
@@ -477,26 +471,25 @@ class PPOTrainer(BaseRLTrainer):
             return []
 
         # Training specific pre-processing
-        # This is the terminal-step reward from outcome function or reward model
-        rewards = self.transform_batch_rewards(episodes).cpu()
+        terminal_rewards = torch.concat(
+            [torch.tensor([ep.terminal_reward]) for ep in episodes]
+        ).to(self.torch_dtype)
 
         if self.config.normalize_rewards:
-            normed_rewards = self.whiten(rewards, shift_mean=False)
+            normalized_terminal_rewards = self.whiten(
+                terminal_rewards, shift_mean=False
+            )
         else:
-            normed_rewards = rewards
+            normalized_terminal_rewards = terminal_rewards
 
         # Prepare batched sequences for model forward pass
-        sequence_lengths, state_sequences, action_sequences = (
-            self.extract_state_action_sequences(episodes)
-        )
-
         batch_states = pad_sequence(
-            state_sequences,
+            [ep.states for ep in episodes],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         ).to(self.device)
         batch_actions = pad_sequence(
-            action_sequences,
+            [ep.actions for ep in episodes],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         ).to(self.device)
@@ -548,41 +541,20 @@ class PPOTrainer(BaseRLTrainer):
         transitions = []
 
         for i, ep in enumerate(episodes):
-            seq_len = sequence_lengths[i]  # Total length (prompt + completion)
-            prompt_len = ep.prompt_length
-            completion_len = ep.completion_length
-
-            # Ensure sequence length calculation matches
-            if seq_len != prompt_len + completion_len:
-                self.logger.error(
-                    f"Episode {i}: Mismatch seq_len ({seq_len}) vs prompt ({prompt_len}) + completion ({completion_len})"
-                )
-                continue  # Skip this problematic episode
-
-            states = state_sequences[i]
-            actions = action_sequences[i]
+            states = ep.states
+            actions = ep.actions
+            loss_mask = ep.loss_mask
             values = batch_values[i, : len(actions)]
             pi_logprobs = batch_pi_logprobs[i, : len(actions)]
             ref_logprobs = batch_ref_logprobs[i, : len(actions)]
 
-            # Do not include the prompt tokens in the loss
-            # for example, if we have a sequence token ids: [1, 2, 3, 4, 5, 6, 7]
-            # where [1, 2, 3, 4] are the prompt tokens
-            # and [5, 6, 7] are the completion tokens
-            # the, the loss mask will be [0, 0, 0, 1, 1, 1]
-
-            loss_mask = torch.zeros_like(actions, dtype=torch.bool)
-            loss_mask[prompt_len - 1 :] = True
-
-            assert loss_mask.sum().item() == ep.completion_length
-
             # Rewards are all zero for non-terminal step, and use the normalized reward for terminal step
-            seq_rewards = torch.zeros_like(actions, dtype=self.torch_dtype)
-            seq_rewards[-1] = normed_rewards[i]
+            rewards = torch.zeros_like(actions, dtype=self.torch_dtype)
+            rewards[-1] = normalized_terminal_rewards[i]
 
             # Compute GAE advantages for policy update
             returns, advantages = self.masked_returns_and_gae_advantages(
-                seq_rewards,
+                rewards,
                 values,
                 loss_mask,
                 self.config.gamma,
@@ -590,13 +562,13 @@ class PPOTrainer(BaseRLTrainer):
             )
 
             # Don't mix advantage estimations for value function
-            # like GRPO, but we only use the MC returns to train value model
+            # this is exactly what GRPO does
             # returns = self.masked_monte_carlo_returns(
-            #     seq_rewards,
+            #     rewards,
             #     loss_mask,
             #     self.config.gamma,
             # )
-            # advantages = returns # <--- this is exactly what GRPO does
+            # advantages = returns
 
             assert (
                 states.shape

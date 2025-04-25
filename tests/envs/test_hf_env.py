@@ -5,11 +5,10 @@ import numpy as np
 import pytest
 import torch
 
-from rl4llm.envs.llm_env import (
-    BaseRewardFunction,
+from rl4llm.envs.hf_env import (
     EnvState,
     EpisodeData,
-    LocalLLMEnv,
+    HfMDPEnv,
 )
 
 # Dummy implementations for testing
@@ -58,8 +57,8 @@ def dummy_model():
 
 
 def test_initialization(dummy_dataset, mock_tokenizer, mock_reward_function):
-    """Tests LocalLLMEnv initializes correctly with valid parameters."""
-    env = LocalLLMEnv(
+    """Tests HfMDPEnv initializes correctly with valid parameters."""
+    env = HfMDPEnv(
         dataset=dummy_dataset,
         tokenizer=mock_tokenizer,
         reward_functions=[mock_reward_function],
@@ -75,7 +74,7 @@ def test_setup_tokenizer(dummy_dataset, mock_tokenizer, mock_reward_function):
     mock_tokenizer.pad_token = None
     mock_tokenizer.eos_token = '<eos>'
     mock_tokenizer.eos_token_id = 1
-    LocalLLMEnv(
+    HfMDPEnv(
         dataset=dummy_dataset,
         tokenizer=mock_tokenizer,
         reward_functions=[mock_reward_function],
@@ -88,7 +87,7 @@ def test_setup_tokenizer(dummy_dataset, mock_tokenizer, mock_reward_function):
 
 def test_collate_fn(dummy_dataset, mock_tokenizer, mock_reward_function):
     """Tests collate function pads inputs correctly."""
-    env = LocalLLMEnv(
+    env = HfMDPEnv(
         dataset=dummy_dataset,
         tokenizer=mock_tokenizer,
         reward_functions=[mock_reward_function],
@@ -118,7 +117,7 @@ def test_reset_and_grouped_state(
     dummy_dataset, mock_tokenizer, mock_reward_function
 ):
     """Tests reset returns an EnvState with repeated prompts."""
-    env = LocalLLMEnv(
+    env = HfMDPEnv(
         dataset=dummy_dataset,
         tokenizer=mock_tokenizer,
         reward_functions=[mock_reward_function],
@@ -136,7 +135,7 @@ def test_rollout(
     dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
 ):
     """Tests rollout returns valid EpisodeData objects."""
-    env = LocalLLMEnv(
+    env = HfMDPEnv(
         dataset=dummy_dataset,
         tokenizer=mock_tokenizer,
         reward_functions=[mock_reward_function],
@@ -147,16 +146,19 @@ def test_rollout(
     episodes = env.rollout(dummy_model, gen_args)
     assert len(episodes) == 4
     episode = episodes[0]
-    assert hasattr(episode, 'prompt_text')
-    assert hasattr(episode, 'completion_text')
-    assert hasattr(episode, 'reward_dict')
+    assert hasattr(episode, 'metadata')
+    assert hasattr(episode.metadata, 'prompt')
+    assert hasattr(episode.metadata, 'completion')
+    assert hasattr(episode.metadata, 'prompt_length')
+    assert hasattr(episode.metadata, 'completion_length')
+    assert hasattr(episode.metadata, 'reward_dict')
 
 
 def test_invalid_gen_args(
     dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
 ):
     """Tests rollout raises error when using num_return_sequences > 1."""
-    env = LocalLLMEnv(
+    env = HfMDPEnv(
         dataset=dummy_dataset,
         tokenizer=mock_tokenizer,
         reward_functions=[mock_reward_function],
@@ -173,7 +175,7 @@ def test_rollout_no_pad_tokens(
     dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
 ):
     """Tests rollout returns data with no pad tokens in prompt or completion."""
-    env = LocalLLMEnv(
+    env = HfMDPEnv(
         dataset=dummy_dataset,
         tokenizer=mock_tokenizer,
         reward_functions=[mock_reward_function],
@@ -183,24 +185,24 @@ def test_rollout_no_pad_tokens(
     gen_args = {'max_new_tokens': 5}
     episodes = env.rollout(dummy_model, gen_args)
     for ep in episodes:
-        prompt_tokens = (
-            ep.prompt_tokens.tolist()
-            if isinstance(ep.prompt_tokens, torch.Tensor)
-            else list(ep.prompt_tokens)
+        states = (
+            ep.states.tolist()
+            if isinstance(ep.states, torch.Tensor)
+            else list(ep.states)
         )
-        completion_tokens = (
-            ep.completion_tokens.tolist()
-            if isinstance(ep.completion_tokens, torch.Tensor)
-            else list(ep.completion_tokens)
+        actions = (
+            ep.actions.tolist()
+            if isinstance(ep.actions, torch.Tensor)
+            else list(ep.actions)
         )
         # Check that pad token (id 0) does not appear in prompt tokens
-        assert 0 not in prompt_tokens
+        assert 0 not in states
         # Check that pad token (id 0) does not appear in completion tokens
-        assert 0 not in completion_tokens
+        assert 0 not in actions
         # If EOS token (id 1) appears, allow it only at the very end of completions.
-        if 1 in completion_tokens:
-            if completion_tokens[-1] == 1:
-                assert all(token != 1 for token in completion_tokens[:-1])
+        if 1 in states:
+            if states[-1] == 1:
+                assert all(token != 1 for token in states[:-1])
             else:
                 pytest.fail(
                     'EOS token found in the middle of completion tokens.'
@@ -211,7 +213,7 @@ def test_rollout_rewards(
     dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
 ):
     """Tests rollout returns expected rewards from dummy reward function."""
-    env = LocalLLMEnv(
+    env = HfMDPEnv(
         dataset=dummy_dataset,
         tokenizer=mock_tokenizer,
         reward_functions=[mock_reward_function],
@@ -221,4 +223,4 @@ def test_rollout_rewards(
     gen_args = {'max_new_tokens': 5}
     episodes = env.rollout(dummy_model, gen_args)
     for ep in episodes:
-        assert ep.reward_dict.get('mock_reward_function') == 1.0
+        assert ep.metadata.reward_dict.get('mock_reward_function') == 1.0

@@ -6,8 +6,7 @@ from typing import List, Optional
 import torch
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from rl4llm.core.base_trainer import BaseRLConfig
-from rl4llm.envs import EpisodeData
+from rl4llm.core.base_env import EpisodeData
 from rl4llm.trainers.grpo_trainer import GRPOConfig, GRPOTrainer, TransitionData
 
 
@@ -123,7 +122,7 @@ class ExtendedGRPOTrainer(GRPOTrainer):
                 'top_p': self.config.top_p,
                 'top_k': self.config.top_k,
                 'repetition_penalty': self.config.repetition_penalty,
-                'num_return_sequences': 1,  # we handle the group size inside the LocalLLMEnv
+                'num_return_sequences': 1,  # we handle the group size inside the HfMDPEnv
                 'do_sample': True,
             }
 
@@ -167,16 +166,18 @@ class ExtendedGRPOTrainer(GRPOTrainer):
 
         if self.config.filter_low_reward_std:
             # Discard samples with rewards of low std, as they leads to zero advantages -> zero gradients
-            rewards = self.transform_batch_rewards(episodes).cpu()
+            terminal_rewards = torch.concat(
+                [torch.tensor([ep.terminal_reward]) for ep in episodes]
+            ).to(self.torch_dtype)
             if (
-                torch.std(rewards, unbiased=False)
+                torch.std(terminal_rewards, unbiased=False)
                 <= self.group_reward_std_threshold
             ):
                 self.logger.debug(
                     f"Skipping group samples with rewards of low std, minimum group reward std: {self.group_reward_std_threshold:.4f}"
                 )
                 self.logger.log_scalar(
-                    'other/skipped_sample_count', len(rewards)
+                    'other/skipped_sample_count', len(terminal_rewards)
                 )
                 return False
 

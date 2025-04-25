@@ -10,7 +10,7 @@ import torch
 
 from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import InferenceEnv, LocalLLMEnv
+from rl4llm.envs import HfMDPEnv, SglMDPEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
 from rl4llm.trainers.value_net_trainer import ValueNetConfig, ValueNetTrainer
@@ -71,31 +71,40 @@ def parse_args():
     return args
 
 
-PROMPT_TEMPLATE_EASY = """Question:
-{question}
+PROMPT_TEMPLATE = """
+Question: {question}
 
-Answer:
-Let's think step by step.
-"""
-
-PROMPT_TEMPLATE = """<|im_start|>system
-You are a helpful assistant.<|im_end|>
-<|im_start|>user
-Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
-
-Question:
-{question}<|im_end|>
-<|im_start|>assistant
+Answer: Let's think step by step.
 """
 
 
-def apply_prompt_template(item: Dict, template: str) -> Dict:
+# PROMPT_TEMPLATE = """
+# Please first think about the reasoning process step by step, and conclude by providing your final answer within LaTeX-formatted box: \\boxed{{}}.
+
+# Question: {question}
+
+# Answer: Let's think step by step.
+# """
+
+
+# PROMPT_TEMPLATE = """<|im_start|>system
+# You are a helpful assistant.<|im_end|>
+# <|im_start|>user
+# Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
+
+# Question:
+# {question}<|im_end|>
+# <|im_start|>assistant
+# """
+
+
+def apply_prompt_template(item: Dict) -> Dict:
     """Apply the prompt template for sample, assume the template has a 'question' place holder"""
     question = item['question']
 
-    prompt = template.format(question=question)
+    prompt = PROMPT_TEMPLATE.format(question=question)
 
-    return {'prompt': prompt}
+    return {'prompt': prompt.strip()}
 
 
 class AccuracyRewardFunction(BaseRewardFunction):
@@ -181,19 +190,11 @@ def main():
     if max_train_samples is not None and max_train_samples < len(train_dataset):
         train_dataset = train_dataset.shuffle().select(range(max_train_samples))
 
-    if max_test_samples is not None and max_test_samples < len(eval_dataset):
-        eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
+    # if max_test_samples is not None and max_test_samples < len(eval_dataset):
+    #     eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
-    if any([k in model_name for k in ['0.5B', '1B', '1.5B']]):
-        template = PROMPT_TEMPLATE_EASY
-    else:
-        template = PROMPT_TEMPLATE
-
-    # Define the function with fixed template using partial
-    apply_prompt = partial(apply_prompt_template, template=template)
-
-    train_dataset = train_dataset.map(apply_prompt)
-    eval_dataset = eval_dataset.map(apply_prompt)
+    train_dataset = train_dataset.map(apply_prompt_template)
+    # eval_dataset = eval_dataset.map(apply_prompt_template)
 
     value_model, tokenizer = build_value_model_and_tokenizer(
         model_config, torch_dtype
@@ -207,14 +208,14 @@ def main():
 
     env_reward_functions = [AccuracyRewardFunction()]
     inference_client = None
-    env_cls = LocalLLMEnv
+    env_cls = HfMDPEnv
     if args.use_infer_server:
         inference_client = SGLangClient(
             host=args.infer_host,
             port=args.infer_port,
             cohost_mode=args.infer_cohost_mode,
         )
-        env_cls = InferenceEnv
+        env_cls = SglMDPEnv
 
     train_env = env_cls(
         dataset=train_dataset,
