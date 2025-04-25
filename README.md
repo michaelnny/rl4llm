@@ -56,129 +56,12 @@ Here’s a simple diagram:
 └──────────────────────┘
 ```
 
-### How it works - SglMDPEnv and InferenceClient
-
 > [!TIP]
-> Check the example at `scripts/run_train_grpo.py` on how to use the `SGLangClient` that uses HTTP to call the inference server, and an `SglMDPEnv` that can handle sample generation.
+> Check the example at `scripts` on how to use the `SGLangClient` that uses HTTP to call the inference server, and an `SglMDPEnv` that can handle sample generation.
 
 > [!TIP]
 > Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-hosting mode`.
 
-
-### Example of GRPO Fine-Tuning with SGLang inference on a single server
-
-**Step 1**: Launch the SGLang inference server with `--enable-memory-saver`
-
-```bash
-PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
-    --model-path Qwen/Qwen2.5-0.5B \
-    --host localhost \
-    --port 30000 \
-    --tp 1 \
-    --chunked-prefill-size 8192 \
-    --mem-fraction-static 0.5 \
-    --enable-memory-saver
-```
-
-
-**Step 2**: Launch the training script and set the inference server arguments
-
-```bash
-PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_grpo.py \
-    --config-file ./configs/grpo_config.yaml \
-    --use-infer-server \
-    --infer-host localhost \
-    --infer-port 30000 \
-    --infer-cohost-mode
-```
-
-
-### Example of extend GRPO Fine-Tuning with SGLang inference
-
-**Step 1**: Launch the SGLang inference server with `--enable-memory-saver`
-
-```bash
-PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
-    --model-path Qwen/Qwen2.5-0.5B \
-    --host localhost \
-    --port 30000 \
-    --tp 1 \
-    --chunked-prefill-size 8192 \
-    --mem-fraction-static 0.5 \
-    --enable-memory-saver \
-    --enable-custom-logit-processor
-```
-
-
-**Step 2**: Launch the training script and set the inference server arguments
-
-```bash
-PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_extended_grpo.py \
-    --config-file ./configs/extended_grpo_config.yaml \
-    --use-infer-server \
-    --infer-host localhost \
-    --infer-port 30000 \
-    --infer-cohost-mode
-```
-
-
-
-### Example of PPO Fine-Tuning on GSM8K with Two-Stage Training with SGLang inference on a single server
-
-**Stage 1: Bootstrap Value Model**
-
-Initialize a random value head for the model. Run a fixed policy to generate rollout samples with rule-based rewards. Compute Monte Carlo (MC) returns and use them to train the value model.
-
-> [!IMPORTANT]
-> Ensure the value and policy models share the same tokenizer, as policy-generated tokens are used to train the value model.
-
-**Step 1**: Start inference server:
-```bash
-PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
-    --model-path Qwen/Qwen2.5-0.5B \
-    --host localhost \
-    --port 30000 \
-    --tp 1 \
-    --chunked-prefill-size 8192 \
-    --mem-fraction-static 0.5 \
-    --enable-memory-saver
-```
-
-**Step 2**: Start training script:
-```bash
-PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_value_net.py \
-    --config-file ./configs/value_net_config.yaml \
-    --use-infer-server \
-    --infer-host localhost \
-    --infer-port 30000 \
-    --infer-cohost-mode
-```
-
-**Stage 2: PPO Training**
-
-Begin PPO training using the value model checkpoint from Stage 1.
-
-**Step 1**: Start inference server:
-```bash
-PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
-    --model-path Qwen/Qwen2.5-0.5B \
-    --host localhost \
-    --port 30000 \
-    --tp 1 \
-    --chunked-prefill-size 8192 \
-    --mem-fraction-static 0.3 \
-    --enable-memory-saver
-```
-
-**Step 2**: Start training script:
-```bash
-PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_ppo.py \
-    --config-file ./configs/ppo_config.yaml \
-    --use-infer-server \
-    --infer-host localhost \
-    --infer-port 30000 \
-    --infer-cohost-mode
-```
 
 ## Sample Generation Environments
 
@@ -272,7 +155,7 @@ Launch an efficient inference server to accelerate sample generation. You can ei
 > If running SGLang inference and deepspeed training on the same server with co-hosting mode, make sure use the `--enable-memory-saver`, this requires install the `pip install torch-memory-saver`.
 
 > [!NOTE]
-> We use model checkpoint file to sync the weights between training instance and the SGLang inference engine. If you run inference engine and training in separate servers, make sure you have a shared file system between them. The weights saving path is defined at the `artifacts_path` when launching the trainer.
+> We use model checkpoint file to sync the weights between training instance and the SGLang inference engine. If you run inference engine and training in separate servers, make sure you have a shared file system between them. The weights saving path is defined at the `log_config.output_dir` when launching the trainer.
 
 
 ## Centralized Logging & Monitoring
@@ -287,7 +170,7 @@ More example of the logging manager can be found at the `BaseTrainer.train` and 
 
 ## Know Issues
 
-- When running SGLang with `--enable-memory-saver`, sometimes the server will hangs when we try to release/resume the memory. The most likely cause is due to CUDA OOM.
+- When running SGLang with `--enable-memory-saver`, sometimes the inference server will hangs when we try to release/resume the memory. The most likely cause is due to CUDA OOM, try reduce the memory fraction or using more powerful GPU.
 
 
 ## License
