@@ -1,18 +1,19 @@
 import logging
+from typing import Any, Dict, List, Sequence, TypeVar, Union
+
 import torch
 from torch.utils.data import Dataset, Subset
-from typing import List, Dict, Union, Sequence, TypeVar, Any
 
-from rl4llm.constants import LOGGER_NAME
-
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
 # Define a TypeVar to represent the input dataset type, making the return type more precise
-T = TypeVar("T", bound=Union[Dataset, Sequence[Any]])
+T = TypeVar('T', bound=Union[Dataset, Sequence[Any]])
 
 
-def shard_dataset(dataset: T, num_shards: int, shard_index: int) -> Union[T, Subset]:
+def shard_dataset(
+    dataset: T, num_shards: int, shard_index: int
+) -> Union[T, Subset]:
     """
     Shard a dataset (e.g., PyTorch Dataset, list) across multiple ranks.
 
@@ -46,30 +47,31 @@ def shard_dataset(dataset: T, num_shards: int, shard_index: int) -> Union[T, Sub
                 )
             # Fall through to return the original dataset
         else:
-            raise ValueError(f"num_shards must be a positive integer, got {num_shards}")
+            raise ValueError(
+                f"num_shards must be a positive integer, got {num_shards}"
+            )
 
     # Only validate shard_index if actual sharding occurs (num_shards > 1)
     # If num_shards == 1, the check above already ensures shard_index is 0.
     if num_shards > 1:
-        if not isinstance(shard_index, int) or not (0 <= shard_index < num_shards):
+        if not isinstance(shard_index, int) or not (
+            0 <= shard_index < num_shards
+        ):
             raise ValueError(
                 f"shard_index must be an integer in the range [0, {num_shards - 1}], got {shard_index}"
             )
 
     # --- Handle No Sharding Case ---
     if num_shards == 1:
-        # Validation ensures shard_index is 0 here
-        return dataset  # Return the original dataset object
+        return dataset
 
     # --- Sharding Logic ---
     try:
         total_length = len(dataset)
     except TypeError:
-        # Re-raise with a clearer message if needed, though type hints help
-        raise TypeError("Input dataset must support len()")
+        raise TypeError('Input dataset must support len()')
 
     if total_length == 0:
-        # Return an empty subset if the original dataset is empty
         return Subset(dataset, [])
 
     # Calculate shard size and indices
@@ -77,13 +79,11 @@ def shard_dataset(dataset: T, num_shards: int, shard_index: int) -> Union[T, Sub
     start_index = shard_index * shard_size
     # Last shard takes any extra samples
     end_index = (
-        total_length if shard_index == num_shards - 1 else start_index + shard_size
+        total_length
+        if shard_index == num_shards - 1
+        else start_index + shard_size
     )
 
-    # Create indices for the subset
-    # range handles start >= end correctly (returns empty sequence)
-    # Subset handles indices out of bounds gracefully, but validation prevents this.
     indices = list(range(start_index, end_index))
 
-    # Return the subset for the calculated indices
     return Subset(dataset, indices)

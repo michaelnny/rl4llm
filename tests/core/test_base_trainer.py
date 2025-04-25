@@ -7,14 +7,14 @@ import torch
 from deepspeed import DeepSpeedEngine
 
 from rl4llm.constants import TRAIN_PHASE
-from rl4llm.core.base_trainer import RLConfig, RLTrainer
-from rl4llm.envs import EpisodeData
+from rl4llm.core.base_env import EpisodeData, EpisodeMetadata
+from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 
 
 @pytest.fixture
-def dummy_config():
-    """Provides a minimal RLConfig for testing."""
-    config = MagicMock(spec=RLConfig)
+def mock_config():
+    """Provides a minimal BaseRLConfig for testing."""
+    config = MagicMock(spec=BaseRLConfig)
     config.train_rollout_size = 8
     config.kl_loss_coef = 0.0
     config.max_steps = 1
@@ -26,7 +26,7 @@ def dummy_config():
 
 
 @pytest.fixture
-def dummy_policy_engine():
+def mock_policy_engine():
     """Mocks DeepSpeed policy engine."""
     engine = MagicMock()
     engine.zero_optimization_stage.return_value = 2
@@ -35,8 +35,8 @@ def dummy_policy_engine():
 
 
 @pytest.fixture
-def dummy_dist_manager():
-    """Mocks a simple DistributedManager."""
+def mock_dist_ops():
+    """Mocks a simple DistributedOps."""
     dist = MagicMock()
     dist.world_size = 1
     dist.is_master = True
@@ -45,7 +45,7 @@ def dummy_dist_manager():
 
 
 @pytest.fixture
-def dummy_logger():
+def mock_logger():
     """Mocks LoggingManager."""
     logger = MagicMock()
     logger.timer.return_value.__enter__.return_value = None
@@ -61,15 +61,28 @@ def sample_episode_data() -> EpisodeData:
 
     prompt_tokens = torch.tensor([1, 2, 3])
     completion_tokens = torch.tensor([4, 5, 6])
-    return EpisodeData(
-        prompt_text=prompt,
-        completion_text=completion,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
+
+    full_seq = torch.concat([prompt_tokens, completion_tokens])
+    states = full_seq[:-1]
+    actions = full_seq[1:]
+    loss_mask = torch.zeros_like(actions, dtype=torch.bool)
+    loss_mask[len(prompt_tokens) - 1 :] = True
+
+    meta = EpisodeMetadata(
+        prompt=prompt,
+        completion=completion,
         prompt_length=len(prompt_tokens),
         completion_length=len(completion_tokens),
         reward_dict={'reward1': 1.5},
-        meta_data={},
+        ground_truth='123',
+    )
+
+    return EpisodeData(
+        states=states,
+        actions=actions,
+        loss_mask=loss_mask,
+        terminal_reward=1.5,
+        metadata=meta,
     )
 
 
@@ -78,13 +91,13 @@ def sample_group_episodes(sample_episode_data) -> List[EpisodeData]:
     """Provides a list of sample EpisodeData instances for a group."""
     # Create slightly different rewards for testing normalization/std check
     ep1 = sample_episode_data.model_copy(deep=True)
-    ep1.reward_dict = {'reward1': 1.5}
+    ep1.terminal_reward = 1.5
     ep2 = sample_episode_data.model_copy(deep=True)
-    ep2.reward_dict = {'reward1': 2.0}
+    ep2.terminal_reward = 2.0
     ep3 = sample_episode_data.model_copy(deep=True)
-    ep3.reward_dict = {'reward1': 1.0}
+    ep3.terminal_reward = 1.0
     ep4 = sample_episode_data.model_copy(deep=True)
-    ep4.reward_dict = {'reward1': 2.5}
+    ep4.terminal_reward = 2.5
     return [ep1, ep2, ep3, ep4]
 
 
@@ -99,19 +112,16 @@ def mock_reward_transform_fn() -> MagicMock:
 
 @pytest.fixture
 def trainer_base(
-    dummy_config, dummy_policy_engine, dummy_dist_manager, dummy_logger
+    mock_config, mock_policy_engine, mock_dist_ops, mock_logger, mocker
 ):
-    """Provides a dummy RLTrainer subclass for testing."""
+    """Provides a dummy BaseRLTrainer subclass for testing."""
 
-    class DummyTrainer(RLTrainer):
+    class DummyTrainer(BaseRLTrainer):
         def initialize_trainer(self):
             pass
 
         def generate_experience(self):
             return ['exp']
-
-        def compute_loss(self, experience_batch, **kwargs):
-            return torch.tensor(0.0), {}
 
         def build_train_loader(self, experience):
             return ['batch']
@@ -122,17 +132,56 @@ def trainer_base(
         def train_step(self, train_dataloader):
             pass
 
-    return DummyTrainer(
-        config=dummy_config,
+        def can_offload_state(self, model):
+            return getattr(model, 'can_offload', False)
+
+        def is_cohost_inference_engine(self):
+            return False
+
+        def save_checkpoint(self, tag):
+            pass
+
+        def clean_up(self):
+            pass
+
+    mocker.patch(
+        'rl4llm.core.distributed.DistributedOps.get_instance',
+        return_value=mock_dist_ops,
+        autospec=True,
+    )
+    # mocker.patch(
+    #     "rl4llm.logging.logging_manager.LoggingManager",
+    #     return_value=mock_logger,
+    #     autospec=True
+    # )
+    mocker.patch(
+        'rl4llm.core.base_trainer.LoggingManager',
+        return_value=mock_logger,
+        autospec=True,
+    )
+
+    trainer = DummyTrainer(
+        config=mock_config,
         tokenizer=MagicMock(),
-        policy_engine=dummy_policy_engine,
-        dist_manager=dummy_dist_manager,
-        logger=dummy_logger,
-        artifacts_path='/tmp/test_rl_trainer',
+        policy_engine=mock_policy_engine,
+        log_config={'output_dir': '/tmp/test_rl_trainer'},
         train_env=MagicMock(),
         eval_env=MagicMock(),
         inference_client=MagicMock(),
     )
+
+    return trainer
+
+
+@pytest.fixture
+def mock_model():
+    """Provides a mock PyTorch model with configurable attributes."""
+    model = MagicMock(spec=torch.nn.Module)
+    model.to.return_value = model
+    model.eval = MagicMock()
+    model.train = MagicMock()
+    model.can_offload = False
+    return model
 
 
 def test_log_batch_episodes_invalid_phase(trainer_base):
@@ -143,39 +192,167 @@ def test_log_batch_episodes_invalid_phase(trainer_base):
 
 def test_log_batch_episodes_valid(trainer_base):
     """Logs sample and scalar for valid training episode."""
-    episode = EpisodeData(
-        prompt_text='a',
-        prompt_tokens=torch.tensor([1]),
-        completion_text='b',
-        completion_tokens=torch.tensor([2]),
+
+    meta = EpisodeMetadata(
+        prompt='a',
+        completion='b',
         prompt_length=1,
         completion_length=2,
-        reward_dict={'reward': 1.0},
-        raw_data={'ground_truth': 'gt'},
+        reward_dict={'reward1': 1.5},
+        ground_truth='123',
+    )
+
+    episode = EpisodeData(
+        states=torch.tensor([1]),
+        actions=torch.tensor([1]),
+        loss_mask=torch.tensor([1]),
+        terminal_reward=torch.tensor([1]),
+        metadata=meta,
     )
     trainer_base.log_batch_episodes(TRAIN_PHASE, [episode], 1)
     trainer_base.logger.log_sample.assert_called()
     trainer_base.logger.log_scalar.assert_called()
 
 
-def test_prepare_modes(trainer_base):
-    """Switches between eval and train modes."""
-    trainer_base.policy_engine.eval = MagicMock()
-    trainer_base.policy_engine.train = MagicMock()
-    trainer_base.reference_model = MagicMock()
-    trainer_base.reference_model.to.return_value = trainer_base.reference_model
+def test_configure_model(mock_model, trainer_base):
+    """Test _configure_model for device movement, mode setting, and state management."""
+    # Test with no model
+    trainer_base._configure_model(
+        None, 'cpu', state_action='offload', mode='eval'
+    )
+    mock_model.to.assert_not_called()
 
+    # Test device movement and eval mode
+    trainer_base._configure_model(mock_model, 'cuda', mode='eval')
+    mock_model.to.assert_called_once_with('cuda')
+    mock_model.eval.assert_called_once()
+    mock_model.train.assert_not_called()
+
+    # Reset mocks
+    mock_model.to.reset_mock()
+    mock_model.eval.reset_mock()
+
+    # Test training mode
+    trainer_base._configure_model(mock_model, 'cpu', mode='train')
+    mock_model.to.assert_called_once_with('cpu')
+    mock_model.train.assert_called_once()
+    mock_model.eval.assert_not_called()
+
+    # Test state offloading
+    mock_model.can_offload = True
+    mock_model.offload_states = MagicMock()
+    trainer_base._configure_model(mock_model, 'cuda', state_action='offload')
+    mock_model.offload_states.assert_called_once()
+
+    # Test state reloading
+    mock_model.reload_states = MagicMock()
+    trainer_base._configure_model(mock_model, 'cuda', state_action='reload')
+    mock_model.reload_states.assert_called_once()
+
+
+def test_release_inference_memory(trainer_base):
+    """Test _release_inference_memory for co-hosting and non-co-hosting scenarios."""
+    # Non-co-hosting: no memory release
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=False)
+    trainer_base._release_inference_memory()
+    trainer_base.inference_client.release_memory.assert_not_called()
+    assert not trainer_base.called_release_inference_memory
+
+    # Co-hosting: memory release called
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=True)
+    trainer_base._release_inference_memory()
+    trainer_base.inference_client.release_memory.assert_called_once()
+    assert trainer_base.called_release_inference_memory is True
+
+    # Co-hosting with error
+    trainer_base.called_release_inference_memory = None
+    trainer_base.inference_client.release_memory.side_effect = Exception(
+        'Memory error'
+    )
+    with pytest.raises(
+        RuntimeError,
+        match='Failed to release inference engine memory, error: Memory error',
+    ):
+        trainer_base._release_inference_memory()
+
+
+def test_prepare_for_generation(trainer_base, mock_model):
+    """Test _prepare_for_generation for model configuration and cleanup."""
+    trainer_base.reference_model = mock_model
+    trainer_base.value_engine = mock_model
+    trainer_base.policy_engine = mock_model
+    trainer_base.clean_up = MagicMock()
+    trainer_base.device = 'cuda'  # Ensure self.device is 'cuda'
+
+    # Non-co-hosting scenario
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=False)
     trainer_base._prepare_for_generation()
-    trainer_base.policy_engine.eval.assert_called()
+    calls = [
+        mock_model.to.call_args_list[0][0][0],  # reference_model to cpu
+        mock_model.to.call_args_list[1][0][0],  # policy_engine to cuda
+        mock_model.to.call_args_list[2][0][0],  # value_engine to cpu
+    ]
+    assert calls == ['cpu', 'cuda', 'cpu']
+    assert mock_model.eval.call_count == 2  # policy_engine and reference_model
+    trainer_base.clean_up.assert_called_once()
+
+    # Co-hosting scenario
+    mock_model.to.reset_mock()
+    mock_model.eval.reset_mock()
+    trainer_base.clean_up.reset_mock()
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=True)
+    trainer_base._prepare_for_generation()
+    calls = [
+        mock_model.to.call_args_list[0][0][0],  # reference_model to cpu
+        mock_model.to.call_args_list[1][0][0],  # policy_engine to cpu
+        mock_model.to.call_args_list[2][0][0],  # value_engine to cpu
+    ]
+    assert calls == ['cpu', 'cpu', 'cpu']
+    assert mock_model.eval.call_count == 1  # only reference_model
+    trainer_base.clean_up.assert_called_once()
+
+
+def test_prepare_for_pre_processing(trainer_base, mock_model):
+    """Test _prepare_for_pre_processing for model configuration and memory release."""
+    trainer_base.reference_model = mock_model
+    trainer_base.value_engine = mock_model
+    trainer_base.policy_engine = mock_model
+    trainer_base.clean_up = MagicMock()
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=True)
+    trainer_base.device = 'cuda'  # Ensure self.device is 'cuda'
+
+    trainer_base._prepare_for_pre_processing()
+    calls = [
+        mock_model.to.call_args_list[0][0][0],  # policy_engine to cuda
+        mock_model.to.call_args_list[1][0][0],  # value_engine to cuda
+        mock_model.to.call_args_list[2][0][0],  # reference_model to cuda
+    ]
+    assert calls == ['cuda', 'cuda', 'cuda']
+    assert mock_model.eval.call_count == 3  # all models
+    trainer_base.inference_client.release_memory.assert_called_once()
+    trainer_base.clean_up.assert_called_once()
+
+
+def test_prepare_for_training(trainer_base, mock_model):
+    """Test _prepare_for_training for model configuration and memory release."""
+    trainer_base.reference_model = mock_model
+    trainer_base.value_engine = mock_model
+    trainer_base.policy_engine = mock_model
+    trainer_base.clean_up = MagicMock()
+    trainer_base.is_cohost_inference_engine = MagicMock(return_value=True)
+    trainer_base.device = 'cuda'  # Ensure self.device is 'cuda'
 
     trainer_base._prepare_for_training()
-    trainer_base.policy_engine.train.assert_called()
-
-
-def test_checkpoint_saving(trainer_base):
-    """Saves policy engine checkpoint at given step."""
-    trainer_base.save_checkpoint(1)
-    trainer_base.policy_engine.save_checkpoint.assert_called()
+    calls = [
+        mock_model.to.call_args_list[0][0][0],  # reference_model to cpu
+        mock_model.to.call_args_list[1][0][0],  # policy_engine to cuda
+        mock_model.to.call_args_list[2][0][0],  # value_engine to cuda
+    ]
+    assert calls == ['cpu', 'cuda', 'cuda']
+    assert mock_model.train.call_count == 2  # policy_engine and value_engine
+    assert mock_model.eval.call_count == 0
+    trainer_base.inference_client.release_memory.assert_called_once()
+    trainer_base.clean_up.assert_called_once()
 
 
 def test_sync_reference_model_no_ref_model(trainer_base):
@@ -207,7 +384,7 @@ def test_sync_reference_model_standard_pytorch(trainer_base):
     mock_ref_model.to.assert_any_call(trainer_base.device)
     mock_ref_model.to.assert_any_call('cpu')
     assert trainer_base.ref_update_count == initial_count + 1
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
 def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
@@ -237,7 +414,7 @@ def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
     mock_ref_model.to.assert_any_call(trainer_base.device)
     mock_ref_model.to.assert_any_call('cpu')
     assert trainer_base.ref_update_count == initial_count + 1
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
 @patch('deepspeed.zero.GatheredParameters', autospec=True)
@@ -254,7 +431,7 @@ def test_sync_reference_model_deepspeed_zero3_master(
     mock_ref_model.to.return_value = mock_ref_model
 
     trainer_base.reference_model = mock_ref_model
-    trainer_base.dist_manager.is_master = True
+    trainer_base.dist_ops.is_master = True
 
     # Mock is_zero3_enabled to return True
     mocker.patch.object(trainer_base, 'is_zero3_enabled', return_value=True)
@@ -277,13 +454,13 @@ def test_sync_reference_model_deepspeed_zero3_master(
     mock_ref_model.to.assert_any_call(trainer_base.device)
     mock_ref_model.to.assert_any_call('cpu')
     assert trainer_base.ref_update_count == initial_count + 1
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
 def test_sync_policy_model_inference_disabled(trainer_base, mocker):
     """Tests that sync does nothing if inference engine is disabled."""
     mocker.patch(
-        'rl4llm.core.base_trainer.RLTrainer.is_inference_engine_enabled',
+        'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
         return_value=False,
     )
     trainer_base.save_weights_hf_pretrained = MagicMock()
@@ -298,13 +475,13 @@ def test_sync_policy_model_inference_disabled(trainer_base, mocker):
 def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
     """Tests successful policy sync on the master rank."""
     mocker.patch(
-        'rl4llm.core.base_trainer.RLTrainer.is_inference_engine_enabled',
+        'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
         return_value=True,
     )
     mock_tempdir.return_value.__enter__.return_value = (
         '/fake/temp/path'  # Mock the temp path
     )
-    trainer_base.dist_manager.is_master = True
+    trainer_base.dist_ops.is_master = True
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
     trainer_base.sync_policy_model()
@@ -316,7 +493,7 @@ def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
     trainer_base.inference_client.update_weights_from_file.assert_called_once_with(
         model_path='/fake/temp/path'
     )
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
 @patch('tempfile.TemporaryDirectory')
@@ -325,12 +502,12 @@ def test_sync_policy_model_success_non_master(
 ):
     """Tests successful policy sync on a non-master rank."""
     mocker.patch(
-        'rl4llm.core.base_trainer.RLTrainer.is_inference_engine_enabled',
+        'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
         return_value=True,
     )
     mock_tempdir.return_value.__enter__.return_value = '/fake/temp/path'
     trainer_base.is_inference_engine_enabled.return_value = True
-    trainer_base.dist_manager.is_master = False  # Set to non-master
+    trainer_base.dist_ops.is_master = False  # Set to non-master
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
     trainer_base.sync_policy_model()
@@ -341,63 +518,63 @@ def test_sync_policy_model_success_non_master(
     # Inference client methods should not be called on non-master
     trainer_base.inference_client.resume_memory.assert_not_called()
     trainer_base.inference_client.update_weights_from_file.assert_not_called()
-    trainer_base.dist_manager.barrier.assert_called()
+    trainer_base.dist_ops.barrier.assert_called()
 
 
-def test_transform_batch_rewards_single_reward(
-    trainer_base, sample_group_episodes
-):
-    """Tests reward transformation when only one reward function is present."""
-    # Ensure only one reward function is mocked
-    trainer_base.train_env.reward_functions = {'reward1': Mock()}
-    trainer_base.reward_transform_fn = None  # Should not be needed
+# def test_transform_batch_rewards_single_reward(
+#     trainer_base, sample_group_episodes
+# ):
+#     """Tests reward transformation when only one reward function is present."""
+#     # Ensure only one reward function is mocked
+#     trainer_base.train_env.reward_functions = {'reward1': Mock()}
+#     trainer_base.reward_transform_fn = None  # Should not be needed
 
-    rewards = trainer_base.transform_batch_rewards(sample_group_episodes)
-    expected = torch.tensor(
-        [1.5, 2.0, 1.0, 2.5], dtype=trainer_base.torch_dtype
-    )
-    assert torch.equal(rewards, expected)
-
-
-def test_transform_batch_rewards_multiple_rewards(
-    trainer_base,
-    sample_group_episodes,
-    mock_reward_transform_fn,
-):
-    """Tests reward transformation with multiple reward functions using the transform function."""
-    # Add a second reward
-    for ep in sample_group_episodes:
-        ep.reward_dict['reward2'] = 0.5
-    trainer_base.train_env.reward_functions = {
-        'reward1': Mock(),
-        'reward2': Mock(),
-    }
-    trainer_base.reward_transform_fn = mock_reward_transform_fn
-
-    rewards = trainer_base.transform_batch_rewards(sample_group_episodes)
-
-    # Check that the transform function was called correctly
-    mock_reward_transform_fn.assert_called_once()
-    call_args = mock_reward_transform_fn.call_args[0][0]
-    assert 'reward1' in call_args
-    assert 'reward2' in call_args
-    assert torch.equal(
-        call_args['reward1'],
-        torch.tensor([1.5, 2.0, 1.0, 2.5], dtype=trainer_base.torch_dtype),
-    )
-    assert torch.equal(
-        call_args['reward2'],
-        torch.tensor([0.5, 0.5, 0.5, 0.5], dtype=trainer_base.torch_dtype),
-    )
-
-    # Check the output (based on the mock's side effect: sum)
-    expected = torch.tensor(
-        [2.0, 2.5, 1.5, 3.0], dtype=trainer_base.torch_dtype
-    )
-    assert torch.equal(rewards, expected)
+#     rewards = trainer_base.transform_batch_rewards(sample_group_episodes)
+#     expected = torch.tensor(
+#         [1.5, 2.0, 1.0, 2.5], dtype=trainer_base.torch_dtype
+#     )
+#     assert torch.equal(rewards, expected)
 
 
-def test_transform_batch_rewards_empty_list(trainer_base):
-    """Tests that transforming rewards on an empty list raises ValueError."""
-    with pytest.raises(ValueError, match='Episodes list cannot be empty'):
-        trainer_base.transform_batch_rewards([])
+# def test_transform_batch_rewards_multiple_rewards(
+#     trainer_base,
+#     sample_group_episodes,
+#     mock_reward_transform_fn,
+# ):
+#     """Tests reward transformation with multiple reward functions using the transform function."""
+#     # Add a second reward
+#     for ep in sample_group_episodes:
+#         ep.reward_dict['reward2'] = 0.5
+#     trainer_base.train_env.reward_functions = {
+#         'reward1': Mock(),
+#         'reward2': Mock(),
+#     }
+#     trainer_base.reward_transform_fn = mock_reward_transform_fn
+
+#     rewards = trainer_base.transform_batch_rewards(sample_group_episodes)
+
+#     # Check that the transform function was called correctly
+#     mock_reward_transform_fn.assert_called_once()
+#     call_args = mock_reward_transform_fn.call_args[0][0]
+#     assert 'reward1' in call_args
+#     assert 'reward2' in call_args
+#     assert torch.equal(
+#         call_args['reward1'],
+#         torch.tensor([1.5, 2.0, 1.0, 2.5], dtype=trainer_base.torch_dtype),
+#     )
+#     assert torch.equal(
+#         call_args['reward2'],
+#         torch.tensor([0.5, 0.5, 0.5, 0.5], dtype=trainer_base.torch_dtype),
+#     )
+
+#     # Check the output (based on the mock's side effect: sum)
+#     expected = torch.tensor(
+#         [2.0, 2.5, 1.5, 3.0], dtype=trainer_base.torch_dtype
+#     )
+#     assert torch.equal(rewards, expected)
+
+
+# def test_transform_batch_rewards_empty_list(trainer_base):
+#     """Tests that transforming rewards on an empty list raises ValueError."""
+#     with pytest.raises(ValueError, match='Episodes list cannot be empty'):
+#         trainer_base.transform_batch_rewards([])

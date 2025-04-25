@@ -1,7 +1,8 @@
-"""Script to run RL GRPO fine-tuning."""
+"""Script to run RL PPO fine-tuning."""
 
 import argparse
 import os
+from functools import partial
 from typing import Any, Dict, List, Union
 
 import deepspeed
@@ -12,17 +13,20 @@ from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import HfMDPEnv, SglMDPEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.trainers.grpo_trainer import GRPOConfig, GRPOTrainer
+from rl4llm.trainers.ppo_trainer import PPOConfig, PPOTrainer
 from rl4llm.utils import load_yaml_config_file, set_seed
-from rl4llm.utils.model_utils import build_policy_model_and_tokenizer
+from rl4llm.utils.model_utils import (
+    build_policy_model_and_tokenizer,
+    build_value_model_and_tokenizer,
+)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='RL GRPO fine-tuning')
+    parser = argparse.ArgumentParser(description='RL PPO fine-tuning')
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/grpo_config.yaml',
+        default='./configs/ppo_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -155,7 +159,7 @@ def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
 
 
 def main():
-    """Starts RL GRPO training loop."""
+    """Starts RL PPO training loop."""
     if not torch.cuda.is_available():
         raise RuntimeError('This script requires supports CUDA.')
 
@@ -169,10 +173,12 @@ def main():
     datasets_config = job_config.get('dataset')
     max_train_samples = datasets_config.get('max_train_samples', None)
     max_test_samples = datasets_config.get('max_test_samples', None)
-    model_config = job_config['model']
-    model_name = model_config['pretrained_model']
-    deepspeed_config = job_config['deepspeed']
-    grpo_config = GRPOConfig(**job_config['grpo'])
+    policy_model_config = job_config['policy_model']
+    value_model_config = job_config['value_model']
+    policy_model_name = policy_model_config['pretrained_model']
+    policy_deepspeed_config = job_config['policy_deepspeed']
+    value_deepspeed_config = job_config['value_deepspeed']
+    ppo_config = PPOConfig(**job_config['ppo'])
 
     set_seed(seed)
 
@@ -180,41 +186,57 @@ def main():
     deepspeed.init_distributed(verbose=False)
     local_rank = int(os.environ['LOCAL_RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
-    bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
+    bf16_enabled = policy_deepspeed_config.get('bf16', {}).get('enabled')
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
-    deepspeed_config['train_micro_batch_size_per_gpu'] = (
-        grpo_config.train_micro_batch_size
-    )
-    deepspeed_config['train_batch_size'] = grpo_config.train_batch_size
 
-    # Load and pre-processing dataset
+    policy_deepspeed_config['train_micro_batch_size_per_gpu'] = (
+        ppo_config.train_micro_batch_size
+    )
+    policy_deepspeed_config['train_batch_size'] = ppo_config.train_batch_size
+    value_deepspeed_config['train_micro_batch_size_per_gpu'] = (
+        ppo_config.train_micro_batch_size
+    )
+    value_deepspeed_config['train_batch_size'] = ppo_config.train_batch_size
+
+    # Prepare datasets
     train_dataset, eval_dataset = load_multiple_datasets(
         datasets_config['names']
     )
+
     if max_train_samples is not None and max_train_samples < len(train_dataset):
         train_dataset = train_dataset.shuffle().select(range(max_train_samples))
+
     if max_test_samples is not None and max_test_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
     train_dataset = train_dataset.map(apply_prompt_template)
     eval_dataset = eval_dataset.map(apply_prompt_template)
 
-    # Create models
+    # Create model and deepspeed engine
     policy_model, tokenizer = build_policy_model_and_tokenizer(
-        model_config, torch_dtype
+        policy_model_config, torch_dtype
+    )
+
+    value_model, _ = build_value_model_and_tokenizer(
+        value_model_config, torch_dtype
     )
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
         model_parameters=policy_model.parameters(),
-        config_params=deepspeed_config,
+        config_params=policy_deepspeed_config,
+    )
+    value_engine, *_ = deepspeed.initialize(
+        model=value_model,
+        model_parameters=value_model.parameters(),
+        config_params=value_deepspeed_config,
     )
 
-    # Create reference model and optionally use deepspeed sharding
+    # Optionally, create reference model
     ref_model = None
-    if grpo_config.kl_loss_coef > 0:
+    if ppo_config.kl_loss_coef > 0:
         ref_model, _ = build_policy_model_and_tokenizer(
-            model_config, torch_dtype
+            policy_model_config, torch_dtype
         )
         for param in ref_model.parameters():
             param.requires_grad = False
@@ -235,14 +257,7 @@ def main():
             ref_model.eval()
 
     # Create envs
-    env_args = {
-        'reward_functions': [AccuracyRewardFunction()],
-        'reward_transform_fn': reward_transform_fn,
-        'tokenizer': tokenizer,
-        'rank': local_rank,
-        'world_size': world_size,
-    }
-
+    env_reward_functions = [AccuracyRewardFunction()]
     inference_client = None
     env_cls = HfMDPEnv
     if args.use_infer_server:
@@ -256,20 +271,27 @@ def main():
     train_env = env_cls(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
-        group_size=grpo_config.group_size,
-        **env_args,
+        group_size=ppo_config.group_size,
+        tokenizer=tokenizer,
+        reward_functions=env_reward_functions,
+        rank=local_rank,
+        world_size=world_size,
     )
     eval_env = env_cls(
         dataset=eval_dataset,
-        batch_size=grpo_config.eval_batch_size,
+        batch_size=ppo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
-        **env_args,
+        tokenizer=tokenizer,
+        reward_functions=env_reward_functions,
+        rank=local_rank,
+        world_size=world_size,
     )
 
-    trainer = GRPOTrainer(
-        config=grpo_config,
+    trainer = PPOTrainer(
+        config=ppo_config,
         tokenizer=tokenizer,
         policy_engine=policy_engine,
+        value_engine=value_engine,
         log_config=log_config,
         train_env=train_env,
         eval_env=eval_env,

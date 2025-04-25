@@ -1,7 +1,8 @@
-"""Script to run RL GRPO fine-tuning."""
+"""Script to run RL value model training."""
 
 import argparse
 import os
+from functools import partial
 from typing import Any, Dict, List, Union
 
 import deepspeed
@@ -12,17 +13,17 @@ from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import HfMDPEnv, SglMDPEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.trainers.grpo_trainer import GRPOConfig, GRPOTrainer
+from rl4llm.trainers.value_net_trainer import ValueNetConfig, ValueNetTrainer
 from rl4llm.utils import load_yaml_config_file, set_seed
-from rl4llm.utils.model_utils import build_policy_model_and_tokenizer
+from rl4llm.utils.model_utils import build_value_model_and_tokenizer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='RL GRPO fine-tuning')
+    parser = argparse.ArgumentParser(description='RL RL value model training')
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/grpo_config.yaml',
+        default='./configs/value_net_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -137,12 +138,7 @@ class AccuracyRewardFunction(BaseRewardFunction):
             )
 
         return [
-            math_problem_grader(
-                full_answer=answer,
-                ground_truth=truth,
-                min_score=-1.0,
-                max_score=1.0,
-            )
+            math_problem_grader(full_answer=answer, ground_truth=truth)
             for answer, truth in zip(completions, ground_truths)
         ]
 
@@ -155,7 +151,7 @@ def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
 
 
 def main():
-    """Starts RL GRPO training loop."""
+    """Starts value model training loop."""
     if not torch.cuda.is_available():
         raise RuntimeError('This script requires supports CUDA.')
 
@@ -169,10 +165,10 @@ def main():
     datasets_config = job_config.get('dataset')
     max_train_samples = datasets_config.get('max_train_samples', None)
     max_test_samples = datasets_config.get('max_test_samples', None)
-    model_config = job_config['model']
+    model_config = job_config['value_model']
     model_name = model_config['pretrained_model']
     deepspeed_config = job_config['deepspeed']
-    grpo_config = GRPOConfig(**job_config['grpo'])
+    value_config = ValueNetConfig(**job_config['value_net_config'])
 
     set_seed(seed)
 
@@ -183,66 +179,34 @@ def main():
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
     deepspeed_config['train_micro_batch_size_per_gpu'] = (
-        grpo_config.train_micro_batch_size
+        value_config.train_micro_batch_size
     )
-    deepspeed_config['train_batch_size'] = grpo_config.train_batch_size
+    deepspeed_config['train_batch_size'] = value_config.train_batch_size
 
-    # Load and pre-processing dataset
     train_dataset, eval_dataset = load_multiple_datasets(
         datasets_config['names']
     )
+
     if max_train_samples is not None and max_train_samples < len(train_dataset):
         train_dataset = train_dataset.shuffle().select(range(max_train_samples))
-    if max_test_samples is not None and max_test_samples < len(eval_dataset):
-        eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
+
+    # if max_test_samples is not None and max_test_samples < len(eval_dataset):
+    #     eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
     train_dataset = train_dataset.map(apply_prompt_template)
-    eval_dataset = eval_dataset.map(apply_prompt_template)
+    # eval_dataset = eval_dataset.map(apply_prompt_template)
 
-    # Create models
-    policy_model, tokenizer = build_policy_model_and_tokenizer(
+    value_model, tokenizer = build_value_model_and_tokenizer(
         model_config, torch_dtype
     )
 
-    policy_engine, *_ = deepspeed.initialize(
-        model=policy_model,
-        model_parameters=policy_model.parameters(),
+    value_engine, *_ = deepspeed.initialize(
+        model=value_model,
+        model_parameters=value_model.parameters(),
         config_params=deepspeed_config,
     )
 
-    # Create reference model and optionally use deepspeed sharding
-    ref_model = None
-    if grpo_config.kl_loss_coef > 0:
-        ref_model, _ = build_policy_model_and_tokenizer(
-            model_config, torch_dtype
-        )
-        for param in ref_model.parameters():
-            param.requires_grad = False
-        ref_model.eval()
-
-    reference_deepspeed_config = job_config.get('reference_deepspeed')
-    if ref_model is not None and reference_deepspeed_config is not None:
-        zero3_enabled = (
-            reference_deepspeed_config.get('zero_optimization', {}).get('stage')
-            == 3
-        )
-        if zero3_enabled:
-            ref_model, *_ = deepspeed.initialize(
-                model=ref_model,
-                model_parameters=[],
-                config_params=reference_deepspeed_config,
-            )
-            ref_model.eval()
-
-    # Create envs
-    env_args = {
-        'reward_functions': [AccuracyRewardFunction()],
-        'reward_transform_fn': reward_transform_fn,
-        'tokenizer': tokenizer,
-        'rank': local_rank,
-        'world_size': world_size,
-    }
-
+    env_reward_functions = [AccuracyRewardFunction()]
     inference_client = None
     env_cls = HfMDPEnv
     if args.use_infer_server:
@@ -256,25 +220,21 @@ def main():
     train_env = env_cls(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
-        group_size=grpo_config.group_size,
-        **env_args,
-    )
-    eval_env = env_cls(
-        dataset=eval_dataset,
-        batch_size=grpo_config.eval_batch_size,
-        group_size=1,  # always set group size to 1 for evaluation
-        **env_args,
+        group_size=value_config.group_size,
+        tokenizer=tokenizer,
+        reward_functions=env_reward_functions,
+        rank=local_rank,
+        world_size=world_size,
     )
 
-    trainer = GRPOTrainer(
-        config=grpo_config,
+    trainer = ValueNetTrainer(
+        config=value_config,
         tokenizer=tokenizer,
-        policy_engine=policy_engine,
+        value_engine=value_engine,
         log_config=log_config,
         train_env=train_env,
-        eval_env=eval_env,
         inference_client=inference_client,
-        ref_model=ref_model,
+        reward_transform_fn=reward_transform_fn,
         seed=seed,
     )
 

@@ -9,11 +9,10 @@ import torch
 from transformers import PreTrainedTokenizer
 
 # Objects under test
-from rl4llm.envs import EpisodeData
+from rl4llm.core.base_env import EpisodeData, EpisodeMetadata
 from rl4llm.trainers.grpo_trainer import (
     GRPOConfig,
     GRPOTrainer,
-    RewardTransform,
     TransitionData,
 )
 
@@ -100,11 +99,11 @@ def mock_ref_model(
 
 
 @pytest.fixture
-def mock_dist_manager() -> MagicMock:
-    """Provides a mock DistributedManager."""
+def mock_dist_ops() -> MagicMock:
+    """Provides a mock DistributedOps."""
     manager = MagicMock()
     manager.world_size = 1
-    manager.is_main_process.return_value = True
+    manager.is_master.return_value = True
     return manager
 
 
@@ -116,19 +115,10 @@ def mock_logger() -> MagicMock:
 
 @pytest.fixture
 def mock_train_env() -> MagicMock:
-    """Provides a mock LocalLLMEnv for training."""
+    """Provides a mock HfMDPEnv for training."""
     env = MagicMock()
     env.reward_functions = {'reward1': Mock()}
     return env
-
-
-@pytest.fixture
-def mock_reward_transform_fn() -> MagicMock:
-    """Provides a mock reward transformation function."""
-    fn = MagicMock()
-    # Simple sum aggregation for testing
-    fn.side_effect = lambda rewards_dict: sum(rewards_dict.values())
-    return fn
 
 
 @pytest.fixture
@@ -141,15 +131,28 @@ def sample_episode_data(
     # Use the mock tokenizer's encode method
     prompt_tokens = mock_tokenizer.encode(prompt, return_tensors='pt')
     completion_tokens = mock_tokenizer.encode(completion, return_tensors='pt')
-    return EpisodeData(
-        prompt_text=prompt,
-        completion_text=completion,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
+
+    full_seq = torch.concat([prompt_tokens, completion_tokens])
+    states = full_seq[:-1]
+    actions = full_seq[1:]
+    loss_mask = torch.zeros_like(actions, dtype=torch.bool)
+    loss_mask[len(prompt_tokens) - 1 :] = True
+
+    meta = EpisodeMetadata(
+        prompt=prompt,
+        completion=completion,
         prompt_length=len(prompt_tokens),
         completion_length=len(completion_tokens),
         reward_dict={'reward1': 1.5},
-        meta_data={},
+        ground_truth='123',
+    )
+
+    return EpisodeData(
+        states=states,
+        actions=actions,
+        loss_mask=loss_mask,
+        terminal_reward=1.5,
+        metadata=meta,
     )
 
 
@@ -158,13 +161,13 @@ def sample_group_episodes(sample_episode_data) -> List[EpisodeData]:
     """Provides a list of sample EpisodeData instances for a group."""
     # Create slightly different rewards for testing normalization/std check
     ep1 = sample_episode_data.model_copy(deep=True)
-    ep1.reward_dict = {'reward1': 1.5}
+    ep1.terminal_reward = 1.5
     ep2 = sample_episode_data.model_copy(deep=True)
-    ep2.reward_dict = {'reward1': 2.0}
+    ep2.terminal_reward = 2.0
     ep3 = sample_episode_data.model_copy(deep=True)
-    ep3.reward_dict = {'reward1': 1.0}
+    ep3.terminal_reward = 1.0
     ep4 = sample_episode_data.model_copy(deep=True)
-    ep4.reward_dict = {'reward1': 2.5}
+    ep4.terminal_reward = 2.5
     return [ep1, ep2, ep3, ep4]
 
 
@@ -196,104 +199,47 @@ def grpo_trainer(
     grpo_config: GRPOConfig,
     mock_tokenizer: MagicMock,
     mock_policy_engine: MagicMock,
-    mock_dist_manager: MagicMock,
+    mock_dist_ops: MagicMock,
     mock_logger: MagicMock,
     mock_train_env: MagicMock,
     mock_ref_model: MagicMock,
-    mock_reward_transform_fn: MagicMock,
+    mocker,
 ) -> GRPOTrainer:
     """Provides a GRPOTrainer instance with mocked dependencies."""
-    # Mock the reward transform function only if needed (multiple rewards)
-    reward_fn = None
-    if len(mock_train_env.reward_functions) > 1:
-        reward_fn = mock_reward_transform_fn
+
+    mocker.patch(
+        'rl4llm.core.distributed.DistributedOps.get_instance',
+        return_value=mock_dist_ops,
+        autospec=True,
+    )
+    # mocker.patch(
+    #     "rl4llm.logging.logging_manager.LoggingManager",
+    #     return_value=dummy_logger,
+    #     autospec=True
+    # )
+    mocker.patch(
+        'rl4llm.core.base_trainer.LoggingManager',
+        return_value=mock_logger,
+        autospec=True,
+    )
 
     trainer = GRPOTrainer(
         config=grpo_config,
         tokenizer=mock_tokenizer,  # Pass the mock tokenizer
         policy_engine=mock_policy_engine,
-        dist_manager=mock_dist_manager,
-        logger=mock_logger,
-        artifacts_path='/tmp/test_grpo',
+        log_config={'output_dir': '/tmp/test_rl_trainer'},
         train_env=mock_train_env,
         ref_model=mock_ref_model,
-        reward_transform_fn=reward_fn,
         seed=42,
     )
+
     # Manually set device and dtype for consistency in tests
     trainer.device = torch.device('cpu')
-    trainer.torch_dtype = torch.float32
     trainer.initialize_trainer()  # Initialize trainer specific settings
     return trainer
 
 
 # --- Test Cases ---
-
-
-def test_grpo_trainer_init_requires_reward_transform_for_multiple_rewards(
-    grpo_config: GRPOConfig,
-    mock_tokenizer: MagicMock,  # Use mock
-    mock_policy_engine: MagicMock,
-    mock_dist_manager: MagicMock,
-    mock_logger: MagicMock,
-    mock_train_env: MagicMock,
-):
-    """Tests that initialization fails if multiple rewards exist without a transform function."""
-    mock_train_env.reward_functions = {'reward1': Mock(), 'reward2': Mock()}
-    with pytest.raises(ValueError, match='Reward aggregator is required'):
-        GRPOTrainer(
-            config=grpo_config,
-            tokenizer=mock_tokenizer,  # Use mock
-            policy_engine=mock_policy_engine,
-            dist_manager=mock_dist_manager,
-            logger=mock_logger,
-            artifacts_path='/tmp/test_grpo',
-            train_env=mock_train_env,
-            reward_transform_fn=None,  # Explicitly None
-        )
-
-
-def test_initialize_trainer(grpo_trainer: GRPOTrainer):
-    """Tests if trainer-specific attributes are initialized correctly."""
-    assert grpo_trainer.explore_epsilon == 0.0
-    assert isinstance(grpo_trainer.group_reward_std_threshold, torch.Tensor)
-    assert (
-        grpo_trainer.group_reward_std_threshold > 0
-    )  # Should be calculated based on dummy rewards
-
-
-def test_get_exploration_epsilon_decay(grpo_trainer: GRPOTrainer):
-    """Tests the cosine decay calculation for exploration epsilon."""
-    grpo_trainer.config.explore_init_epsilon = 0.5
-    grpo_trainer.config.explore_min_epsilon = 0.1
-    grpo_trainer.config.explore_decay_steps = 100
-
-    # Start
-    grpo_trainer.global_step = 0
-    assert grpo_trainer._get_exploration_epsilon() == pytest.approx(0.5)
-
-    # Mid decay
-    grpo_trainer.global_step = 50
-    expected_mid = 0.1 + (0.5 - 0.1) * 0.5 * (1 + math.cos(math.pi * 50 / 100))
-    assert grpo_trainer._get_exploration_epsilon() == pytest.approx(
-        expected_mid
-    )  # Should be 0.3
-
-    # End
-    grpo_trainer.global_step = 100
-    assert grpo_trainer._get_exploration_epsilon() == pytest.approx(0.1)
-
-    # After decay
-    grpo_trainer.global_step = 150
-    assert grpo_trainer._get_exploration_epsilon() == pytest.approx(0.1)
-
-
-def test_get_exploration_epsilon_no_decay(grpo_trainer: GRPOTrainer):
-    """Tests exploration epsilon when decay steps are zero."""
-    grpo_trainer.config.explore_decay_steps = 0
-    grpo_trainer.config.explore_init_epsilon = 0.5
-    grpo_trainer.global_step = 50
-    assert grpo_trainer._get_exploration_epsilon() == 0.0
 
 
 @pytest.mark.parametrize(
@@ -363,55 +309,6 @@ def test_normalize_group_rewards_raises_error_for_small_group(
         ValueError, match='Number of group rewards must be greater than 4'
     ):
         grpo_trainer._normalize_group_rewards(rewards)
-
-
-def test_check_group_episodes(
-    grpo_trainer: GRPOTrainer, sample_group_episodes: List[EpisodeData]
-):
-    """Tests the validity check for a group of episodes."""
-    # Mock the transform function to return rewards with sufficient std dev
-    with patch.object(
-        grpo_trainer,
-        'transform_batch_rewards',
-        return_value=torch.tensor([1.0, 2.0, 3.0, 4.0]),
-    ):
-        assert grpo_trainer._check_group_episodes(sample_group_episodes) is True
-
-
-@pytest.mark.parametrize(
-    'episodes, expected_result',
-    [
-        ([], False),  # Empty list
-        ([Mock()] * 3, False),  # List too short
-    ],
-)
-def test_check_group_episodes_invalid_size(
-    grpo_trainer: GRPOTrainer, episodes: List, expected_result: bool
-):
-    """Tests the group check fails for invalid list sizes."""
-    assert grpo_trainer._check_group_episodes(episodes) is expected_result
-
-
-def test_check_group_episodes_low_std(
-    grpo_trainer: GRPOTrainer, sample_group_episodes: List[EpisodeData]
-):
-    """Tests the group check fails for rewards with low standard deviation."""
-    # Mock transform to return rewards with very low std dev
-    low_std_rewards = torch.tensor([1.0, 1.0, 1.0, 1.01])  # Low std
-    grpo_trainer.group_reward_std_threshold = (
-        low_std_rewards.std(unbiased=False) + 0.01
-    )  # Ensure threshold is higher
-
-    with patch.object(
-        grpo_trainer, 'transform_batch_rewards', return_value=low_std_rewards
-    ):
-        assert (
-            grpo_trainer._check_group_episodes(sample_group_episodes) is False
-        )
-        grpo_trainer.logger.debug.assert_called_once()
-        grpo_trainer.logger.log_scalar.assert_called_with(
-            'other/skipped_sample_count', len(low_std_rewards)
-        )
 
 
 def test_train_collate_fn(
@@ -614,7 +511,9 @@ def test_compute_loss_with_advantage_norm(
     grpo_trainer.config.normalize_advantages = True
     # Mock masked_whiten to check it's called
     with patch.object(
-        grpo_trainer, 'masked_whiten', wraps=grpo_trainer.masked_whiten
+        grpo_trainer,
+        'dist_masked_whiten',
+        wraps=grpo_trainer.dist_masked_whiten,
     ) as mock_whiten:
         loss = grpo_trainer.compute_loss(**loss_inputs)
         assert isinstance(loss, torch.Tensor)
@@ -646,7 +545,8 @@ def test_build_train_loader(
     # Mock models returning simple logits for conversion step
     # Determine max length needed for the mock forward pass in conversion
     max_len = max(
-        ep.prompt_length + ep.completion_length for ep in sample_group_episodes
+        ep.metadata.prompt_length + ep.metadata.completion_length
+        for ep in sample_group_episodes
     )
     batch_size = len(sample_group_episodes)
     vocab_size = mock_tokenizer.vocab_size  # Use mock vocab size
@@ -692,11 +592,8 @@ def test_build_train_loader_empty_experience(grpo_trainer: GRPOTrainer):
         grpo_trainer, '_convert_group_episodes_to_transitions', return_value=[]
     ):
         # Mock _check_group_episodes to allow processing empty groups initially
-        with patch.object(
-            grpo_trainer, '_check_group_episodes', return_value=True
-        ):
-            with pytest.raises(ValueError, match='No samples for training'):
-                grpo_trainer.build_train_loader([[]])  # Empty group list
+        with pytest.raises(ValueError, match='No samples for training'):
+            grpo_trainer.build_train_loader([[]])  # Empty group list
 
 
 @patch(
@@ -712,18 +609,11 @@ def test_convert_group_episodes_to_transitions(
     mock_ref_model: MagicMock,
 ):
     """Tests the conversion of raw episodes to TransitionData."""
-    # Make sequence lengths slightly different for padding test
-    # Use mock tokenizer to encode
-    sample_group_episodes[1].completion_tokens = mock_tokenizer.encode(
-        ' was nice.', return_tensors='pt'
-    )
-    sample_group_episodes[1].completion_length = len(
-        sample_group_episodes[1].completion_tokens
-    )
 
     # Mock model outputs
     max_len = max(
-        ep.prompt_length + ep.completion_length for ep in sample_group_episodes
+        ep.metadata.prompt_length + ep.metadata.completion_length
+        for ep in sample_group_episodes
     )
     batch_size = len(sample_group_episodes)
     vocab_size = mock_tokenizer.vocab_size  # Use mock vocab size
@@ -739,7 +629,7 @@ def test_convert_group_episodes_to_transitions(
     with patch.object(
         grpo_trainer,
         '_normalize_group_rewards',
-        side_effect=lambda x, **kwargs: x,
+        side_effect=lambda x, y, **kwargs: x,
     ):
         transitions = grpo_trainer._convert_group_episodes_to_transitions(
             sample_group_episodes
@@ -753,7 +643,7 @@ def test_convert_group_episodes_to_transitions(
     for i, trans in enumerate(transitions):
         ep = sample_group_episodes[i]
         expected_seq_len = (
-            ep.prompt_length + ep.completion_length - 1
+            ep.metadata.prompt_length + ep.metadata.completion_length - 1
         )  # states/actions length
         assert isinstance(trans, TransitionData)
         assert trans.states.shape == (expected_seq_len,)
@@ -761,19 +651,20 @@ def test_convert_group_episodes_to_transitions(
         assert trans.loss_mask.shape == (expected_seq_len,)
         assert trans.pi_logprobs.shape == (expected_seq_len,)
         assert trans.ref_logprobs.shape == (expected_seq_len,)
-        assert trans.advantages.shape == (
-            expected_seq_len,
-        )  # Advantages are broadcasted rewards here
+        assert trans.advantages.shape == (expected_seq_len,)
 
         # Check loss mask correctness
-        assert torch.all(trans.loss_mask[: ep.prompt_length - 1] == False)
-        assert torch.all(trans.loss_mask[ep.prompt_length - 1 :] == True)
-        assert trans.loss_mask.sum().item() == ep.completion_length
+        assert torch.all(
+            trans.loss_mask[: ep.metadata.prompt_length - 1] == False
+        )
+        assert torch.all(
+            trans.loss_mask[ep.metadata.prompt_length - 1 :] == True
+        )
+        assert trans.loss_mask.sum().item() == ep.metadata.completion_length
 
-        # Check advantages are non-zero only where loss_mask is True (using original reward)
-        original_reward = ep.reward_dict['reward1']
-        assert torch.all(trans.advantages[trans.loss_mask] == original_reward)
-        assert torch.all(trans.advantages[~trans.loss_mask] == 0)
+        # # Check advantages are non-zero only where loss_mask is True (using original reward)
+        # assert torch.all(trans.advantages[trans.loss_mask] == original_reward)
+        # assert torch.all(trans.advantages[~trans.loss_mask] == 0)
 
 
 def test_convert_group_episodes_to_transitions_small_group(

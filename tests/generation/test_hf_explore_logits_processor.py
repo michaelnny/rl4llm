@@ -7,7 +7,7 @@ import pytest
 import torch
 from transformers import PreTrainedTokenizer
 
-from rl4llm.generation.explore_processor import ExploreLogitsProcessor
+from rl4llm.generation.hf_explore_processor import HfExploreLogitsProcessor
 
 # --- Fixtures ---
 
@@ -42,7 +42,7 @@ def default_config(mock_tokenizer):
         'explore_steps': 0,
         'explore_skip_n': 0,
         'explore_top_k': 20,
-        'explore_decay_rate': 0.9,
+        'explore_decay': 0.9,
         'replace_source_tokens': None,
         'replace_target_tokens': None,
         'replace_prevent_patterns': None,
@@ -85,7 +85,7 @@ def sequence_indices(default_config, device):
 
 def test_initialization_valid(default_config):
     """Tests successful initialization with default valid parameters."""
-    processor = ExploreLogitsProcessor(**default_config)
+    processor = HfExploreLogitsProcessor(**default_config)
     assert processor.initial_seq_len == default_config['initial_seq_len']
     assert processor.group_size == default_config['group_size']
     assert processor.temperature.shape == (default_config['group_size'],)
@@ -114,8 +114,8 @@ def test_initialization_valid(default_config):
         ('explore_steps', -1, ValueError),
         ('explore_skip_n', -1, ValueError),
         ('explore_top_k', 0, ValueError),
-        ('explore_decay_rate', 0.0, ValueError),
-        ('explore_decay_rate', 1.1, ValueError),
+        ('explore_decay', 0.0, ValueError),
+        ('explore_decay', 1.1, ValueError),
         ('replace_source_tokens', 'not_a_list', TypeError),
         ('replace_target_tokens', 'not_a_list', TypeError),
         ('replace_prevent_patterns', 'not_a_list', TypeError),
@@ -134,7 +134,7 @@ def test_initialization_invalid_params(
     config = default_config.copy()
     config[param] = value
     with pytest.raises(error_type):
-        ExploreLogitsProcessor(**config)
+        HfExploreLogitsProcessor(**config)
 
 
 @pytest.mark.parametrize(
@@ -151,7 +151,7 @@ def test_initialize_temperature(
     config = default_config.copy()
     config['temperature'] = temp_input
     config['group_size'] = group_size
-    processor = ExploreLogitsProcessor(**config)
+    processor = HfExploreLogitsProcessor(**config)
     torch.testing.assert_close(
         processor.temperature,
         expected_tensor.to(device=device, dtype=torch.float32),
@@ -165,7 +165,7 @@ def test_initialization_replacement_setup(default_config):
     config['replace_source_tokens'] = [10, 11]
     config['replace_target_tokens'] = [20, 21]
     config['replace_max_per_seq'] = 5
-    processor = ExploreLogitsProcessor(**config)
+    processor = HfExploreLogitsProcessor(**config)
     assert processor.replace_max_per_seq == 5
     assert processor.source_tokens_tensor is not None
     assert processor.target_tokens_tensor is not None
@@ -177,19 +177,19 @@ def test_initialization_replacement_disabled(default_config):
     config_no_max['replace_source_tokens'] = [10]
     config_no_max['replace_target_tokens'] = [20]
     config_no_max['replace_max_per_seq'] = 0
-    processor_no_max = ExploreLogitsProcessor(**config_no_max)
+    processor_no_max = HfExploreLogitsProcessor(**config_no_max)
     assert processor_no_max.replace_max_per_seq == 0
 
     config_no_source = default_config.copy()
     config_no_source['replace_target_tokens'] = [20]
     config_no_source['replace_max_per_seq'] = 5
-    processor_no_source = ExploreLogitsProcessor(**config_no_source)
+    processor_no_source = HfExploreLogitsProcessor(**config_no_source)
     assert processor_no_source.replace_max_per_seq == 0
 
     config_no_target = default_config.copy()
     config_no_target['replace_source_tokens'] = [10]
     config_no_target['replace_max_per_seq'] = 5
-    processor_no_target = ExploreLogitsProcessor(**config_no_target)
+    processor_no_target = HfExploreLogitsProcessor(**config_no_target)
     assert processor_no_target.replace_max_per_seq == 0
 
 
@@ -200,7 +200,7 @@ def test_temperature_scaling_default(
     default_config, input_ids, scores, sequence_indices
 ):
     """Tests temperature scaling with default temperature (1.0)."""
-    processor = ExploreLogitsProcessor(**default_config)
+    processor = HfExploreLogitsProcessor(**default_config)
     original_scores = scores.clone()
     processed_scores = processor(
         input_ids, scores, sequence_indices=sequence_indices
@@ -218,7 +218,7 @@ def test_temperature_scaling_non_default(
     config = default_config.copy()
     # Ensure temperature matches batch size if providing a list/tensor
     config['temperature'] = [temp] * config['group_size']
-    processor = ExploreLogitsProcessor(**config)
+    processor = HfExploreLogitsProcessor(**config)
     original_scores = scores.clone()
     processed_scores = processor(
         input_ids, scores, sequence_indices=sequence_indices
@@ -234,7 +234,7 @@ def test_temperature_scaling_zero(
     """Tests temperature scaling with zero temperature (greedy decoding)."""
     config = default_config.copy()
     config['temperature'] = [0.0] * config['group_size']  # Match batch size
-    processor = ExploreLogitsProcessor(**config)
+    processor = HfExploreLogitsProcessor(**config)
     # Pass a clone as the processor modifies scores
     processed_scores = processor(
         input_ids, scores.clone(), sequence_indices=sequence_indices
@@ -256,7 +256,7 @@ def test_temperature_scaling_batch(
     temps = [0.5, 1.5]
     config = default_config.copy()
     config['temperature'] = temps
-    processor = ExploreLogitsProcessor(**config)
+    processor = HfExploreLogitsProcessor(**config)
     original_scores = scores.clone()
     processed_scores = processor(
         input_ids, scores, sequence_indices=sequence_indices
@@ -275,7 +275,7 @@ def test_temperature_scaling_batch_with_zero(
     temps = [0.5, 0.0]
     config = default_config.copy()
     config['temperature'] = temps
-    processor = ExploreLogitsProcessor(**config)
+    processor = HfExploreLogitsProcessor(**config)
     original_scores = scores.clone()
     processed_scores = processor(
         input_ids, scores, sequence_indices=sequence_indices
@@ -303,7 +303,7 @@ def test_exploration_active(
     config = default_config.copy()
     config['explore_steps'] = 5
     config['explore_top_k'] = 10
-    processor = ExploreLogitsProcessor(**config)
+    processor = HfExploreLogitsProcessor(**config)
 
     # Simulate being in the exploration phase (step 0)
     processor.current_step = 0  # Set manually for testing __call__ effect
@@ -329,7 +329,7 @@ def test_exploration_inactive_before_skip(
     config['explore_steps'] = 5
     config['explore_skip_n'] = 2
     config['explore_top_k'] = 10
-    processor = ExploreLogitsProcessor(**config)
+    processor = HfExploreLogitsProcessor(**config)
 
     # Simulate being before the exploration phase (step 1)
     processor.current_step = 1  # Set manually
@@ -353,8 +353,8 @@ def test_exploration_decay(default_config, input_ids, scores, sequence_indices):
     config['explore_steps'] = 3
     config['explore_skip_n'] = 0
     config['explore_top_k'] = 20
-    config['explore_decay_rate'] = 0.5
-    processor = ExploreLogitsProcessor(**config)
+    config['explore_decay'] = 0.5
+    processor = HfExploreLogitsProcessor(**config)
 
     # Step 0
     seq_len_0 = default_config['initial_seq_len'] + 1
@@ -362,7 +362,7 @@ def test_exploration_decay(default_config, input_ids, scores, sequence_indices):
     scores_0 = processor(
         ids_0, scores.clone(), sequence_indices=sequence_indices
     )
-    k_0 = int(config['explore_top_k'] * (config['explore_decay_rate'] ** 0))
+    k_0 = int(config['explore_top_k'] * (config['explore_decay'] ** 0))
     assert (~torch.isinf(scores_0[0])).sum().item() == k_0  # 20
 
     # Step 1
@@ -371,7 +371,7 @@ def test_exploration_decay(default_config, input_ids, scores, sequence_indices):
     scores_1 = processor(
         ids_1, scores.clone(), sequence_indices=sequence_indices
     )
-    k_1 = int(config['explore_top_k'] * (config['explore_decay_rate'] ** 1))
+    k_1 = int(config['explore_top_k'] * (config['explore_decay'] ** 1))
     assert (~torch.isinf(scores_1[0])).sum().item() == k_1  # 10
 
     # Step 2
@@ -380,7 +380,7 @@ def test_exploration_decay(default_config, input_ids, scores, sequence_indices):
     scores_2 = processor(
         ids_2, scores.clone(), sequence_indices=sequence_indices
     )
-    k_2 = int(config['explore_top_k'] * (config['explore_decay_rate'] ** 2))
+    k_2 = int(config['explore_top_k'] * (config['explore_decay'] ** 2))
     assert (~torch.isinf(scores_2[0])).sum().item() == k_2  # 5
 
     # Step 3 (after exploration)
@@ -416,7 +416,7 @@ def replacement_config(default_config):
 @pytest.fixture
 def replacement_processor(replacement_config):
     """Provides a processor instance with replacement enabled."""
-    return ExploreLogitsProcessor(**replacement_config)
+    return HfExploreLogitsProcessor(**replacement_config)
 
 
 # Test _check_replacement_patterns
@@ -591,8 +591,8 @@ def test_check_correctness_respects_pattern_mask(
 
 
 # Test _determine_replacement_eligibility
-@patch.object(ExploreLogitsProcessor, '_check_replacement_patterns')
-@patch.object(ExploreLogitsProcessor, '_check_correctness')
+@patch.object(HfExploreLogitsProcessor, '_check_replacement_patterns')
+@patch.object(HfExploreLogitsProcessor, '_check_correctness')
 def test_determine_eligibility(
     mock_check_correctness,
     mock_check_patterns,
@@ -739,7 +739,7 @@ def test_call_updates_step_count(
     default_config, input_ids, scores, sequence_indices
 ):
     """Tests that the internal step count is updated correctly."""
-    processor = ExploreLogitsProcessor(**default_config)
+    processor = HfExploreLogitsProcessor(**default_config)
     assert processor.current_step == 0
 
     # Call with sequence length > initial_seq_len
@@ -772,10 +772,10 @@ def test_call_replacement_skipped_during_exploration(
 
     with (
         patch.object(
-            ExploreLogitsProcessor, '_determine_replacement_eligibility'
+            HfExploreLogitsProcessor, '_determine_replacement_eligibility'
         ) as mock_determine,
         patch.object(
-            ExploreLogitsProcessor, '_apply_replacement_logic'
+            HfExploreLogitsProcessor, '_apply_replacement_logic'
         ) as mock_apply,
     ):
 

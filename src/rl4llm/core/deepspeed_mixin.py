@@ -23,11 +23,17 @@ class DeepSpeedUtilsMixin:
 
     def is_zero3_enabled(self, engine: DeepSpeedEngine) -> bool:
         """Checks if ZeRO-3 is enabled for the specified engine."""
-        return engine.zero_optimization_stage() == 3
+        return (
+            isinstance(engine, DeepSpeedEngine)
+            and engine.zero_optimization_stage() == 3
+        )
 
     def is_zero2_enabled(self, engine: DeepSpeedEngine) -> bool:
         """Checks if ZeRO-2 is enabled for the specified engine."""
-        return engine.zero_optimization_stage() == 2
+        return (
+            isinstance(engine, DeepSpeedEngine)
+            and engine.zero_optimization_stage() == 2
+        )
 
     def is_params_offload_enabled(self, engine: DeepSpeedEngine) -> bool:
         """Checks if model parameters offload is enabled for the specified engine."""

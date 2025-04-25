@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from transformers import LogitsProcessor, PreTrainedTokenizer
 
 
-class ExploreLogitsProcessor(LogitsProcessor):
+class HfExploreLogitsProcessor(LogitsProcessor):
     """
     Processes logits for HF generation, applying temperature scaling, exploration sampling,
     and conditional token replacement based on sequence indices.
@@ -25,7 +25,7 @@ class ExploreLogitsProcessor(LogitsProcessor):
         explore_steps: int = 0,
         explore_skip_n: int = 0,
         explore_top_k: int = 20,
-        explore_decay_rate: float = 0.9,
+        explore_decay: float = 0.9,
         replace_source_tokens: Optional[List[int]] = None,
         replace_target_tokens: Optional[List[int]] = None,
         replace_prevent_patterns: Optional[List[List[int]]] = None,
@@ -38,7 +38,7 @@ class ExploreLogitsProcessor(LogitsProcessor):
         ] = None,
     ):
         """
-        Initializes the ExploreLogitsProcessor.
+        Initializes the HfExploreLogitsProcessor.
 
         Args:
             initial_seq_len: Length of the initial prompt sequence.
@@ -49,7 +49,7 @@ class ExploreLogitsProcessor(LogitsProcessor):
             explore_steps: Number of steps for exploration sampling.
             explore_skip_n: Number of initial steps to skip before exploration.
             explore_top_k: Top-k value for exploration sampling.
-            explore_decay_rate: Decay rate for explore_top_k during exploration.
+            explore_decay: Decay rate for explore_top_k during exploration.
             replace_source_tokens: Token IDs to penalize during replacement.
             replace_target_tokens: Token IDs to boost during replacement.
             replace_prevent_patterns: Token sequences that prevent replacement if found.
@@ -79,11 +79,11 @@ class ExploreLogitsProcessor(LogitsProcessor):
             raise ValueError('explore_skip_n must be a non-negative integer.')
         if not isinstance(explore_top_k, int) or explore_top_k <= 0:
             raise ValueError('explore_top_k must be a positive integer.')
-        if not isinstance(explore_decay_rate, float) or not (
-            0.0 < explore_decay_rate <= 1.0
+        if not isinstance(explore_decay, float) or not (
+            0.0 < explore_decay <= 1.0
         ):
             raise ValueError(
-                'explore_decay_rate must be a float between 0.0 (exclusive) and 1.0 (inclusive).'
+                'explore_decay must be a float between 0.0 (exclusive) and 1.0 (inclusive).'
             )
         if replace_source_tokens is not None and not isinstance(
             replace_source_tokens, list
@@ -130,7 +130,7 @@ class ExploreLogitsProcessor(LogitsProcessor):
         self.explore_steps: int = explore_steps
         self.explore_skip_n: int = explore_skip_n
         self.explore_top_k: int = explore_top_k
-        self.explore_decay_rate: float = explore_decay_rate
+        self.explore_decay: float = explore_decay
         self.replace_source_tokens_list: List[int] = replace_source_tokens or []
         self.replace_target_tokens_list: List[int] = replace_target_tokens or []
         self.replace_prevent_patterns: List[List[int]] = (
@@ -469,10 +469,7 @@ class ExploreLogitsProcessor(LogitsProcessor):
             effective_steps = current_gen_step - self.explore_skip_n
             current_explore_top_k = max(
                 2,
-                int(
-                    self.explore_top_k
-                    * (self.explore_decay_rate**effective_steps)
-                ),
+                int(self.explore_top_k * (self.explore_decay**effective_steps)),
             )
             k = min(current_explore_top_k, vocab_size)
 

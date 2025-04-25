@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from rl4llm.constants import EVAL_PHASE, TRAIN_PHASE
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.logging.handlers.base_handler import BaseHandler
 
 
@@ -251,17 +251,17 @@ class SampleHandler(BaseHandler):
 
     def __init__(
         self,
-        dist_manager: DistributedManager,
+        dist_ops: DistributedOps,
         log_dir: str,
         sample_file_format: str = 'parquet',
         sample_buffer_size: int = 100,
         logger: Optional[logging.Logger] = None,
     ):
         super().__init__(logger)
-        self.dist_manager = dist_manager
-        self.rank = dist_manager.global_rank
-        self.world_size = dist_manager.world_size
-        self.is_master = dist_manager.is_master
+        self.dist_ops = dist_ops
+        self.rank = dist_ops.global_rank
+        self.world_size = dist_ops.world_size
+        self.is_master = dist_ops.is_master
 
         # Include 'general' phase for samples logged without a specific phase
         self._log_phases = set([TRAIN_PHASE, EVAL_PHASE])

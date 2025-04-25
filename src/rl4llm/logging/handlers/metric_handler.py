@@ -8,7 +8,7 @@ from typing import Callable, Dict, List, Optional, Pattern, Set, Tuple, Union
 import numpy as np
 import torch
 
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.logging.handlers.base_handler import BaseHandler
 
 
@@ -33,46 +33,53 @@ class MetricHandler(BaseHandler):
         'max': lambda x: np.max(x) if is_valid_array(x) else np.nan,
         'sum': lambda x: np.sum(x) if is_valid_array(x) else 0.0,
         'last': lambda x: x[-1] if is_valid_array(x) else np.nan,
+        'p25': lambda x: (
+            np.percentile(x.astype(float), 50) if is_valid_array(x) else np.nan
+        ),
         'p50': lambda x: (
             np.percentile(x.astype(float), 50) if is_valid_array(x) else np.nan
         ),
-        'p90': lambda x: (
+        'p75': lambda x: (
             np.percentile(x.astype(float), 90) if is_valid_array(x) else np.nan
         ),
-        'p95': lambda x: (
-            np.percentile(x.astype(float), 95) if is_valid_array(x) else np.nan
+        'p90': lambda x: (
+            np.percentile(x.astype(float), 90) if is_valid_array(x) else np.nan
         ),
         'p99': lambda x: (
             np.percentile(x.astype(float), 99) if is_valid_array(x) else np.nan
         ),
         'count': lambda x: len(x) if isinstance(x, np.ndarray) else 0,
+        'accuracy_rate': lambda x: (
+            (np.sum(x == np.max(x)) / x.size) if is_valid_array(x) else np.nan
+        ),
     }
 
     BASE_DEFAULT_METRICS_AGGREGATION_CONFIG = {
         # Non-regex keywords
         'prompt_length': ['mean', 'std'],
-        'completion_length': ['mean', 'std', 'p50', 'p90'],
-        'reward': ['mean', 'std', 'p50', 'p90'],
-        'accuracy_reward': ['mean', 'std', 'p50', 'p90'],
+        'completion_length': ['mean', 'std', 'p75', 'p90'],
+        'accuracy_reward': ['mean', 'var', 'accuracy_rate'],
         'loss': ['mean'],
         'learning_rate': ['last'],
         'lr': ['last'],
         'grad_norm': ['mean', 'max'],
         'gradient_norm': ['mean', 'max'],
         'entropy': ['mean'],
-        'kl': ['mean', 'std'],
-        'kl_divergence': ['mean', 'std'],
-        'return': ['mean', 'std'],
-        'advantage': ['mean', 'std'],
+        'kl': ['mean', 'var'],
+        'kl_divergence': ['mean', 'var'],
+        'return': ['mean', 'var'],
+        'advantage': ['mean', 'var'],
         'accuracy': ['mean'],
         'perplexity': ['mean'],
         'policy_update': ['last'],
+        'value_update': ['last'],
+        'reference_update': ['last'],
         'global_step': ['last'],
         # Regex patterns
-        r'.*_reward$': ['mean', 'std'],
+        r'.*_reward$': ['mean'],
         r'.*_count$': ['sum'],
         r'.*_total$': ['sum'],
-        r'.*_update$': ['sum'],
+        r'.*_update$': ['last'],
         r'^time/.*$': ['sum'],
         r'^resource/.*$': ['mean', 'min', 'max'],
         # Default
@@ -81,14 +88,14 @@ class MetricHandler(BaseHandler):
 
     def __init__(
         self,
-        dist_manager: DistributedManager,
+        dist_ops: DistributedOps,
         user_aggregation_config: Optional[Dict[str, List[str]]] = None,
         logger: Optional[logging.Logger] = None,
     ):
         super().__init__(logger)
-        self.dist_manager = dist_manager
-        self.is_master = dist_manager.is_master
-        self.world_size = dist_manager.world_size
+        self.dist_ops = dist_ops
+        self.is_master = dist_ops.is_master
+        self.world_size = dist_ops.world_size
 
         effective_config = self.BASE_DEFAULT_METRICS_AGGREGATION_CONFIG.copy()
         if user_aggregation_config:
@@ -281,8 +288,8 @@ class MetricHandler(BaseHandler):
         )
 
         if self.world_size > 1:
-            self.dist_manager.barrier()
-            gathered_data = self.dist_manager.gather_object(
+            self.dist_ops.barrier()
+            gathered_data = self.dist_ops.gather_object(
                 local_metric_buffer, dst=0
             )
             if self.is_master:
@@ -328,12 +335,38 @@ class MetricHandler(BaseHandler):
                         try:
                             computed_value = aggregator_func(values_array)
                             log_key = key
-                            if (
-                                method_name != 'last'
-                                or not key.startswith('time/')
-                                or not key.endswith('count')
-                                or not key.endswith('total')
-                            ) and len(aggregation_methods) > 1:
+
+                            # create a cleaner final key like '.../accuracy_rate'.
+                            if method_name == 'accuracy_rate' and key.endswith(
+                                '_reward'
+                            ):
+                                # Find the part before the reward name (e.g., "objective/train/")
+                                base_key_part = (
+                                    key.rsplit('/', 1)[0] + '/'
+                                    if '/' in key
+                                    else ''
+                                )
+                                # Construct the new key (e.g., "objective/train/accuracy_rate")
+                                # Assumes the part before _reward is the descriptive name
+                                reward_name = key.rsplit('/', 1)[-1]
+                                metric_name_base = reward_name[
+                                    : -len('_reward')
+                                ]
+                                log_key = (
+                                    f"{base_key_part}{metric_name_base}_rate"
+                                )
+                                self._logger.debug(
+                                    f"Applying specific naming rule for '{method_name}' on key '{key}', resulting in '{log_key}'."
+                                )
+
+                            # Avoid appending if only one method is used OR if it's the default 'mean' for simplicity.
+                            elif (
+                                len(aggregation_methods) > 1
+                                and log_key == key
+                                and not key.startswith('time/')
+                                and not key.endswith('count')
+                                and not key.endswith('total')
+                            ):
                                 log_key = f"{key}_{method_name}"
 
                             if np.isfinite(computed_value):
@@ -356,7 +389,7 @@ class MetricHandler(BaseHandler):
                             f"Aggregator function '{method_name}' not found for metric '{key}'. Skipping method."
                         )
 
-        self.dist_manager.barrier()
+        self.dist_ops.barrier()
 
         return final_aggregated_metrics
 

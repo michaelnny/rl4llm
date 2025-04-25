@@ -10,7 +10,7 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 logger = logging.getLogger(__name__)
 
 
-class ExploreLLMGenerator:
+class HfExploreLLMGenerator:
     """
     A custom class for text generation using a HF language model (LLM).
     Supports batch-specific temperatures, exploring start, and special token replacement.
@@ -805,7 +805,7 @@ if __name__ == '__main__':
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    generator = ExploreLLMGenerator(model, tokenizer, device)
+    generator = HfExploreLLMGenerator(model, tokenizer, device)
 
     # Example batch input
     message = [

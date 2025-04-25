@@ -16,7 +16,7 @@ from rl4llm.constants import (
     LOGGING_PHASES,
     TRAIN_PHASE,
 )
-from rl4llm.core.distributed import DistributedManager
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.logging.handlers import (
     BackendHandler,
     BaseHandler,
@@ -60,7 +60,7 @@ class LoggingManager:
 
     def __init__(
         self,
-        dist_manager: DistributedManager,
+        dist_ops: DistributedOps,
         output_dir: str,
         metrics_aggregation_config: Optional[Dict[str, List[str]]] = None,
         enable_wandb: bool = False,
@@ -69,11 +69,11 @@ class LoggingManager:
         sample_file_format: str = 'parquet',
         log_level: Optional[str] = None,
     ):
-        self.dist_manager = dist_manager
+        self.dist_ops = dist_ops
         self.output_dir = output_dir
-        self.rank = dist_manager.global_rank
-        self.is_master = dist_manager.is_master
-        self.world_size = dist_manager.world_size
+        self.rank = dist_ops.global_rank
+        self.is_master = dist_ops.is_master
+        self.world_size = dist_ops.world_size
 
         # Setup Console Logger
         log_level_str = (
@@ -89,12 +89,12 @@ class LoggingManager:
 
         # Initialize Handlers
         self.metric_handler = MetricHandler(
-            dist_manager=self.dist_manager,
+            dist_ops=self.dist_ops,
             user_aggregation_config=metrics_aggregation_config,
             logger=self.console_logger,
         )
         self.sample_handler = SampleHandler(
-            dist_manager=self.dist_manager,
+            dist_ops=self.dist_ops,
             log_dir=self.output_dir,
             sample_file_format=sample_file_format,
             sample_buffer_size=sample_buffer_size,
@@ -108,7 +108,7 @@ class LoggingManager:
             logger=self.console_logger,
         )
         self.resource_handler = ResourceHandler(
-            dist_manager=self.dist_manager,
+            dist_ops=self.dist_ops,
             logger=self.console_logger,
             sampling_interval_seconds=10.0,
         )
@@ -266,7 +266,7 @@ class LoggingManager:
                 self.error(
                     f"Error closing handler {type(handler).__name__}: {e}"
                 )
-        self.dist_manager.barrier()
+        self.dist_ops.barrier()
         self.info(f"LoggingManager closed on Rank {self.rank}.")
 
     def info(self, message: str, **kwargs) -> None:

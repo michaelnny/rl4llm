@@ -5,7 +5,17 @@ import random
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypeAlias,
+    TypedDict,
+    Union,
+)
 
 import numpy as np
 import torch
@@ -18,42 +28,77 @@ from transformers import (
 )
 from transformers.tokenization_utils_base import PaddingStrategy
 
-from rl4llm.constants import LOGGER_NAME
 from rl4llm.utils.dataset_utils import shard_dataset
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
-class EpisodeData(BaseModel):
-    """LLM ENV rollout episode"""
+RewardTransform: TypeAlias = Optional[
+    Callable[[Dict[str, List[float]]], torch.Tensor]
+]
 
-    prompt_tokens: torch.Tensor = Field(..., description='Prompt token ids')
-    prompt_text: str = Field(..., description='Prompt full text')
+
+class EpisodeMetadata(BaseModel):
+    """Episode metadata for logging and monitoring"""
+
+    # For logging
+    prompt: str = Field(..., description='Prompt full text')
     prompt_length: int = Field(..., description='Prompt token size')
-    completion_tokens: torch.Tensor = Field(
-        ..., description='Completion token ids'
-    )
-    completion_text: str = Field(..., description='Completion full text')
+    completion: str = Field(..., description='Completion full text')
     completion_length: int = Field(..., description='Completion token size')
     reward_dict: Dict[str, float] = Field(
         ..., description='Rewards for the episode'
     )
-    raw_data: Optional[Dict] = Field(None, description='Raw sample data')
+    ground_truth: Union[str, float, int] = Field(
+        ..., description='Ground truth to the problem'
+    )
+    # raw_data: Optional[Dict] = Field(None, description='Raw sample data')
     timestamp: Optional[str] = Field(
         default_factory=lambda: datetime.now().isoformat(),
         description='Timestamp when the data was generated',
     )
 
+
+class EpisodeData(BaseModel):
+    """LLM ENV rollout episode"""
+
+    # RL transition training
+    states: torch.Tensor = Field(
+        ...,
+        description='A long tensor for token sequences from t=0, 1, ..., T-1',
+    )
+    actions: torch.Tensor = Field(
+        ...,
+        description='A long tensor for token sequences from t=1, 2, ..., T-1, T',
+    )
+    loss_mask: torch.Tensor = Field(
+        ...,
+        description='A boolean tensor (0s masked prompt tokens, 1s completion tokens) corresponding to token sequences from t=1, 2, ..., T-1, T',
+    )
+    terminal_reward: float = Field(
+        ...,
+        description='A float for terminal reward (transformed) based on the full completion token sequence',
+    )
+
+    # For logging
+    metadata: EpisodeMetadata
+
     @model_validator(mode='after')
     def check_tensor_shapes(cls, values):
-        if values.prompt_tokens.dim() != 1:
-            raise ValueError(
-                f"Prompt tokens tensor must be 1D vector: {values.prompt_tokens.shape}"
-            )
-        if values.completion_tokens.dim() != 1:
-            raise ValueError(
-                f"Completion tokens tensor must be 1D vector: {values.completion_tokens.shape}"
-            )
+        tensors = [
+            values.states,
+            values.actions,
+            values.loss_mask,
+        ]
+
+        # Ensure all tensors are of the same shape
+        tensor_shapes = [
+            tensor.shape if isinstance(tensor, torch.Tensor) else None
+            for tensor in tensors
+        ]
+
+        if len(set(tensor_shapes)) > 1:
+            raise ValueError(f"Tensors have mismatched shapes: {tensor_shapes}")
 
         return values
 
@@ -155,11 +200,12 @@ class BaseEnv(ABC):
         batch_size: int,
         group_size: int,
         max_prompt_length: Optional[int] = 1024,
-        rank: int = 0,
-        world_size: int = 1,
+        rank: Optional[int] = 0,
+        world_size: Optional[int] = 1,
         seed: Optional[int] = 42,
-        shuffle_dataset: bool = True,
-        num_workers: int = 0,
+        shuffle_dataset: Optional[bool] = True,
+        num_workers: Optional[int] = 0,
+        reward_transform_fn: Optional[RewardTransform] = None,
     ):
         """
         Initializes the Env.
@@ -181,6 +227,7 @@ class BaseEnv(ABC):
             seed: The random seed for reproducibility. Defaults to 42.
             shuffle_dataset: Whether to shuffle the dataset before iterating. Defaults to True.
             num_workers: Number of worker processes for the DataLoader. Defaults to 0.
+            reward_transform_fn: Transform multiple rewards into a single reward for training.
         """
         if batch_size < 1:
             raise ValueError('Batch size must be at least 1')
@@ -200,6 +247,10 @@ class BaseEnv(ABC):
             raise ValueError(
                 "Dataset must contain 'prompt' and 'ground_truth' columns."
             )
+        if len(reward_functions) > 1 and not reward_transform_fn:
+            raise ValueError(
+                'Reward transform function is required when using mixed reward functions.'
+            )
 
         self.tokenizer = tokenizer
         self.reward_functions = reward_functions
@@ -211,6 +262,8 @@ class BaseEnv(ABC):
         self.seed = seed
         self.shuffle_dataset = shuffle_dataset
         self.num_workers = num_workers
+        self.reward_transform_fn = reward_transform_fn
+        self.epoch = 0
 
         self._setup_tokenizer()
         self._set_seed()
@@ -223,11 +276,36 @@ class BaseEnv(ABC):
             tokenized_dataset, self.world_size, self.rank
         )
 
+        logger.info(
+            f"Env - Rank {self.rank} has {len(self.sharded_dataset)} samples"
+        )
+
         # Setup DataLoader
         self.loader = DataLoader(
             self.sharded_dataset,
             batch_size=self.batch_size,
             shuffle=self.shuffle_dataset,
+            collate_fn=self._collate_fn,
+            num_workers=self.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
+        self.dataset_iterator = iter(self.loader)
+
+    def shuffle(self):
+        """
+        Shuffles the dataset and resets the DataLoader iterator.
+
+        This method shuffles the sharded dataset using a seed based on the initial seed,
+        current epoch, and rank, ensuring reproducibility and diversity across ranks
+        in distributed training.
+        """
+        self.epoch += 1
+        shuffle_seed = self.seed + self.epoch + self.rank
+        self.sharded_dataset = self.sharded_dataset.shuffle(seed=shuffle_seed)
+        self.loader = DataLoader(
+            self.sharded_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
             collate_fn=self._collate_fn,
             num_workers=self.num_workers,
             pin_memory=torch.cuda.is_available(),
@@ -267,22 +345,22 @@ class BaseEnv(ABC):
 
     def _tokenize_dataset(self, dataset: Dataset) -> Dataset:
         """
-        Tokenizes the 'prompt' column of the dataset.
+        Tokenizes the 'prompt' column of the dataset, skipping samples that exceed max_prompt_length.
 
         Args:
             dataset: The input dataset with a 'prompt' column.
 
         Returns:
             A new dataset with 'input_ids' and 'attention_mask' columns,
-            containing unpadded tokenized prompts. Original columns are kept.
+            containing unpadded tokenized prompts for valid samples. Original columns are kept.
         """
         logger.info(f"Rank {self.rank}: Starting dataset tokenization...")
 
-        def tokenize_fn(examples):
+        def tokenize_fn(item):
+            # Tokenize prompt without truncation
             tokenized = self.tokenizer(
-                examples['prompt'],
-                truncation=True,
-                max_length=self.max_prompt_length,
+                item['prompt'],
+                truncation=False,
                 padding=False,
             )
             return {
@@ -290,13 +368,25 @@ class BaseEnv(ABC):
                 'attention_mask': tokenized['attention_mask'],
             }
 
+        # Tokenize the dataset
         tokenized_dataset = dataset.map(
             tokenize_fn,
-            batched=True,
+            batched=False,
             num_proc=self.num_workers if self.num_workers > 0 else None,
             desc=f"Rank {self.rank} Tokenizing prompts",
         )
-        logger.info(f"Rank {self.rank}: Dataset tokenization complete.")
+
+        # Filter out samples where input_ids length exceeds max_prompt_length
+        tokenized_dataset = tokenized_dataset.filter(
+            lambda x: len(x['input_ids']) <= self.max_prompt_length,
+            num_proc=self.num_workers if self.num_workers > 0 else None,
+            desc=f"Rank {self.rank} Filtering long prompts",
+        )
+
+        logger.info(
+            f"Rank {self.rank}: Dataset tokenization complete. "
+            f"Kept {len(tokenized_dataset)} samples after filtering."
+        )
         return tokenized_dataset
 
     def _collate_fn(self, batch: List[Dict]) -> Dict[str, Any]:
@@ -444,7 +534,102 @@ class BaseEnv(ABC):
                     f"Reward function '{fn.name}' failed: {e}", exc_info=True
                 )
                 rewards_dict[fn.name] = [0.0] * len(completions)
+
         return rewards_dict
+
+    def _transform_rewards(
+        self, rewards_dict: Dict[str, List[float]]
+    ) -> List[float]:
+        """Transform multiple rewards into a single reward scalar"""
+
+        reward_names: List[str] = list(rewards_dict.keys())
+
+        if len(reward_names) == 1:
+            return rewards_dict[reward_names[0]]
+
+        # Apply transformation function
+        try:
+            return self.reward_transform_fn(rewards_dict)
+        except Exception as e:
+            raise RuntimeError(f"Reward transformation failed: {str(e)}")
+
+    def _to_episodes(
+        self,
+        state: EnvState,
+        completions: List[str],
+        completion_tokens: List[torch.Tensor],
+    ) -> List[EpisodeData]:
+        """Post-processing rollout and construct episode data.
+
+        Args:
+            state (EnvState): Initial states contains prompts and other info.
+            completions (List[str]): List of completion texts.
+            completion_tokens (List[torch.Tensor]): List of completion tokens.
+
+        Returns:
+            A list of EpisodeData data.
+        """
+
+        # Compute rewards for the completions
+        rewards_dict = self._calculate_rewards(completions, state.ground_truth)
+
+        # transform multiple rewards (e.g accuracy, format etc) into a single scalar for the same output
+        terminal_rewards = self._transform_rewards(rewards_dict)
+        prompt_tokens = [
+            state.input_ids[i][state.attention_mask[i] == 1].cpu()
+            for i in range(len(state.input_ids))
+        ]
+
+        full_sequences = [
+            torch.concat([prompt_toks, completion_toks]).long()
+            for prompt_toks, completion_toks in zip(
+                prompt_tokens, completion_tokens
+            )
+        ]
+
+        # States: tokens 0 to N-1; Actions: tokens 1 to N
+        state_sequences = [seq[:-1] for seq in full_sequences]
+        action_sequences = [seq[1:] for seq in full_sequences]
+
+        results = []
+
+        for i in range(len(completions)):
+            states = state_sequences[i]
+            actions = action_sequences[i]
+            prompt_len = len(prompt_tokens[i])
+            completion_len = len(completion_tokens[i])
+
+            # Do not include the prompt tokens in the loss
+            # for example, if we have a sequence token ids: [1, 2, 3, 4, 5, 6, 7]
+            # where [1, 2, 3, 4] are the prompt tokens
+            # and [5, 6, 7] are the completion tokens
+            # the, the loss mask will be [0, 0, 0, 1, 1, 1]
+
+            loss_mask = torch.zeros_like(actions, dtype=torch.bool)
+            loss_mask[prompt_len - 1 :] = True
+
+            assert loss_mask.sum().item() == completion_len
+
+            meta = EpisodeMetadata(
+                prompt=state.prompt[i],
+                prompt_length=prompt_len,
+                completion=completions[i],
+                completion_length=completion_len,
+                reward_dict={k: v[i] for k, v in rewards_dict.items()},
+                ground_truth=state.ground_truth[i],
+            )
+
+            ep = EpisodeData(
+                states=states,
+                actions=actions,
+                loss_mask=loss_mask,
+                terminal_reward=terminal_rewards[i],
+                metadata=meta,
+            )
+
+            results.append(ep)
+
+        return results
 
     @abstractmethod
     @torch.inference_mode()

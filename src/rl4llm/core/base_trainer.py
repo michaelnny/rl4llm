@@ -1,27 +1,22 @@
 """
 Base RL trainer for LLMs in distributed training setup.
 
-This module defines an abstract `RLTrainer` class that provides the foundational
+This module defines an abstract `BaseRLTrainer` class that provides the foundational
 infrastructure for reinforcement learning algorithms with LLM environments,
 including training loop, checkpointing, model sync, and logging.
 """
 
-import logging
 import os
-import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from copy import deepcopy
 from typing import (
     Any,
-    Callable,
     Dict,
     Generator,
     List,
     Optional,
     Tuple,
-    TypeAlias,
     Union,
 )
 
@@ -36,23 +31,17 @@ from rl4llm.constants import EVAL_PHASE, LOGGING_PHASES, TRAIN_PHASE
 from rl4llm.core.base_env import BaseEnv, EpisodeData
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.deepspeed_mixin import DeepSpeedUtilsMixin
-from rl4llm.core.distributed import DistributedManager
 from rl4llm.core.training_mixin import TrainingMixin
 from rl4llm.logging import LoggingManager
 
-# Define the custom type
-RewardTransform: TypeAlias = Optional[
-    Callable[[Dict[str, List[float]]], torch.Tensor]
-]
 
-
-class RLConfig(BaseModel):
+class BaseRLConfig(BaseModel):
     """Basic config for RL fine-tuning for LLM"""
 
     """For RL sample generation"""
     max_prompt_tokens: Optional[int] = Field(
         1024,
-        ge=256,
+        ge=20,
         le=10240,
         description='Skip sample with prompt length greater than this to avoid peak memory spikes',
     )
@@ -88,12 +77,6 @@ class RLConfig(BaseModel):
         le=5120,
         description='Number of samples to collect before update policy',
     )
-    num_updates: int = Field(
-        4,
-        ge=1,
-        le=5,
-        description='PPO update epochs for a collection of samples',
-    )
     train_micro_batch_size: int = Field(
         4,
         ge=1,
@@ -106,16 +89,13 @@ class RLConfig(BaseModel):
         le=1024,
         description='Global batch size across devices/ranks for training',
     )
-    clip_eps: float = Field(
-        0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon'
-    )
     gamma: float = Field(
         1.0,
         ge=0.0,
         le=1.0,
         description='Default discount factor for compute returns',
     )
-    normalize_rewards: bool = Field(True, description='Normalized rewards')
+    normalize_rewards: bool = Field(False, description='Normalized rewards')
     normalize_advantages: bool = Field(
         False, description='Normalized advantages before compute PG loss'
     )
@@ -158,19 +138,19 @@ class RLConfig(BaseModel):
             raise ValueError(
                 'Global train batch size must be divisible by mini batch size'
             )
-        # if values.normalize_advantages and values.train_micro_batch_size < 4:
-        #     raise ValueError(
-        #         'Mini batch size must be at least 4 when normalize advantages is True'
-        #     )
+        if values.normalize_advantages and values.train_micro_batch_size < 4:
+            raise ValueError(
+                'Mini batch size must be at least 4 when normalize advantages is True'
+            )
         return values
 
     class Config:
         arbitrary_types_allowed = True
 
 
-class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
+class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     """
-    Base class for training RL algorithms on LLM environments using DeepSpeed with Zero-1/Zero-2 only.
+    Base class for training RL algorithms on LLM environments using DeepSpeed.
     """
 
     _train_phase: str = TRAIN_PHASE
@@ -179,59 +159,54 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
     def __init__(
         self,
-        config: RLConfig,
+        config: BaseRLConfig,
         tokenizer: PreTrainedTokenizer,
         policy_engine: DeepSpeedEngine,
-        dist_manager: DistributedManager,
-        logger: LoggingManager,
-        artifacts_path: str,
+        log_config: Dict[str, Any],
         train_env: BaseEnv,
         eval_env: Optional[BaseEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
-        reward_transform_fn: Optional[RewardTransform] = None,
+        value_engine: Optional[DeepSpeedEngine] = None,
         inference_client: Optional[InferenceClient] = None,
         seed: Optional[int] = 175,
+        **kwargs: Any,
     ):
-        if config.train_rollout_size % dist_manager.world_size != 0:
-            raise ValueError(
-                'Train rollout size must be divisible by world size'
-            )
-        if config.eval_rollout_size % dist_manager.world_size != 0:
-            raise ValueError(
-                'Evaluation rollout size must be divisible by world size'
-            )
-        if len(train_env.reward_functions) > 1 and not reward_transform_fn:
-            raise ValueError(
-                'Reward aggregator is required when using mixed reward functions.'
-            )
+        """Initialize the base trainer with DistributedOps instance"""
+
+        TrainingMixin.__init__(self)
 
         self.config = config
         self.tokenizer = tokenizer
         self.policy_engine = policy_engine
-        self.dist_manager = dist_manager
-        self.logger = logger
+        self.value_engine = value_engine
+        self.logger = LoggingManager(self.dist_ops, **log_config)
         self.train_env = train_env
         self.eval_env = eval_env
-        self.artifacts_path = artifacts_path
+        self.output_dir = log_config.get('output_dir')
         self.seed = seed
-        self.device = dist_manager.device
-        self.torch_dtype = self.get_torch_dtype(policy_engine)
+        self.device = self.dist_ops.device
+        self._torch_dtype = None
 
-        self.checkpoint_dir = os.path.join(artifacts_path, 'checkpoints')
-        if dist_manager.is_master:
+        if not self.output_dir:
+            raise ValueError('Invalid output_dir for logging')
+
+        self.checkpoint_dir = os.path.join(self.output_dir, 'checkpoints')
+        if self.dist_ops.is_master:
             os.makedirs(self.checkpoint_dir, exist_ok=True)
-        dist_manager.barrier()
+        self.dist_ops.barrier()
 
         self.reference_model: Optional[
             Union[PreTrainedModel, DeepSpeedEngine]
         ] = ref_model
 
         self.inference_client = inference_client
-        self.reward_transform_fn = reward_transform_fn
 
         self.global_step = 0
         self.policy_update_count = 0
+        self.value_update_count = 0
         self.ref_update_count = 0
+
+        self.called_release_inference_memory = None
 
         self.initialize_trainer()
 
@@ -239,6 +214,18 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             self.logger.info('Using inference engine client.')
 
         self.logger.info('RL Trainer initialized.')
+
+    @property
+    def torch_dtype(self) -> torch.dtype:
+        """Detects torch runtime data type from deepspeed engine"""
+        if self._torch_dtype is None:
+            if self.policy_engine is not None:
+                self._torch_dtype = self.get_torch_dtype(self.policy_engine)
+            elif self.value_engine is not None:
+                self._torch_dtype = self.get_torch_dtype(self.value_engine)
+            else:
+                raise RuntimeError('Can not detect torch dtype')
+        return self._torch_dtype
 
     @abstractmethod
     def initialize_trainer(self):
@@ -249,13 +236,6 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     def generate_experience(self) -> List[Any]:
         """
         Collects experience (trajectories, rollouts) from the environment.
-        """
-        pass
-
-    @abstractmethod
-    def compute_loss(self, batch: Any, **kwargs) -> torch.Tensor:
-        """
-        Computes loss for model updates.
         """
         pass
 
@@ -281,6 +261,11 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         """
         pass
 
+    @abstractmethod
+    def save_checkpoint(self, tag: str) -> None:
+        """Saves model checkpoint"""
+        pass
+
     @contextmanager
     def unwrapped_model_for_generation(
         self,
@@ -296,113 +281,107 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.clean_up()
 
     def _prepare_for_generation(self):
-        """Switch models to eval mode for rollout."""
+        """Free up GPU memory and switch models to eval mode for rollout."""
 
-        if self.reference_model:
-            self.reference_model = self.reference_model.to('cpu')
-            self.reference_model.eval()
-
-        if self.can_offload_state(self.policy_engine):
-            self.policy_engine.offload_states()
-
+        self._configure_model(self.reference_model, 'cpu', mode='eval')
         if self.is_cohost_inference_engine():
-            try:
-                self.policy_engine = self.policy_engine.to('cpu')
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to offload deepspeed engine, error: {str(e)}"
-                )
+            self._configure_model(
+                self.policy_engine, 'cpu', state_action='offload'
+            )
         else:
-            self.policy_engine.eval()
-
+            self._configure_model(
+                self.policy_engine,
+                self.device,
+                state_action='offload',
+                mode='eval',
+            )
+        self._configure_model(self.value_engine, 'cpu', state_action='offload')
         self.clean_up()
 
     def _prepare_for_pre_processing(self):
         """Switch models handle pre-processing (like compute logprobs) before training."""
-        if self.is_cohost_inference_engine():
-            try:
-                # Try offload GPU RAM caches
-                self.inference_client.release_memory()
 
-                self.policy_engine = self.policy_engine.to(self.device)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to offload inference engine, error: {str(e)}"
-                )
-
-        if self.can_offload_state(self.policy_engine):
-            self.policy_engine.offload_states()
-
-        self.policy_engine.eval()
-        if self.reference_model:
-            self.reference_model = self.reference_model.to(self.device)
-            self.reference_model.eval()
-
+        self._release_inference_memory()
         self.clean_up()
+
+        self._configure_model(
+            self.policy_engine, self.device, state_action='offload', mode='eval'
+        )
+        self._configure_model(
+            self.value_engine, self.device, state_action='offload', mode='eval'
+        )
+        self._configure_model(self.reference_model, self.device, mode='eval')
 
     def _prepare_for_training(self):
         """Switch models to train mode."""
-        if self.is_cohost_inference_engine():
-            try:
-                # Try offload GPU RAM caches
-                self.inference_client.release_memory()
 
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to offload inference engine, error: {str(e)}"
-                )
-
-        if self.reference_model:
-            self.reference_model = self.reference_model.to('cpu')
-
-        if self.can_offload_state(self.policy_engine):
-            self.policy_engine.reload_states()
-
-        self.policy_engine.train()
-
+        self._release_inference_memory()
+        self._configure_model(self.reference_model, 'cpu')
         self.clean_up()
+        self._configure_model(
+            self.policy_engine, self.device, state_action='reload', mode='train'
+        )
+        self._configure_model(
+            self.value_engine, self.device, state_action='reload', mode='train'
+        )
 
-    def transform_batch_rewards(
-        self, episodes: List[EpisodeData]
-    ) -> torch.Tensor:
+    def _configure_model(
+        self,
+        model: Union[PreTrainedModel, DeepSpeedEngine],
+        device: torch.device,
+        state_action: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> None:
         """
-        Aggregate and transform rewards for a batch of episodes, handling multiple reward functions.
+        Configure a model by moving it to a specified device,
+        managing its optimizer states (deepspeed engine), and setting its train/eval mode.
 
         Args:
-            episodes: List of EpisodeData objects containing reward dictionaries
+            model (Union[PreTrainedModel, DeepSpeedEngine]): The model to configure, or None if no configuration is needed.
+            device (str): The target device to move the model to (e.g., 'cpu', 'cuda').
+            state_action (Optional[str], optional): Action to perform on deepspeed engine states, if supported.
+                Can be 'offload' to offload states or 'reload' to reload states. Defaults to None.
+            mode (Optional[str], optional): Mode to set the model to. Can be 'eval' for evaluation
+                or 'train' for training. Defaults to None, in which case no mode is set.
 
         Returns:
-            torch.Tensor containing transformed rewards
+            None
         """
-        if not episodes:
-            raise ValueError('Episodes list cannot be empty')
+        if state_action is not None and state_action not in [
+            'offload',
+            'reload',
+        ]:
+            raise ValueError(f"Invalid state_action {state_action}")
+        if mode is not None and mode not in ['train', 'eval']:
+            raise ValueError(f"Invalid mode {mode}")
+
+        if model is not None:
+            model = model.to(device)
+            if self.can_offload_state(model) and state_action:
+                if state_action == 'offload':
+                    model.offload_states()
+                elif state_action == 'reload':
+                    model.reload_states()
+            if mode == 'eval':
+                model.eval()
+            elif mode == 'train':
+                model.train()
+
+    def _release_inference_memory(self):
+        """Try to release inference memory in co-hosting mode"""
+        if (
+            not self.is_cohost_inference_engine()
+            or self.called_release_inference_memory
+        ):
+            return
 
         try:
-            reward_names: List[str] = episodes[0].reward_dict.keys()
-        except AttributeError:
-            raise ValueError(
-                'EpisodeData objects must have reward_dict attribute'
-            )
-
-        num_episodes = len(episodes)
-        flattened: Dict[str, torch.Tensor] = {
-            name: torch.zeros(num_episodes, dtype=self.torch_dtype)
-            for name in reward_names
-        }
-
-        for i, ep in enumerate(episodes):
-            for name in reward_names:
-                flattened[name][i] = ep.reward_dict[name]
-
-        # Early return for single reward case
-        if len(reward_names) == 1:
-            return flattened[next(iter(reward_names))]
-
-        # Apply transformation function
-        try:
-            return self.reward_transform_fn(flattened)
+            self.inference_client.release_memory()
+            self.called_release_inference_memory = True
         except Exception as e:
-            raise RuntimeError(f"Reward transformation failed: {str(e)}")
+            raise RuntimeError(
+                f"Failed to release inference engine memory, error: {str(e)}"
+            )
 
     def sync_reference_model(self):
         """Copies current policy weights to reference model."""
@@ -422,7 +401,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     with deepspeed.zero.GatheredParameters(
                         self.reference_model.parameters()
                     ):
-                        if self.dist_manager.is_master:
+                        if self.dist_ops.is_master:
                             self.reference_model.module.load_state_dict(
                                 policy_state_dict
                             )
@@ -439,7 +418,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.ref_update_count += 1
         self.logger.log_scalar('train/reference_update', self.ref_update_count)
         self.logger.debug('Reached barrier after sync attempt.')
-        self.dist_manager.barrier()
+        self.dist_ops.barrier()
         self.logger.debug('Passed barrier after sync attempt.')
 
         self.logger.info('Reference model sync process finished.')
@@ -454,12 +433,21 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             return
 
         try:
+            # We first save the full weights to a shared file system
+            # then call the inference server to load the weights
             with tempfile.TemporaryDirectory(
                 prefix=f"ckpt_sync_{self.global_step}_", dir=self.checkpoint_dir
             ) as temp_ckpt_path:
-                # Save full checkpoint.
+
                 self.logger.debug(
                     f"Attempting to save weights to {temp_ckpt_path}"
+                )
+                # Free up model
+                self._configure_model(
+                    self.value_engine,
+                    'cpu',
+                    state_action='offload',
+                    mode='eval',
                 )
                 self.save_weights_hf_pretrained(
                     self.policy_engine, temp_ckpt_path
@@ -467,17 +455,20 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 self.logger.debug(
                     f"Successfully saved weights to {temp_ckpt_path}"
                 )
+                self.clean_up()
 
                 # Only the master process interacts with the inference client
-                if self.dist_manager.is_master:
+                if self.dist_ops.is_master:
                     try:
                         self.logger.debug(
                             f"Master process updating inference engine from {temp_ckpt_path}..."
                         )
+                        # Important, make sure inference engine is on CUDA before update the weights
                         self.inference_client.resume_memory()
                         self.inference_client.update_weights_from_file(
                             model_path=temp_ckpt_path
                         )
+                        self.called_release_inference_memory = False
                         self.logger.debug(
                             'Inference engine weights updated successfully by master.'
                         )
@@ -493,7 +484,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 # Barrier to ensure all processes wait until the master (if applicable)
                 # has finished its work within the 'with' block or an error occurred.
                 self.logger.debug('Reached barrier after sync attempt.')
-                self.dist_manager.barrier()
+                self.dist_ops.barrier()
                 self.logger.debug('Passed barrier after sync attempt.')
 
                 self.logger.info('Policy model sync process finished.')
@@ -542,36 +533,41 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         for ep in samples:
             # Save data to external file
             data_to_log = {
-                'rank': self.dist_manager.global_rank,
-                'timestamp': ep.timestamp,
-                'prompt_length': ep.prompt_length,
-                'completion_length': ep.completion_length,
-                'prompt_text': ep.prompt_text,
-                'completion_text': ep.completion_text,
-                **ep.reward_dict,
+                'rank': self.dist_ops.global_rank,
+                **ep.metadata.model_dump(),
             }
-            if ep.raw_data and 'ground_truth' in ep.raw_data:
-                data_to_log['ground_truth'] = ep.raw_data['ground_truth']
             self.logger.log_sample(phase, data_to_log, step)
 
             # Logging metrics
-            for k, v in ep.reward_dict.items():
+            for k, v in ep.metadata.reward_dict.items():
                 self.logger.log_scalar(f"{metric_key}/{k}", v)
             self.logger.log_scalar(
-                f"{token_metric_key}/completion_length", ep.completion_length
+                f"{token_metric_key}/completion_length",
+                ep.metadata.completion_length,
             )
             self.logger.log_scalar(
-                f"{token_metric_key}/prompt_length", ep.prompt_length
+                f"{token_metric_key}/prompt_length", ep.metadata.prompt_length
             )
 
-    def save_checkpoint(self, step: int):
-        """Saves a model checkpoint."""
-        tag = f"iteration_{step}"
-        save_path = os.path.join(self.checkpoint_dir, tag)
-        self.logger.info(f"Saving checkpoint to {save_path}...")
-        self.policy_engine.save_checkpoint(save_path)
-        self.dist_manager.barrier()
-        self.logger.info('Checkpoint saved.')
+    def extract_state_action_sequences(
+        self, episodes: List[EpisodeData]
+    ) -> Tuple[List[int], List[List[int]], List[List[int]]]:
+        """Extract state and action sequences from the episode list"""
+
+        # Prepare batched sequences for model forward pass
+        sequences = [
+            torch.concat([ep.prompt_tokens, ep.completion_tokens]).long()
+            for ep in episodes
+        ]
+        sequence_lengths = [
+            len(seq) for seq in sequences
+        ]  # Total length (prompt + completion)
+
+        # States: tokens 0 to N-1; Actions: tokens 1 to N
+        state_sequences = [seq[:-1] for seq in sequences]
+        action_sequences = [seq[1:] for seq in sequences]
+
+        return sequence_lengths, state_sequences, action_sequences
 
     def train(self, job_config: Dict):
         """
@@ -587,10 +583,10 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 hyperparameters and other metadata useful for logging or reproducibility.
         """
         self.logger.info('Initializing training loop...')
-        if job_config and self.dist_manager.is_master:
+        if job_config and self.dist_ops.is_master:
             self.logger.log_hyperparams(job_config)
 
-        self.dist_manager.synchronize()
+        self.dist_ops.synchronize()
 
         if self.config.eval_interval > 0 and self.eval_env:
             self.logger.info('Running initial evaluation before training...')
@@ -598,18 +594,18 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 self._prepare_for_generation()
                 self.evaluate_step()
                 self.clean_up()
-            self.dist_manager.barrier()
+            self.dist_ops.barrier()
 
         while self.global_step < self.config.max_steps:
             with self.logger.timer('global_step'):
                 self.logger.info(
-                    f'Step {self.global_step}: Generating rollout on training environment...'
+                    f'Step {self.global_step}: Running rollout on training environment...'
                 )
                 with self.logger.timer('generate_experience'):
                     self._prepare_for_generation()
                     local_experience = self.generate_experience()
                     self.clean_up()
-                self.dist_manager.barrier()
+                self.dist_ops.barrier()
 
                 self.logger.info(
                     'Preprocessing collected experience for training...'
@@ -618,21 +614,19 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     self._prepare_for_pre_processing()
                     train_dataloader = self.build_train_loader(local_experience)
                     self.clean_up()
-                self.dist_manager.barrier()
+                self.dist_ops.barrier()
 
-                self.logger.info('Starting model training step...')
+                self.logger.info('Starting train model...')
                 with self.logger.timer('train_step'):
                     self._prepare_for_training()
                     self.train_step(train_dataloader)
                     self.clean_up()
-                self.dist_manager.barrier()
-
-                self.logger.info('Post-training tasks starting...')
+                self.dist_ops.barrier()
 
                 self.logger.info('Synchronizing policy model...')
                 with self.logger.timer('sync_policy_model'):
                     self.sync_policy_model()
-                self.dist_manager.barrier()
+                self.dist_ops.barrier()
 
                 if (
                     self.reference_model
@@ -644,7 +638,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     self.logger.info('Synchronizing reference model...')
                     with self.logger.timer('sync_reference_model'):
                         self.sync_reference_model()
-                    self.dist_manager.barrier()
+                    self.dist_ops.barrier()
 
                 if (
                     self.config.checkpoint_interval > 0
@@ -665,7 +659,7 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                         self._prepare_for_generation()
                         self.evaluate_step()
                         self.clean_up()
-                    self.dist_manager.barrier()
+                    self.dist_ops.barrier()
 
             self.logger.aggregate_and_log(self.global_step)
             del local_experience, train_dataloader
@@ -678,5 +672,5 @@ class RLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
     def on_exit(self):
         """Final clean-up and checkpoint save."""
-        self.save_checkpoint(self.config.max_steps)
+        self.save_checkpoint('last')
         self.logger.close()

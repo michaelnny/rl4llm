@@ -1,7 +1,5 @@
-import random
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import List, Optional
 
-import sglang as sgl
 import torch
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
 
@@ -153,13 +151,13 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
                 self.target_tokens_tensor = self.target_tokens_tensor.to(device)
             target_tokens_dev = self.target_tokens_tensor
 
-        temps = []
         for row in range(bsz):
             cfg = custom_param_list[row]
             step = int(cfg.get('step', 0))
             replace_prob = float(cfg.get('replace_prob', 0.0))
             replace_count = int(cfg.get('replace_count', 0))
 
+            # Exploring start
             if (
                 self.explore_steps > 0
                 and self.explore_skip_n
@@ -179,6 +177,7 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
                 mask[top_k_indices] = 100.0
                 logits[row] = mask
 
+            # Special token 'replacement'
             if (
                 source_tokens_dev is not None
                 and target_tokens_dev is not None
@@ -200,120 +199,5 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
                     cfg['replace_count'] = replace_count + 1
 
             cfg['step'] = step + 1
-            temps.append(float(cfg.get('temperature', 1.0)))
-
-        temps_tensor = torch.tensor(
-            temps, dtype=logits.dtype, device=device
-        ).unsqueeze(1)
-        temps_tensor = torch.clamp(temps_tensor, min=1e-6)
-        finite_mask = torch.isfinite(logits)
-        logits[finite_mask] = (
-            logits[finite_mask] / temps_tensor.expand_as(logits)[finite_mask]
-        )
 
         return logits
-
-
-# Example Usage (similar to original main, but adding replacement params)
-def main():
-    # Make sure to have the tokenizer for the model to get token IDs
-    from transformers import AutoTokenizer
-
-    model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    try:
-        source_tokens = [tokenizer.eos_token_id]
-        target_tokens = [tokenizer.encode(kwd)[0] for kwd in [' Wait', ' Hmm']]
-        print(f"Using Source Tokens (IDs): {source_tokens}")
-        print(f"Using Target Tokens (IDs): {target_tokens}")
-    except KeyError as e:
-        print(f"Error: Token not found in tokenizer vocabulary: {e}")
-        print('Please verify the tokens used for source/target exist.')
-        return
-    except Exception as e:
-        print(f"An error occurred getting token IDs: {e}")
-        return
-
-    # --- SGLang Engine Setup ---
-    llm = sgl.Engine(
-        model_path=model_name,
-        enable_custom_logit_processor=True,
-        # enable_memory_saver=True, # Optional
-        # tp_size=1, # Adjust tensor parallelism if needed
-    )
-
-    prompts = [
-        '<|im_start|>user\nDescribe a perfect day<|im_end|>\n<|im_start|>assistant',
-        '<|im_start|>user\nWhat is the meaning of life is<|im_end|>\n<|im_start|>assistant',
-        '<|im_start|>user\nRecipe for chocolate chip cookies<|im_end|>\n<|im_start|>assistant',
-        '<|im_start|>user\nWrite a short story about a lost robot<|im_end|>\n<|im_start|>assistant',
-    ]
-
-    # --- Sampling Parameters ---
-    sampling_params = []
-    base_temp = 0.7
-    replace_probability = 0.99
-
-    for i, p in enumerate(prompts):
-        sp = {
-            'temperature': 1.0,  # Set to 1.0 here, actual temp applied in processor
-            'top_p': 0.95,
-            'top_k': -1,  # Use -1 if top_p is used, or set a value like 50
-            'max_new_tokens': 250,
-            'custom_params': {
-                'temperature': base_temp,
-                'step': 0,
-                'replace_prob': (replace_probability if i % 2 == 0 else 0.0),
-                'replace_count': 0,
-            },
-        }
-        sampling_params.append(sp)
-
-    # --- Logit Processor Setup ---
-    logit_processor = SglExploreLogitProcessor(
-        explore_steps=5,
-        explore_top_k=100,
-        explore_skip_n=0,
-        explore_decay=0.9,
-        replace_source_tokens=source_tokens,
-        replace_target_tokens=target_tokens,
-        replace_check_top_k=10,
-        replace_max_count=3,
-    )
-
-    # --- Generation ---
-    print('Generating text...')
-    outputs = llm.generate(
-        prompts,
-        sampling_params,
-        custom_logit_processor=logit_processor.to_str(),
-    )
-
-    # --- Print Results ---
-    print('\n--- Generation Results ---')
-    for i, (prompt, output, params) in enumerate(
-        zip(prompts, outputs, sampling_params)
-    ):
-        print('===============================')
-        applied_replacement = params['custom_params']['replace_prob'] > 0
-        print(
-            f"Prompt {i + 1} (Replacement Active: {applied_replacement}): {prompt}"
-        )
-        print(f"Generated text: {output['text']}")
-        # You might need to inspect internal state or logs to see replacement counts if needed
-        # print(f"Final custom_params state: {output.get('custom_params_state', 'N/A')}") # If sglang returns final state
-
-    # --- Cleanup ---
-    print('\nReleasing resources...')
-    # llm.shutdown() # Use shutdown or release_memory_occupation depending on sglang version/needs
-    llm.release_memory_occupation()
-    torch.cuda.empty_cache()
-    print(
-        f"CUDA Memory Allocated after cleanup: {torch.cuda.memory_allocated() / 1e6:.2f} MB"
-    )
-
-
-if __name__ == '__main__':
-    # Make sure to install transformers: pip install transformers
-    main()

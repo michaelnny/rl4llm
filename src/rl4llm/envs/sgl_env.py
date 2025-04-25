@@ -1,4 +1,4 @@
-"""Implements MDP ENV for collect samples for RL using SGLang inference server with a custom HTTP client"""
+"""Implements MDP ENV for collect samples using SGLang inference server with a custom HTTP client"""
 
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -6,19 +6,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from rl4llm.constants import LOGGER_NAME
-from rl4llm.core.base_env import (
-    BaseEnv,
-    BaseRewardFunction,
-    EnvState,
-    EpisodeData,
-)
+from rl4llm.core.base_env import BaseEnv, EnvState, EpisodeData, EpisodeMetadata
 from rl4llm.core.base_inference_client import InferenceClient
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
-class InferenceEnv(BaseEnv):
+class SglMDPEnv(BaseEnv):
     """
     Environment for generating samples using SGLang inference server with a custom HTTP client.
     """
@@ -28,6 +22,11 @@ class InferenceEnv(BaseEnv):
     ) -> Union[str, torch.Tensor]:
         """Convert text to token IDs, ensuring EOS token if appropriate."""
         text = item['text']
+
+        if not text:
+            # Use some default text to ensure code will not break
+            text = "I can't help with this question."
+
         meta_info = item.get('meta_info')
         token_ids = list(
             self.tokenizer(
@@ -70,7 +69,7 @@ class InferenceEnv(BaseEnv):
         sampling_params: Dict[str, Any],
         state: EnvState,
         **kwargs: Optional[Dict[str, Any]],
-    ) -> Tuple[List[str], List[torch.Tensor], List[int]]:
+    ) -> Tuple[List[str], List[torch.Tensor]]:
         """
         Generates completions using the LLM for the current state.
 
@@ -84,7 +83,6 @@ class InferenceEnv(BaseEnv):
             A tuple containing:
             - completion_texts: List of decoded completion strings (up to, but not including, EOS).
             - completion_tokens: List of completion token tensors (unpadded, includes EOS if present).
-            - completion_lengths: List of actual lengths for each completion (includes EOS, excludes PAD).
         """
         output = llm.generate(
             prompts=state.prompt,
@@ -94,8 +92,7 @@ class InferenceEnv(BaseEnv):
         # Unpack completions
         completion_texts, completion_ids = self._process_llm_output(output)
 
-        actual_lengths = [len(item) for item in completion_ids]
-        return completion_texts, completion_ids, actual_lengths
+        return completion_texts, completion_ids
 
     @torch.inference_mode()
     def rollout(
@@ -129,25 +126,68 @@ class InferenceEnv(BaseEnv):
             )
             return []
 
-        texts, tokens_list, lengths = self._generate_completions(
+        completions, completion_tokens = self._generate_completions(
             llm, sampling_params, state, **kwargs
         )
-        # post-processing completions
-        rewards = self._calculate_rewards(texts, state.ground_truth)
-        prompt_tokens = [
-            state.input_ids[i][state.attention_mask[i] == 1].cpu()
-            for i in range(len(texts))
-        ]
-        return [
-            EpisodeData(
-                prompt_text=state.prompt[i],
-                prompt_tokens=prompt_tokens[i],
-                prompt_length=len(prompt_tokens[i]),
-                completion_text=texts[i],
-                completion_tokens=tokens_list[i],
-                completion_length=lengths[i],
-                reward_dict={k: v[i] for k, v in rewards.items()},
-                raw_data=state.raw_data[i],
-            )
-            for i in range(len(texts))
-        ]
+
+        return self._to_episodes(state, completions, completion_tokens)
+
+        # rewards_dict = self._calculate_rewards(completions, state.ground_truth)
+
+        # # transform multiple rewards (e.g accuracy, format etc) into a single scalar for the same output
+        # terminal_rewards = self._transform_rewards(rewards_dict)
+        # prompt_tokens = [
+        #     state.input_ids[i][state.attention_mask[i] == 1].cpu()
+        #     for i in range(len(state.input_ids))
+        # ]
+
+        # full_sequences = [
+        #     torch.concat([prompt_toks, completion_toks]).long()
+        #     for prompt_toks, completion_toks in zip(
+        #         prompt_tokens, completion_tokens
+        #     )
+        # ]
+
+        # # States: tokens 0 to N-1; Actions: tokens 1 to N
+        # state_sequences = [seq[:-1] for seq in full_sequences]
+        # action_sequences = [seq[1:] for seq in full_sequences]
+
+        # results = []
+
+        # for i in range(len(completions)):
+        #     states = state_sequences[i]
+        #     actions = action_sequences[i]
+        #     prompt_len = len(prompt_tokens[i])
+        #     completion_len = len(completion_tokens[i])
+
+        #     # Do not include the prompt tokens in the loss
+        #     # for example, if we have a sequence token ids: [1, 2, 3, 4, 5, 6, 7]
+        #     # where [1, 2, 3, 4] are the prompt tokens
+        #     # and [5, 6, 7] are the completion tokens
+        #     # the, the loss mask will be [0, 0, 0, 1, 1, 1]
+
+        #     loss_mask = torch.zeros_like(actions, dtype=torch.bool)
+        #     loss_mask[prompt_len - 1 :] = True
+
+        #     assert loss_mask.sum().item() == completion_len
+
+        #     meta = EpisodeMetadata(
+        #         prompt=state.prompt[i],
+        #         prompt_length=prompt_len,
+        #         completion=completions[i],
+        #         completion_length=completion_len,
+        #         reward_dict={k: v[i] for k, v in rewards_dict.items()},
+        #         ground_truth=state.ground_truth[i]
+        #     )
+
+        #     ep = EpisodeData(
+        #         states=states,
+        #         actions=actions,
+        #         loss_mask=loss_mask,
+        #         terminal_reward=terminal_rewards[i],
+        #         metadata=meta,
+        #     )
+
+        #     results.append(ep)
+
+        # return results

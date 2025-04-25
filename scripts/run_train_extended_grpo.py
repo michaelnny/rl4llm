@@ -1,28 +1,39 @@
-"""Script to run RL GRPO fine-tuning."""
+"""Script to run RL extended GRPO fine-tuning."""
 
 import argparse
 import os
+from functools import partial
 from typing import Any, Dict, List, Union
 
 import deepspeed
 import torch
+from transformers import PreTrainedTokenizer
 
 from rl4llm.core.base_env import BaseRewardFunction
+from rl4llm.core.distributed import DistributedOps
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import HfMDPEnv, SglMDPEnv
+from rl4llm.envs import (
+    ExploreHfMDPEnv,
+    ExploreSglMDPEnv,
+    HfMDPEnv,
+    SglMDPEnv,
+)
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.trainers.grpo_trainer import GRPOConfig, GRPOTrainer
+from rl4llm.trainers.extended_grpo_trainer import (
+    ExtendedGRPOConfig,
+    ExtendedGRPOTrainer,
+)
 from rl4llm.utils import load_yaml_config_file, set_seed
 from rl4llm.utils.model_utils import build_policy_model_and_tokenizer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='RL GRPO fine-tuning')
+    parser = argparse.ArgumentParser(description='RL extended GRPO fine-tuning')
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/grpo_config.yaml',
+        default='./configs/extended_grpo_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -137,12 +148,7 @@ class AccuracyRewardFunction(BaseRewardFunction):
             )
 
         return [
-            math_problem_grader(
-                full_answer=answer,
-                ground_truth=truth,
-                min_score=-1.0,
-                max_score=1.0,
-            )
+            math_problem_grader(full_answer=answer, ground_truth=truth)
             for answer, truth in zip(completions, ground_truths)
         ]
 
@@ -152,6 +158,52 @@ def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
     accuracy_rewards = reward_dict['accuracy_reward']  # [group_size]
 
     return accuracy_rewards
+
+
+def prepare_explore_processor_config(
+    tokenizer: PreTrainedTokenizer,
+    grpo_config: ExtendedGRPOConfig,
+    xml_format: bool = False,
+) -> Dict:
+    """Creates the exploration logits processor needed config"""
+
+    replace_source_tokens = (
+        [tokenizer.encode('</think>')[0]]
+        if xml_format
+        else [tokenizer.eos_token_id]
+    )
+
+    replace_target_tokens = [
+        tokenizer.encode(f' {kwd}')[0]
+        for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
+    ]
+    explore_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
+
+    group_temperature = torch.linspace(
+        grpo_config.min_temperature,
+        grpo_config.max_temperature,
+        steps=grpo_config.group_size,
+    )
+
+    group_top_p = torch.linspace(
+        grpo_config.min_top_p,
+        grpo_config.max_top_p,
+        steps=grpo_config.group_size,
+    )
+
+    return {
+        'group_temperature': group_temperature,
+        'group_top_p': group_top_p,
+        'explore_steps': grpo_config.explore_steps,
+        'explore_top_k': grpo_config.explore_top_k,
+        'explore_skip_n': explore_skip_n,
+        'explore_decay': grpo_config.explore_decay,
+        'replace_source_tokens': replace_source_tokens,
+        'replace_target_tokens': replace_target_tokens,
+        'replace_check_top_k': grpo_config.replace_check_top_k,
+        'replace_max_count': grpo_config.replace_max_count,
+        'replace_prob': grpo_config.replace_prob,
+    }
 
 
 def main():
@@ -172,7 +224,7 @@ def main():
     model_config = job_config['model']
     model_name = model_config['pretrained_model']
     deepspeed_config = job_config['deepspeed']
-    grpo_config = GRPOConfig(**job_config['grpo'])
+    grpo_config = ExtendedGRPOConfig(**job_config['grpo'])
 
     set_seed(seed)
 
@@ -182,27 +234,28 @@ def main():
     world_size = int(os.environ['WORLD_SIZE'])
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
+
     deepspeed_config['train_micro_batch_size_per_gpu'] = (
         grpo_config.train_micro_batch_size
     )
     deepspeed_config['train_batch_size'] = grpo_config.train_batch_size
 
-    # Load and pre-processing dataset
     train_dataset, eval_dataset = load_multiple_datasets(
         datasets_config['names']
     )
+
     if max_train_samples is not None and max_train_samples < len(train_dataset):
         train_dataset = train_dataset.shuffle().select(range(max_train_samples))
+
     if max_test_samples is not None and max_test_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
-    train_dataset = train_dataset.map(apply_prompt_template)
-    eval_dataset = eval_dataset.map(apply_prompt_template)
-
-    # Create models
     policy_model, tokenizer = build_policy_model_and_tokenizer(
         model_config, torch_dtype
     )
+
+    train_dataset = train_dataset.map(apply_prompt_template)
+    eval_dataset = eval_dataset.map(apply_prompt_template)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
@@ -243,30 +296,36 @@ def main():
         'world_size': world_size,
     }
 
+    explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
     inference_client = None
-    env_cls = HfMDPEnv
+
+    eval_env_cls = HfMDPEnv
+    train_env_cls = ExploreHfMDPEnv
     if args.use_infer_server:
         inference_client = SGLangClient(
             host=args.infer_host,
             port=args.infer_port,
             cohost_mode=args.infer_cohost_mode,
         )
-        env_cls = SglMDPEnv
+        eval_env_cls = SglMDPEnv
+        train_env_cls = ExploreSglMDPEnv
 
-    train_env = env_cls(
+    train_env = train_env_cls(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
         group_size=grpo_config.group_size,
         **env_args,
+        **explore_env_args,
     )
-    eval_env = env_cls(
+
+    eval_env = eval_env_cls(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
         **env_args,
     )
 
-    trainer = GRPOTrainer(
+    trainer = ExtendedGRPOTrainer(
         config=grpo_config,
         tokenizer=tokenizer,
         policy_engine=policy_engine,

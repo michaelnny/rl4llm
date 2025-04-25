@@ -1,4 +1,4 @@
-"""Implements MDP ENV for collect samples for RL"""
+"""Implements MDP ENV for collect samples using HF model"""
 
 import functools
 import logging
@@ -7,25 +7,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from transformers import (
-    LogitsProcessorList,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import LogitsProcessorList, PreTrainedModel
 
-from rl4llm.constants import LOGGER_NAME
-from rl4llm.core.base_env import (
-    BaseEnv,
-    BaseRewardFunction,
-    EnvState,
-    EpisodeData,
-)
-from rl4llm.generation.explore_processor import ExploreLogitsProcessor
+from rl4llm.core.base_env import BaseEnv, EnvState, EpisodeData
+from rl4llm.generation.hf_explore_processor import HfExploreLogitsProcessor
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(__name__)
 
 
-class LocalLLMEnv(BaseEnv):
+class HfMDPEnv(BaseEnv):
     """
     Environment for generating training samples with LLM models from HuggingFace library.
 
@@ -54,7 +44,6 @@ class LocalLLMEnv(BaseEnv):
             A tuple containing:
             - completion_texts: List of decoded completion strings (up to, but not including, EOS).
             - completion_tokens: List of completion token tensors (unpadded, includes EOS if present).
-            - completion_lengths: List of actual lengths for each completion (includes EOS, excludes PAD).
         """
         input_ids = state.input_ids.to(llm.device)
         attention_mask = state.attention_mask.to(llm.device)
@@ -72,16 +61,13 @@ class LocalLLMEnv(BaseEnv):
         )
 
         start = state.input_ids.shape[1]
-        texts, tokens_list, lengths = self._process_completions(
-            output.sequences[:, start:]
-        )
 
-        return texts, tokens_list, lengths
+        return self._process_completions(output.sequences[:, start:])
 
     def _process_completions(
         self,
         sequences: torch.Tensor,
-    ) -> Tuple[List[str], List[torch.Tensor], List[int]]:
+    ) -> Tuple[List[str], List[torch.Tensor]]:
         """
         Processes generated sequences to extract completions, decode text, and calculate lengths,
         stopping at the first EOS or PAD token.
@@ -94,7 +80,6 @@ class LocalLLMEnv(BaseEnv):
             A tuple containing:
             - completion_texts: List of decoded completion strings (up to, but not including, EOS).
             - completion_tokens: List of completion token tensors (unpadded, includes EOS if present).
-            - completion_lengths: List of actual lengths for each completion (includes EOS, excludes PAD).
         """
         if sequences.ndim != 2:
             raise ValueError(
@@ -140,7 +125,7 @@ class LocalLLMEnv(BaseEnv):
             skip_special_tokens=True,
             clean_up_tokenization_spaces=True,
         )
-        return texts, tokens_list, actual_lengths_cpu.tolist()
+        return texts, tokens_list
 
     @torch.inference_mode()
     def rollout(
@@ -185,32 +170,15 @@ class LocalLLMEnv(BaseEnv):
                 f"Rank {self.rank}: Reset returned None; dataset exhausted."
             )
             return []
-        texts, tokens_list, lengths = self._generate_completions(
+
+        completions, completion_tokens = self._generate_completions(
             llm, sampling_params, state, **kwargs
         )
-
-        rewards = self._calculate_rewards(texts, state.ground_truth)
-        prompt_tokens = [
-            state.input_ids[i][state.attention_mask[i] == 1].cpu()
-            for i in range(len(texts))
-        ]
-        return [
-            EpisodeData(
-                prompt_text=state.prompt[i],
-                prompt_tokens=prompt_tokens[i],
-                prompt_length=len(prompt_tokens[i]),
-                completion_text=texts[i],
-                completion_tokens=tokens_list[i],
-                completion_length=lengths[i],
-                reward_dict={k: v[i] for k, v in rewards.items()},
-                raw_data=state.raw_data[i],
-            )
-            for i in range(len(texts))
-        ]
+        return self._to_episodes(state, completions, completion_tokens)
 
 
-class ExploreLocalLLMEnv(LocalLLMEnv):
-    """An extension of the standard LocalLLMEnv
+class ExploreHfMDPEnv(HfMDPEnv):
+    """An extension of the standard HfMDPEnv
     where we apply some custom logits processor to the generation process
     to encourage exploration."""
 
@@ -220,7 +188,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
         explore_steps: int,
         explore_top_k: int,
         explore_skip_n: int,
-        explore_decay_rate: float,
+        explore_decay: float,
         replace_source_tokens: List[int],
         replace_target_tokens: List[int],
         replace_prevent_patterns: List[List[int]],
@@ -237,7 +205,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
         self.explore_steps = explore_steps
         self.explore_top_k = explore_top_k
         self.explore_skip_n = explore_skip_n
-        self.explore_decay_rate = explore_decay_rate
+        self.explore_decay = explore_decay
         self.replace_source_tokens = replace_source_tokens
         self.replace_target_tokens = replace_target_tokens
         self.replace_prevent_patterns = replace_prevent_patterns
@@ -256,7 +224,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
         sampling_params: Dict,
         state: EnvState,
         **kwargs: Optional[Dict[str, Any]],
-    ) -> Tuple[List[str], List[torch.Tensor], List[int]]:
+    ) -> Tuple[List[str], List[torch.Tensor]]:
         """
         Generates completions using the LLM for the current state.
 
@@ -270,7 +238,6 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
             A tuple containing:
             - completion_texts: List of decoded completion strings (up to, but not including, EOS).
             - completion_tokens: List of completion token tensors (unpadded, includes EOS if present).
-            - completion_lengths: List of actual lengths for each completion (includes EOS, excludes PAD).
         """
 
         input_ids = state.input_ids.to(llm.device)
@@ -298,7 +265,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
                     ),
                 )
 
-            explore_logits_processor = ExploreLogitsProcessor(
+            explore_logits_processor = HfExploreLogitsProcessor(
                 initial_seq_len=input_ids.shape[1],
                 tokenizer=self.tokenizer,
                 group_size=self.group_size,
@@ -306,7 +273,7 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
                 explore_steps=self.explore_steps,
                 explore_skip_n=self.explore_skip_n,
                 explore_top_k=self.explore_top_k,
-                explore_decay_rate=self.explore_decay_rate,
+                explore_decay=self.explore_decay,
                 replace_source_tokens=self.replace_source_tokens,
                 replace_target_tokens=self.replace_target_tokens,
                 replace_prevent_patterns=self.replace_prevent_patterns,
@@ -324,8 +291,5 @@ class ExploreLocalLLMEnv(LocalLLMEnv):
             **gen_args_copy,
         )
         start = state.input_ids.shape[1]
-        texts, tokens_list, lengths = self._process_completions(
-            output.sequences[:, start:]
-        )
 
-        return texts, tokens_list, lengths
+        return self._process_completions(output.sequences[:, start:])

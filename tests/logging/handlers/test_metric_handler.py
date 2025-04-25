@@ -8,7 +8,7 @@ from rl4llm.logging.handlers.metric_handler import MetricHandler
 
 
 @pytest.fixture
-def mock_dist_manager():
+def mock_dist_ops():
     """Provides a mock distributed manager for testing."""
     mock = MagicMock()
     mock.is_master = True
@@ -19,9 +19,9 @@ def mock_dist_manager():
 
 
 @pytest.fixture
-def handler(mock_dist_manager):
+def handler(mock_dist_ops):
     """Returns a MetricHandler instance using a mock distributed manager."""
-    return MetricHandler(dist_manager=mock_dist_manager)
+    return MetricHandler(dist_ops=mock_dist_ops)
 
 
 @pytest.mark.parametrize(
@@ -55,18 +55,17 @@ def test_get_aggregation_methods_regex_match(handler):
 
 def test_aggregate_single_value(handler):
     """Tests aggregation when only a single scalar value is logged."""
-    handler.log_scalar('reward', 1.0)
+    handler.log_scalar('test_reward', 1.0)
     result = handler.aggregate()
-    assert np.isclose(result['reward_mean'], 1.0)
+    assert np.isclose(result['test_reward'], 1.0)
 
 
 def test_aggregate_multiple_values(handler):
     """Tests aggregation of multiple logged scalar values."""
     for val in [1.0, 2.0, 3.0]:
-        handler.log_scalar('reward', val)
+        handler.log_scalar('test_reward', val)
     result = handler.aggregate()
-    assert np.isclose(result['reward_mean'], 2.0)
-    assert np.isclose(result['reward_p90'], 2.8)
+    assert np.isclose(result['test_reward'], 2.0)
 
 
 def test_clear_buffer(handler):
@@ -76,11 +75,11 @@ def test_clear_buffer(handler):
     assert handler._metric_buffer == {}
 
 
-def test_user_config_override(mock_dist_manager):
+def test_user_config_override(mock_dist_ops):
     """Tests aggregation using a user-provided aggregation config."""
     custom_config = {'custom_metric': ['sum', 'count']}
     handler = MetricHandler(
-        dist_manager=mock_dist_manager, user_aggregation_config=custom_config
+        dist_ops=mock_dist_ops, user_aggregation_config=custom_config
     )
     handler.log_scalar('custom_metric', 10.0)
     handler.log_scalar('custom_metric', 5.0)

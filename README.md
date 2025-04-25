@@ -13,6 +13,13 @@ This project provides an easy-to-use, research-friendly framework to fine-tune L
 > Currently only tested on single-node setups with a tiny size LLM. Need support/volunteers to help with heavy testing and improvements.
 
 
+## Supported RL Algorithms
+
+| Algorithm | Key Features |
+|-----------|--------------|
+| **Proximal Policy Optimization (PPO)** | - SGLang for high-performance inference<br>- DeepSpeed for training<br>- Value Model bootstrapping |
+| **Group Relative Policy Optimization (GRPO)** | - SGLang for high-performance inference<br>- DeepSpeed for training |
+
 
 ## Framework Overview
 
@@ -50,7 +57,10 @@ Here’s a simple diagram:
 ```
 
 > [!TIP]
-> Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-host mode`.
+> Check the example at `scripts` on how to use the `SGLangClient` that uses HTTP to call the inference server, and an `SglMDPEnv` that can handle sample generation.
+
+> [!TIP]
+> Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-hosting mode`.
 
 
 ## Sample Generation Environments
@@ -62,7 +72,7 @@ This is especially useful in the context of LLM as we often need to handle speci
 ### Dataset Structure
 
 Each environment expects a dataset with at least two fields:
-- `prompt` (pre-formatted input for the model)
+- `prompt` (pre-formatted text for the model)
 - `ground_truth` (correct answer used for rewards)
 
 ---
@@ -133,96 +143,19 @@ class MyCustomEnv(BaseEnv):
         # Your own sampling logic
 ```
 
+> [!TIP]
+> Checking the examples at `rl4llm.envs.explore_env.py` for a comprehensive example of custom environment using SGLang inference engine and HF model.
 
 
 ## Fast Generation with SGLang
 
 Launch an efficient inference server to accelerate sample generation. You can either run the SGLang engine on the same server, or on separate servers. We have a simplified FastAPI server adapted from the original SGLang HTTP server located at `rl4llm.inference.sgl_http_server`, which you can launch with the custom script `rl4llm.inference.launch_sgl_server`.
 
-
-### Example of start GRPO training with SGLang inference on the same server:
-
-**Step 1**: Launch the SGLang inference server
-
-```bash
-PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
-    --model-path Qwen/Qwen2.5-0.5B \
-    --host localhost \
-    --port 30000 \
-    --tp 1 \
-    --chunked-prefill-size 8192 \
-    --mem-fraction-static 0.5 \
-    --enable-memory-saver
-```
-
-
-**Step 2**: Launch the trining script
-
-```bash
-PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_grpo.py \
-    --config-file ./configs/grpo_config.yaml \
-    --use-infer-server \
-    --infer-host localhost \
-    --infer-port 30000 \
-    --infer-cohost-mode
-```
-
+> [!NOTE]
+> If running SGLang inference and deepspeed training on the same server with co-hosting mode, make sure use the `--enable-memory-saver`, this requires install the `pip install torch-memory-saver`.
 
 > [!NOTE]
-> If running SGLang inference and deepspeed training on the same server with co-host mode, make sure use the `--enable-memory-saver`, this requires install the `pip install torch-memory-saver`.
-
-> [!NOTE]
-> We use model checkpoint file to sync the weights between training instance and the SGLang inference engine. If you run inference engine and training in separate servers, make sure you have a shared file system between them. The weights saving path is defined at the `artifacts_path` when launching the trainer.
-
-
-### How it works - InferenceEnv and InferenceClient
-
-In order to handle the communications for sample generation and weight updates, we created a simple `SGLangClient` that uses HTTP to call the inference server, and an `InferenceEnv` that can handle sample generation using the inference client.
-
-For example, here's a simplified example of how to use them.
-
-```python
-
-from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.envs import InferenceEnv
-from rl4llm.trainers.grpo_trainer import GRPOTrainer
-
-# other instance initialization ...
-
-inference_client = SGLangClient(
-            host=args.infer_host,
-            port=args.infer_port,
-            cohost_mode=args.infer_cohost_mode,
-        )
-
-train_env = InferenceEnv(
-    dataset=train_dataset,
-    batch_size=1,  # always set batch size to 1 for training
-    group_size=grpo_config.group_size,
-    tokenizer=tokenizer,
-    reward_functions=[AccuracyRewardFunction()],
-    rank=dist_manager.local_rank,
-    world_size=dist_manager.world_size,
-)
-
-trainer = GRPOTrainer(
-        config=grpo_config,
-        tokenizer=tokenizer,
-        policy_engine=policy_engine,
-        dist_manager=dist_manager,
-        logger=logger,
-        artifacts_path=artifacts_path,
-        train_env=train_env,
-        eval_env=None,
-        inference_client=inference_client,
-        ref_model=None,
-        reward_transform_fn=None,
-        seed=seed,
-    )
-
-trainer.train(job_config)
-
-```
+> We use model checkpoint file to sync the weights between training instance and the SGLang inference engine. If you run inference engine and training in separate servers, make sure you have a shared file system between them. The weights saving path is defined at the `log_config.output_dir` when launching the trainer.
 
 
 ## Centralized Logging & Monitoring
@@ -237,7 +170,7 @@ More example of the logging manager can be found at the `BaseTrainer.train` and 
 
 ## Know Issues
 
-- When running SGLang with `--enable-memory-saver`, sometimes the server will hangs when we try to release/resume the memory. It seems the issue was due to the `torch-memory-saver` package internal error.
+- When running SGLang with `--enable-memory-saver`, sometimes the inference server will hangs when we try to release/resume the memory. The most likely cause is due to CUDA OOM, try reduce the memory fraction or using more powerful GPU.
 
 
 ## License
@@ -256,7 +189,7 @@ If you reference or use our project in your research, please cite our work:
 
 
 ```bibtex
-@software{rl4llm2025github,
+@software{the_rl4llm_project,
   title = {{RL 4 LLM}: A research friendly Reinforcement Learning Framework for LLM Fine-Tuning},
   author = {Michael Hu},
   url = {https://github.com/michaelnny/rl4llm},

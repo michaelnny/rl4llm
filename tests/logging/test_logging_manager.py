@@ -47,7 +47,7 @@ def logging_manager(tmp_path, monkeypatch):
 
     fake_dist = FakeDistManager(is_master=True, world_size=1, global_rank=0)
     return lm.LoggingManager(
-        dist_manager=fake_dist,
+        dist_ops=fake_dist,
         output_dir=str(tmp_path / 'logs'),
         metrics_aggregation_config=None,
         enable_wandb=False,
@@ -166,7 +166,7 @@ def test_close(logging_manager, monkeypatch):
 
         monkeypatch.setattr(handler, 'close', make_closer(handler))
 
-    logging_manager.dist_manager.world_size = 2
+    logging_manager.dist_ops.world_size = 2
     logging_manager.world_size = 2
 
     barrier_called = {'flag': False}
@@ -174,7 +174,7 @@ def test_close(logging_manager, monkeypatch):
     def fake_barrier():
         barrier_called['flag'] = True
 
-    monkeypatch.setattr(logging_manager.dist_manager, 'barrier', fake_barrier)
+    monkeypatch.setattr(logging_manager.dist_ops, 'barrier', fake_barrier)
 
     logging_manager.close()
     expected = [type(h).__name__ for h in reversed(logging_manager._handlers)]

@@ -5,6 +5,32 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Debug Extended GRPO Training",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "deepspeed.launcher.runner", // Use deepspeed launcher as module
+            "args": [
+                "--num_gpus=1",
+                "scripts/run_train_extended_grpo.py",
+                "--config-file",
+                "./configs/extended_grpo_config.yaml",
+                "--infer-host",
+                "localhost",
+                "--infer-port",
+                "30000",
+                "--use-infer-server",
+                "--infer-cohost-mode",
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                // "HTTP_PROXY": "http://127.0.0.1:1081",
+                // "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
+                "NCCL_P2P_DISABLE": "1"
+            },
+        },
+        {
             "name": "Debug GRPO Training",
             "type": "debugpy",
             "request": "launch",
@@ -13,7 +39,65 @@
                 "--num_gpus=1",
                 "scripts/run_train_grpo.py",
                 "--config-file",
-                "./configs/grpo_config.yaml"
+                "./configs/grpo_config.yaml",
+                "--infer-host",
+                "localhost",
+                "--infer-port",
+                "30000",
+                "--use-infer-server",
+                "--infer-cohost-mode",
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                // "HTTP_PROXY": "http://127.0.0.1:1081",
+                // "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
+                "NCCL_P2P_DISABLE": "1"
+            },
+        },
+        {
+            "name": "Debug PPO Training",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "deepspeed.launcher.runner", // Use deepspeed launcher as module
+            "args": [
+                "--num_gpus=1",
+                "scripts/run_train_ppo.py",
+                "--config-file",
+                "./configs/ppo_config.yaml",
+                "--infer-host",
+                "localhost",
+                "--infer-port",
+                "30000",
+                "--use-infer-server",
+                "--infer-cohost-mode",
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                // "HTTP_PROXY": "http://127.0.0.1:1081",
+                // "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
+                "NCCL_P2P_DISABLE": "1"
+            },
+        },
+        {
+            "name": "Debug Value Net Training",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "deepspeed.launcher.runner", // Use deepspeed launcher as module
+            "args": [
+                "--num_gpus=1",
+                "scripts/run_train_value_net.py",
+                "--config-file",
+                "./configs/value_net_config.yaml",
+                "--infer-host",
+                "localhost",
+                "--infer-port",
+                "30000",
+                "--use-infer-server",
+                "--infer-cohost-mode",
             ],
             "console": "integratedTerminal",
             "justMyCode": false,
@@ -32,8 +116,8 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                // "HTTP_PROXY": "http://127.0.0.1:1081",
-                // "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "HTTP_PROXY": "http://127.0.0.1:1081",
+                "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
             },
         },
