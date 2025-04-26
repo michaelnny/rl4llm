@@ -33,9 +33,9 @@ def grpo_config() -> GRPOConfig:
         clip_eps=0.2,
         num_updates=1,
         max_completion_tokens=10,
-        explore_decay_steps=100,
-        explore_init_epsilon=0.5,
-        explore_min_epsilon=0.1,
+        random_start_steps=100,
+        explore_eps_max=0.5,
+        explore_eps_min=0.1,
     )
 
 

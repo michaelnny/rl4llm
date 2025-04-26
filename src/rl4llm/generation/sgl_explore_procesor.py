@@ -12,41 +12,39 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
     within the top logits.
 
     Args:
-        explore_steps: Number of steps for exploration sampling.
-        explore_skip_n: Number of initial steps to skip before exploration.
-        explore_top_k: Top-k value for exploration sampling.
-        explore_decay: Decay rate for explore_top_k during exploration.
+        random_start_steps: Number of steps for exploration sampling.
+        random_start_skip_n: Number of initial steps to skip before exploration.
+        random_start_top_k: Top-k value for exploration sampling.
+
         replace_source_tokens: Token IDs to check for in top logits to trigger replacement.
         replace_target_tokens: Token IDs to force sample from when replacement occurs.
-        replace_check_top_k: Check if any source token is within this top-k logits.
+        replace_top_k: Check if any source token is within this top-k logits.
         replace_max_count: Max replacements per sequence (0 disables replacement).
     """
 
     def __init__(
         self,
-        explore_steps: int = 0,
-        explore_skip_n: int = 0,
-        explore_top_k: int = 20,
-        explore_decay: float = 0.9,
+        random_start_steps: int = 0,
+        random_start_skip_n: int = 0,
+        random_start_top_k: int = 20,
         replace_source_tokens: Optional[List[int]] = None,
         replace_target_tokens: Optional[List[int]] = None,
-        replace_check_top_k: int = 5,
+        replace_top_k: int = 5,
         replace_max_count: int = 3,
     ):
         super().__init__()
 
-        if not isinstance(explore_steps, int) or explore_steps < 0:
-            raise ValueError('explore_steps must be a non-negative integer.')
-        if not isinstance(explore_skip_n, int) or explore_skip_n < 0:
-            raise ValueError('explore_skip_n must be a non-negative integer.')
-        if not isinstance(explore_top_k, int) or explore_top_k <= 0:
-            raise ValueError('explore_top_k must be a positive integer.')
-        if not isinstance(explore_decay, float) or not (
-            0.0 < explore_decay <= 1.0
-        ):
+        if not isinstance(random_start_steps, int) or random_start_steps < 0:
             raise ValueError(
-                'explore_decay must be a float between 0.0 (exclusive) and 1.0 (inclusive).'
+                'random_start_steps must be a non-negative integer.'
             )
+        if not isinstance(random_start_skip_n, int) or random_start_skip_n < 0:
+            raise ValueError(
+                'random_start_skip_n must be a non-negative integer.'
+            )
+        if not isinstance(random_start_top_k, int) or random_start_top_k <= 0:
+            raise ValueError('random_start_top_k must be a positive integer.')
+
         if replace_source_tokens is not None:
             if not isinstance(replace_source_tokens, list) or not all(
                 isinstance(t, int) for t in replace_source_tokens
@@ -69,8 +67,8 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
                 raise ValueError(
                     'replace_target_tokens cannot be an empty list if provided.'
                 )
-        if not isinstance(replace_check_top_k, int) or replace_check_top_k <= 0:
-            raise ValueError('replace_check_top_k must be a positive integer.')
+        if not isinstance(replace_top_k, int) or replace_top_k <= 0:
+            raise ValueError('replace_top_k must be a positive integer.')
         if not isinstance(replace_max_count, int) or replace_max_count < 0:
             raise ValueError(
                 'replace_max_count must be a non-negative integer.'
@@ -84,11 +82,11 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
                 'replace_source_tokens must be provided if replace_target_tokens is set.'
             )
 
-        self.explore_steps: int = explore_steps
-        self.explore_skip_n: int = explore_skip_n
-        self.explore_top_k: int = explore_top_k
-        self.explore_decay: float = explore_decay
-        self.replace_check_top_k: int = replace_check_top_k
+        self.random_start_steps: int = random_start_steps
+        self.random_start_skip_n: int = random_start_skip_n
+        self.random_start_top_k: int = random_start_top_k
+
+        self.replace_top_k: int = replace_top_k
         self.replace_max_count: int = (
             replace_max_count
             if replace_source_tokens
@@ -159,19 +157,12 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
 
             # Exploring start
             if (
-                self.explore_steps > 0
-                and self.explore_skip_n
+                self.random_start_steps > 0
+                and self.random_start_skip_n
                 <= step
-                < self.explore_skip_n + self.explore_steps
+                < self.random_start_skip_n + self.random_start_steps
             ):
-                k = max(
-                    2,
-                    int(
-                        self.explore_top_k
-                        * self.explore_decay ** (step - self.explore_skip_n)
-                    ),
-                )
-                k = min(k, vocab)
+                k = min(self.random_start_top_k, vocab)
                 top_k_indices = torch.topk(logits[row], k=k).indices
                 mask = torch.full_like(logits[row], -1e6)
                 mask[top_k_indices] = 100.0
@@ -184,10 +175,10 @@ class SglExploreLogitProcessor(CustomLogitProcessor):
                 and self.replace_max_count > 0
                 and replace_count < self.replace_max_count
                 and replace_prob > 0
-                and step > self.explore_skip_n + self.explore_steps
+                and step > self.random_start_skip_n + self.random_start_steps
                 and random.random() < replace_prob
             ):
-                check_k = min(self.replace_check_top_k, vocab)
+                check_k = min(self.replace_top_k, vocab)
                 _, top_k_indices = torch.topk(logits[row], k=check_k)
                 is_source_in_top_k = torch.isin(
                     top_k_indices, source_tokens_dev

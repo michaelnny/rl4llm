@@ -26,13 +26,12 @@ class ExploreSglMDPEnv(SglMDPEnv):
         self,
         group_temperature: torch.Tensor,
         group_top_p: torch.Tensor,
-        explore_steps: int,
-        explore_top_k: int,
-        explore_skip_n: int,
-        explore_decay: float,
+        random_start_steps: int,
+        random_start_top_k: int,
+        random_start_skip_n: int,
         replace_source_tokens: Optional[List[int]] = None,
         replace_target_tokens: Optional[List[int]] = None,
-        replace_check_top_k: int = 1,
+        replace_top_k: int = 1,
         replace_max_count: int = 3,
         replace_prob: float = 0.5,
         **kwargs,
@@ -55,13 +54,13 @@ class ExploreSglMDPEnv(SglMDPEnv):
 
         self.group_temperature = group_temperature
         self.group_top_p = group_top_p
-        self.explore_steps = explore_steps
-        self.explore_top_k = explore_top_k
-        self.explore_skip_n = explore_skip_n
-        self.explore_decay = explore_decay
+        self.random_start_steps = random_start_steps
+        self.random_start_top_k = random_start_top_k
+        self.random_start_skip_n = random_start_skip_n
+
         self.replace_source_tokens = replace_source_tokens
         self.replace_target_tokens = replace_target_tokens
-        self.replace_check_top_k = replace_check_top_k
+        self.replace_top_k = replace_top_k
         self.replace_max_count = replace_max_count
         self.replace_prob = replace_prob
 
@@ -70,13 +69,12 @@ class ExploreSglMDPEnv(SglMDPEnv):
         # This logic is self-contained setup, so keeping it separate is reasonable.
         if explore_prob > 0 and random.random() < explore_prob:
             explore_logit_processor = SglExploreLogitProcessor(
-                explore_steps=self.explore_steps,
-                explore_top_k=self.explore_top_k,
-                explore_skip_n=self.explore_skip_n,
-                explore_decay=self.explore_decay,
+                random_start_steps=self.random_start_steps,
+                random_start_top_k=self.random_start_top_k,
+                random_start_skip_n=self.random_start_skip_n,
                 replace_source_tokens=self.replace_source_tokens,
                 replace_target_tokens=self.replace_target_tokens,
-                replace_check_top_k=self.replace_check_top_k,
+                replace_top_k=self.replace_top_k,
                 replace_max_count=self.replace_max_count,
             )
             return explore_logit_processor.to_str()
@@ -102,7 +100,7 @@ class ExploreSglMDPEnv(SglMDPEnv):
             - completion_texts: List of final decoded completion strings.
             - completion_tokens: List of final completion token tensors.
         """
-        explore_eps = kwargs.get('exploration_epsilon', 0.0)
+        explore_eps = kwargs.get('explore_epsilon', 0.0)
         logit_processor = self._prepare_logits_processor(explore_eps)
 
         batch_size = state.input_ids.shape[0]

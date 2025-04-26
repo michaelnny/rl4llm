@@ -280,6 +280,12 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 yield policy_model
         self.clean_up()
 
+    def post_step(self):
+        """Post ops after a global step is done"""
+
+        self.logger.aggregate_and_log(self.global_step)
+        self.global_step += 1
+
     def _prepare_for_generation(self):
         """Free up GPU memory and switch models to eval mode for rollout."""
 
@@ -661,11 +667,10 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                         self.clean_up()
                     self.dist_ops.barrier()
 
-            self.logger.aggregate_and_log(self.global_step)
             del local_experience, train_dataloader
             self.clean_up()
 
-            self.global_step += 1
+            self.post_step()
 
         self.logger.info('Training loop complete. Finalizing...')
         self.on_exit()

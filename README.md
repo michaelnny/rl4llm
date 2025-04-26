@@ -1,6 +1,6 @@
 # Reinforcement Learning Framework for LLM Fine-Tuning
 
-This project provides an easy-to-use, research-friendly framework to fine-tune Large Language Models (LLMs) using Reinforcement Learning (RL). It simplifies new algorithm research by managing low-level tasks, with clear component separation design, allowing researchers to focus on algorithm development.
+This project provides a light-weight, research-friendly framework to fine-tune Large Language Models (LLMs) using Reinforcement Learning (RL). It simplifies new algorithm research by managing low-level tasks, with clear component separation design, allowing researchers to focus on algorithm development.
 
 ## Key Features
 
@@ -10,7 +10,7 @@ This project provides an easy-to-use, research-friendly framework to fine-tune L
 - **Clean Architecture**: Clearly separates low-level operations from algorithmic logic.
 
 > [!IMPORTANT]
-> Currently only tested on single-node setups with a tiny size LLM. Need support/volunteers to help with heavy testing and improvements.
+> Currently only tested on single-node setups with a tiny size LLM. Need support/volunteers to help with testing and improvements.
 
 
 ## Supported RL Algorithms
@@ -117,7 +117,7 @@ def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
     return 0.8 * accuracy_rewards + 0.2 * format_reward
 
 
-trainer = GRPOTrainer(
+train_env = SglMDPEnv(
     ...
     reward_transform_fn=reward_transform_fn,
 )
@@ -144,7 +144,7 @@ class MyCustomEnv(BaseEnv):
 ```
 
 > [!TIP]
-> Checking the examples at `rl4llm.envs.explore_env.py` for a comprehensive example of custom environment using SGLang inference engine and HF model.
+> Checking the examples at `rl4llm.envs.explore_env.py` for a comprehensive example of custom environment using custom logits processor with SGLang inference engine.
 
 
 ## Fast Generation with SGLang

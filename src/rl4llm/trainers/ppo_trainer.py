@@ -145,6 +145,7 @@ class PPOTrainer(BaseRLTrainer):
             )
 
         self.config: PPOConfig = config  # for better type hinting
+        self.clip_eps = self.config.clip_eps
 
     def initialize_trainer(self):
         """Initialize PPO specific settings"""
@@ -236,9 +237,7 @@ class PPOTrainer(BaseRLTrainer):
         # PPO clipped surrogate PG loss
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clipped_ratio = ratio.clamp(
-            1 - self.config.clip_eps, 1 + self.config.clip_eps
-        )
+        clipped_ratio = ratio.clamp(1 - self.clip_eps, 1 + self.clip_eps)
         pg_losses1 = ratio * advantages.detach()
         pg_losses2 = clipped_ratio * advantages.detach()
         pg_losses = -torch.min(pg_losses1, pg_losses2)

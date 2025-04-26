@@ -18,6 +18,31 @@ class ExtendedGRPOConfig(GRPOConfig):
         description='Skip using group samples with low reward std for training',
     )
 
+    gamma_min: Optional[float] = Field(
+        0.998,
+        ge=0.0,
+        le=1.0,
+        description='Minimum discount',
+    )
+    gamma_max: Optional[float] = Field(
+        0.9998,
+        ge=0.0,
+        le=1.0,
+        description='Maximum discount',
+    )
+    clip_eps_min: Optional[float] = Field(
+        0.998,
+        ge=0.0,
+        le=1.0,
+        description='Minimum clip epsilon for PPO PG',
+    )
+    clip_eps_max: Optional[float] = Field(
+        0.9998,
+        ge=0.0,
+        le=1.0,
+        description='Maximum clip epsilon for PPO PG',
+    )
+
     # enhancements to encourage exploration
     min_temperature: Optional[float] = Field(
         0.6,
@@ -43,28 +68,25 @@ class ExtendedGRPOConfig(GRPOConfig):
         le=1.0,
         description='Maximum sampling top p for group generation',
     )
-    explore_init_epsilon: Optional[float] = Field(
+    explore_eps_max: Optional[float] = Field(
         0.0, ge=0.0, le=1.0, description='Initial exploration epsilon'
     )
-    explore_min_epsilon: Optional[float] = Field(
+    explore_eps_min: Optional[float] = Field(
         0.0,
         ge=0.0,
         le=1.0,
         description='Minimum exploration epsilon after decay',
     )
-    explore_decay_steps: Optional[int] = Field(
-        0, ge=0, le=1000000, description='Exploration epsilon decay steps'
+    explore_percentage: Optional[float] = Field(
+        0, ge=0, le=1.0, description='Exploration percentage'
     )
-    explore_steps: Optional[int] = Field(
+    random_start_steps: Optional[int] = Field(
         0, ge=0, le=30, description='Random start steps to do exploration'
     )
-    explore_top_k: Optional[int] = Field(
+    random_start_top_k: Optional[int] = Field(
         0, ge=0, le=500, description='Explore start top-k'
     )
-    explore_decay: Optional[float] = Field(
-        0.8, gt=0, le=1, description='Rate to decay explore top-k'
-    )
-    replace_check_top_k: Optional[int] = Field(
+    replace_top_k: Optional[int] = Field(
         10,
         ge=1,
         le=20,
@@ -83,12 +105,23 @@ class ExtendedGRPOConfig(GRPOConfig):
         description='Probability to continue generation',
     )
 
+    @model_validator(mode='after')
+    def check_discounts_and_clips(cls, values):
+        if values.gamma_min >= values.gamma_max:
+            raise ValueError('gamma_min must be lesser than gamma_max')
+        if values.clip_eps_min >= values.clip_eps_max:
+            raise ValueError('clip_eps_min must be lesser than clip_eps_max')
+        return values
+
 
 class ExtendedGRPOTrainer(GRPOTrainer):
     """Extended GRPO trainer for LLM"""
 
     def initialize_trainer(self):
         """Initialize GRPO specific settings"""
+
+        # better type hint
+        self.config: ExtendedGRPOConfig = self.config
 
         # avoid adding group of samples with almost identical outcomes
         _dummy_rewards = torch.tensor(
@@ -101,7 +134,15 @@ class ExtendedGRPOTrainer(GRPOTrainer):
         )
 
         # Controls exploration
-        self.explore_epsilon = 0.0
+        self.explore_epsilon = self.config.explore_eps_max
+        self.clip_eps = self.config.clip_eps_max
+
+    def post_step(self):
+        """Handles epsilon decays"""
+        super().post_step()
+
+        self._decay_explore_epsilon()
+        self._decay_clip_epsilon()
 
     @torch.inference_mode()
     def generate_experience(self) -> List[EpisodeData]:
@@ -137,13 +178,13 @@ class ExtendedGRPOTrainer(GRPOTrainer):
             while local_count < local_rollout_size:
                 # control explore logit
                 custom_kwargs = {
-                    'exploration_epsilon': self._get_exploration_epsilon(),
+                    'explore_epsilon': self.explore_epsilon,
                 }
                 outputs = self.train_env.rollout(
                     policy_model, train_sampling_params, **custom_kwargs
                 )
                 self.logger.log_scalar(
-                    'other/exploration_epsilon', self.explore_epsilon
+                    'other/explore_epsilon', self.explore_epsilon
                 )
                 if self._check_group_episodes(outputs):
                     # IMPORTANT: do not flatten the episodes yet
@@ -183,25 +224,67 @@ class ExtendedGRPOTrainer(GRPOTrainer):
 
         return True
 
-    def _get_exploration_epsilon(self) -> float:
-        """Computes exploration epsilon based on the current iteration step count."""
-        if self.config.explore_decay_steps == 0:
+    def _decay_explore_epsilon(self):
+        """
+        Computes exploration epsilon using a cosine decay schedule based on the current iteration step.
+        """
+        if self.config.explore_percentage == 0:
             self.explore_epsilon = 0.0
-        elif self.global_step >= self.config.explore_decay_steps:
-            self.explore_epsilon = self.config.explore_min_epsilon
+            return
+
+        max_random_start_steps = (
+            self.config.max_steps * self.config.explore_percentage
+        )
+        if self.global_step >= max_random_start_steps:
+            self.explore_epsilon = self.config.explore_eps_min
+            return
+
+        # Calculate progress for cosine decay
+        progress = self.global_step / max_random_start_steps
+        cosine_decay = (
+            0.5 * (1 + torch.cos(torch.tensor(progress * torch.pi))).item()
+        )
+
+        # Compute epsilon with cosine decay
+        self.explore_epsilon = (
+            self.config.explore_eps_min
+            + (self.config.explore_eps_max - self.config.explore_eps_min)
+            * cosine_decay
+        )
+
+    def _decay_clip_epsilon(self):
+        """Compute PG clip epsilon based on the current iteration step count."""
+        if self.global_step >= self.config.max_steps:
+            self.clip_eps = self.config.clip_eps_min
         else:
-            # Cosine decay schedule
-            progress = self.global_step / self.config.explore_decay_steps
-            cosine_decay = (
-                0.5 * (1 + torch.cos(torch.tensor(progress * torch.pi))).item()
-            )
-            self.explore_epsilon = (
-                self.config.explore_min_epsilon
-                + (
-                    self.config.explore_init_epsilon
-                    - self.config.explore_min_epsilon
-                )
-                * cosine_decay
+            # Linear decay schedule
+            progress = self.global_step / self.config.max_steps
+            self.clip_eps = (
+                self.config.clip_eps_max
+                - (self.config.clip_eps_max - self.config.clip_eps_min)
+                * progress
             )
 
-        return self.explore_epsilon
+    def _compute_episode_returns(
+        self, rewards: torch.Tensor, loss_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Computes returns for the episode sequence."""
+
+        episode_length = loss_mask.sum().item()
+        gamma = self.get_dynamic_discount(
+            episode_length, self.config.gamma_min, self.config.gamma_max
+        )
+
+        return self.masked_monte_carlo_returns(rewards, loss_mask, gamma)
+
+    @staticmethod
+    def get_dynamic_discount(
+        episode_length: int,
+        gamma_min=0.998,
+        gamma_max=0.9998,
+        max_expected_length=8192,
+    ) -> float:
+        """Computes dynamic discount based on the episode length and min/max discount."""
+        normalized_length = min(episode_length / max_expected_length, 1.0)
+        gamma = gamma_max - (gamma_max - gamma_min) * normalized_length
+        return gamma

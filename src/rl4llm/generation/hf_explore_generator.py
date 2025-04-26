@@ -612,9 +612,9 @@ class HfExploreLLMGenerator:
         top_p: float = 1.0,
         top_k: int = 0,
         max_new_tokens: int = 50,
-        explore_steps: int = 0,
-        explore_skip_n: int = 0,
-        explore_top_k: int = 20,
+        random_start_steps: int = 0,
+        random_start_skip_n: int = 0,
+        random_start_top_k: int = 20,
         explore_replace_prob: float = 0.0,
         replace_max_per_seq: int = 0,
         correctness_callback: Optional[Callable] = None,
@@ -633,9 +633,9 @@ class HfExploreLLMGenerator:
             top_p (float): Nucleus sampling threshold (default: 1.0).
             top_k (int): Top-k sampling parameter (default: 0).
             max_new_tokens (int): Max new tokens to generate (default: 50).
-            explore_steps (int): Steps for exploration (default: 0).
-            explore_skip_n (int): Steps to skip exploration (default: 0).
-            explore_top_k (int): Top-k for exploration (default: 20).
+            random_start_steps (int): Steps for exploration (default: 0).
+            random_start_skip_n (int): Steps to skip exploration (default: 0).
+            random_start_top_k (int): Top-k for exploration (default: 20).
             explore_replace_prob (float): Probability of token replacement (default: 0.0).
             replace_max_per_seq (int): Max replacements per sequence (default: 0).
             correctness_callback (Optional[callable]): Function evaluating correctness (float 0.0-1.0).
@@ -710,23 +710,23 @@ class HfExploreLLMGenerator:
             )
 
             explore_now = False
-            if explore_steps > 0:
-                is_after_skip = generated_tokens >= explore_skip_n
+            if random_start_steps > 0:
+                is_after_skip = generated_tokens >= random_start_skip_n
                 is_within_explore_window = generated_tokens < (
-                    explore_steps + explore_skip_n
+                    random_start_steps + random_start_skip_n
                 )
                 explore_now = is_after_skip and is_within_explore_window
 
             if explore_now:
                 # Apply exploration sampling (e.g., uniform from top-k)
-                effective_steps = max(0, generated_tokens - explore_skip_n)
-                # Decay explore_top_k (optional, example)
-                current_explore_top_k = max(
-                    2, int(explore_top_k * (0.8**effective_steps))
+                effective_steps = max(0, generated_tokens - random_start_skip_n)
+                # Decay random_start_top_k (optional, example)
+                current_random_start_top_k = max(
+                    2, int(random_start_top_k * (0.8**effective_steps))
                 )  # Ensure k >= 2 for sampling
                 next_tokens_candidates = self._uniform_sampling(
                     next_token_logits,  # Use potentially penalty-adjusted logits
-                    top_k=current_explore_top_k,
+                    top_k=current_random_start_top_k,
                 )
             else:
                 # Apply standard sampling (temp, top-k, top-p)
@@ -744,9 +744,9 @@ class HfExploreLLMGenerator:
                 and replacement_counts.max()
                 < replace_max_per_seq  # Optimization: skip if all sequences maxed out
                 and generated_tokens
-                > explore_skip_n  # Optionally skip replacement during skip phase
+                > random_start_skip_n  # Optionally skip replacement during skip phase
                 # and generated_tokens
-                # > (explore_steps + explore_skip_n)
+                # > (random_start_steps + random_start_skip_n)
                 # * 2  # Only replace after exploration
             )
 
@@ -840,8 +840,8 @@ if __name__ == '__main__':
         max_new_tokens=512,
         top_p=1.0,
         top_k=50,
-        explore_steps=2,
-        explore_top_k=100,
+        random_start_steps=2,
+        random_start_top_k=100,
         explore_replace_prob=0.2,
         replace_max_per_seq=2,
     )

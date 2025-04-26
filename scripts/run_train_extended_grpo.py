@@ -12,12 +12,7 @@ from transformers import PreTrainedTokenizer
 from rl4llm.core.base_env import BaseRewardFunction
 from rl4llm.core.distributed import DistributedOps
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import (
-    ExploreHfMDPEnv,
-    ExploreSglMDPEnv,
-    HfMDPEnv,
-    SglMDPEnv,
-)
+from rl4llm.envs import ExploreSglMDPEnv, SglMDPEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
 from rl4llm.trainers.extended_grpo_trainer import (
@@ -177,7 +172,7 @@ def prepare_explore_processor_config(
         tokenizer.encode(f' {kwd}')[0]
         for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
     ]
-    explore_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
+    random_start_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
 
     group_temperature = torch.linspace(
         grpo_config.min_temperature,
@@ -194,13 +189,12 @@ def prepare_explore_processor_config(
     return {
         'group_temperature': group_temperature,
         'group_top_p': group_top_p,
-        'explore_steps': grpo_config.explore_steps,
-        'explore_top_k': grpo_config.explore_top_k,
-        'explore_skip_n': explore_skip_n,
-        'explore_decay': grpo_config.explore_decay,
+        'random_start_steps': grpo_config.random_start_steps,
+        'random_start_top_k': grpo_config.random_start_top_k,
+        'random_start_skip_n': random_start_skip_n,
         'replace_source_tokens': replace_source_tokens,
         'replace_target_tokens': replace_target_tokens,
-        'replace_check_top_k': grpo_config.replace_check_top_k,
+        'replace_top_k': grpo_config.replace_top_k,
         'replace_max_count': grpo_config.replace_max_count,
         'replace_prob': grpo_config.replace_prob,
     }
@@ -299,18 +293,13 @@ def main():
     explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
     inference_client = None
 
-    eval_env_cls = HfMDPEnv
-    train_env_cls = ExploreHfMDPEnv
-    if args.use_infer_server:
-        inference_client = SGLangClient(
-            host=args.infer_host,
-            port=args.infer_port,
-            cohost_mode=args.infer_cohost_mode,
-        )
-        eval_env_cls = SglMDPEnv
-        train_env_cls = ExploreSglMDPEnv
+    inference_client = SGLangClient(
+        host=args.infer_host,
+        port=args.infer_port,
+        cohost_mode=args.infer_cohost_mode,
+    )
 
-    train_env = train_env_cls(
+    train_env = ExploreSglMDPEnv(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
         group_size=grpo_config.group_size,
@@ -318,7 +307,7 @@ def main():
         **explore_env_args,
     )
 
-    eval_env = eval_env_cls(
+    eval_env = SglMDPEnv(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
