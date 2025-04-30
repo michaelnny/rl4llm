@@ -67,7 +67,11 @@ class ExploreSglMDPEnv(SglMDPEnv):
     def _prepare_logits_processor(self, explore_prob: float) -> Optional[str]:
         """Creates the explore logits processor string if conditions are met."""
         # This logic is self-contained setup, so keeping it separate is reasonable.
-        if explore_prob > 0 and random.random() < explore_prob:
+        if (
+            explore_prob > 0
+            and random.random() < explore_prob
+            and (self.random_start_steps > 0 or self.replace_max_count > 0)
+        ):
             explore_logit_processor = SglExploreLogitProcessor(
                 random_start_steps=self.random_start_steps,
                 random_start_top_k=self.random_start_top_k,

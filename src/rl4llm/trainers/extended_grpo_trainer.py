@@ -87,9 +87,9 @@ class ExtendedGRPOConfig(GRPOConfig):
         0, ge=0, le=500, description='Explore start top-k'
     )
     replace_top_k: Optional[int] = Field(
-        10,
-        ge=1,
-        le=20,
+        1,
+        ge=0,
+        le=10,
         description='Check for special source token during token replacement',
     )
     replace_max_count: Optional[int] = Field(
@@ -106,7 +106,7 @@ class ExtendedGRPOConfig(GRPOConfig):
     )
 
     @model_validator(mode='after')
-    def check_discounts_and_clips(cls, values):
+    def check_discounts_and_clip_epsilons(cls, values):
         if values.gamma_min >= values.gamma_max:
             raise ValueError('gamma_min must be lesser than gamma_max')
         if values.clip_eps_min >= values.clip_eps_max:

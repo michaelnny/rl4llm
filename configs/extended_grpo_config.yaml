@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_extended_grpo_qwen2.5_1.5b_math"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_extended_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -12,13 +12,13 @@ logging:
 
 dataset: 
   names:                                # List of math datasets to load
-    # - "gsm"
-    - "math"
+    - "gsm"
+    # - "math"
   # max_train_samples: 4096             # for a quick run
   # max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B"
+  pretrained_model: "Qwen/Qwen2.5-0.5B"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
@@ -28,7 +28,7 @@ grpo:
   max_steps: 200
   train_rollout_size: 512
   num_updates: 1
-  train_micro_batch_size: 2
+  train_micro_batch_size: 4
   train_batch_size: 128                       
   gamma_min: 0.998                      # discount bounds
   gamma_max: 0.9998                     
@@ -42,8 +42,8 @@ grpo:
 
   # for train rollout
   max_prompt_tokens: 512                # skip sample question that's too long
-  group_size: 8                        # for each sample we generate a group of answers
-  max_completion_tokens: 2048
+  group_size: 16                        # for each sample we generate a group of answers
+  max_completion_tokens: 1024
   temperature: 0.9                      # not used
   repetition_penalty: 1.0               # not used
   top_p: 0.95
@@ -66,16 +66,16 @@ grpo:
   max_temperature: 1.0
 
   # control rate of explore
-  explore_eps_max: 0.99               # exploration epsilon decay
+  explore_eps_max: 0.9                 # exploration epsilon decay
   explore_eps_min: 0.0
   explore_percentage: 0.3                   # percentage of total training steps
 
   # exploring start
-  random_start_steps: 3                     # initial start steps to do random sampling
-  random_start_top_k: 50                    # Top K tokens to random sample during initial start steps
+  random_start_steps: 0                     # initial start steps to do random sampling
+  random_start_top_k: 0                    # Top K tokens to random sample during initial start steps
   
   # continue generation with token replacement
-  replace_top_k: 1
+  replace_top_k: 0
   replace_prob: 0.0
   replace_max_count: 0                 # max number of retry by adding the special token and continue generation
 
