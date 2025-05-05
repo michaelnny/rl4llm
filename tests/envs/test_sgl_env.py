@@ -39,7 +39,7 @@
 # @pytest.fixture
 # def sgl_mdp_env(dummy_dataset, mock_tokenizer, mock_reward_function):
 #     """Provides an instance of SglMDPEnv with a mock tokenizer."""
-#     # Mock the necessary parts of BaseEnv initialization if needed
+#     # Mock the necessary parts of BaseMDPEnv initialization if needed
 #     env = SglMDPEnv(
 #         dataset=dummy_dataset,
 #         tokenizer=mock_tokenizer,

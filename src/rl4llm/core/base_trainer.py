@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from rl4llm.constants import EVAL_PHASE, LOGGING_PHASES, TRAIN_PHASE
-from rl4llm.core.base_env import BaseEnv, EpisodeData
+from rl4llm.core.base_env import BaseMDPEnv, EpisodeData
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.deepspeed_mixin import DeepSpeedUtilsMixin
 from rl4llm.core.training_mixin import TrainingMixin
@@ -163,8 +163,8 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         tokenizer: PreTrainedTokenizer,
         policy_engine: DeepSpeedEngine,
         log_config: Dict[str, Any],
-        train_env: BaseEnv,
-        eval_env: Optional[BaseEnv] = None,
+        train_env: BaseMDPEnv,
+        eval_env: Optional[BaseMDPEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
         value_engine: Optional[DeepSpeedEngine] = None,
         inference_client: Optional[InferenceClient] = None,

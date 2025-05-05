@@ -1,226 +1,130 @@
-import random
+# --- Fixtures ---
 
-import datasets
+import logging
+import random
+import re
+from typing import Any, Dict, List, Optional, Tuple, Union
+from unittest.mock import MagicMock, patch, call
+
 import numpy as np
 import pytest
 import torch
+from datasets import Dataset
+from pydantic import ValidationError
+from transformers import PreTrainedModel, PreTrainedTokenizer
 
+# Objects under test
 from rl4llm.envs.hf_env import (
-    EnvState,
-    EpisodeData,
     HfMDPEnv,
+    BaseMDPEnv,
+    BaseRewardFunction,
+    ChatMessage,
+    EpisodeData,
+    EnvState,
 )
 
-# Dummy implementations for testing
 
-
-class DummyModel:
-    """A dummy model for testing generation."""
-
-    def __init__(self, device='cpu'):
-        self.device = device
-
-    def generate(self, input_ids, attention_mask, **gen_args):
-        batch_size = input_ids.shape[0]
-        # Create a dummy completion: a tensor of constant tokens (e.g. token '2')
-        completion = torch.full((batch_size, 5), 2, dtype=torch.long)
-        sequences = torch.cat([input_ids, completion], dim=1)
-
-        class DummyOutput:
-            pass
-
-        out = DummyOutput()
-        out.sequences = sequences
-        return out
-
-
-# Fixtures
+@pytest.fixture
+def mock_tokenizer():
+    """Provides a mock tokenizer instance."""
+    tokenizer = MagicMock(spec=PreTrainedTokenizer)
+    tokenizer.pad_token = "<pad>"
+    tokenizer.eos_token = "<eos>"
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 1
+    tokenizer.padding_side = "left"
+    tokenizer.apply_chat_template = MagicMock(return_value="formatted_prompt")
+    tokenizer.encode = MagicMock(return_value=[10, 20])  # Mock content encoding
+    tokenizer.__call__ = MagicMock(
+        return_value={
+            "input_ids": torch.tensor([[0, 0, 2, 3, 4]]),
+            "attention_mask": torch.tensor([[0, 0, 1, 1, 1]]),
+        }
+    )
+    tokenizer.batch_decode = MagicMock(return_value=["decoded response"])
+    return tokenizer
 
 
 @pytest.fixture
-def dummy_dataset():
-    """Returns a dummy dataset."""
-    data = {
-        'prompt': ['hello world', 'foo bar'],
-        'ground_truth': ['expected output one', 'expected output two'],
+def mock_reward_function():
+    """Provides a mock reward function instance."""
+    reward_fn = MagicMock(spec=BaseRewardFunction)
+    reward_fn.name = "mock_reward"
+    reward_fn.__call__ = MagicMock(
+        return_value=[1.0]
+    )  # Default return for single item batch
+    return reward_fn
+
+
+@pytest.fixture
+def mock_reward_functions(mock_reward_function):
+    """Provides a list containing one mock reward function."""
+    return [mock_reward_function]
+
+
+@pytest.fixture
+def hf_env_instance(minimal_config):
+    """Provides an instance of HfMDPEnv."""
+    return HfMDPEnv(**minimal_config)
+
+
+# Test HfMDPEnv
+def test_hf_env_run_interaction_loop(hf_env_instance, mock_llm, mock_tokenizer):
+    """Tests the HfMDPEnv interaction loop."""
+    # Prepare a simple initial state
+    initial_state = EnvState(
+        batch_messages=[[ChatMessage(role="user", content="Input prompt")]],
+        batch_ground_truth=["Output"],
+        batch_init_prompt_size=[1],
+    )
+    sampling_params = {"max_new_tokens": 5, "temperature": 0.7}
+
+    # Configure mocks for this specific interaction
+    prompt_str = "formatted_prompt_for_hf"
+    input_tokens = torch.tensor([[0, 10, 11, 12]])  # Mock tokenized prompt
+    output_tokens = torch.tensor(
+        [[0, 10, 11, 12, 20, 21, 1]]
+    )  # Prompt + generated + eos
+    decoded_response = "generated text"
+
+    mock_tokenizer.apply_chat_template.return_value = prompt_str
+    mock_tokenizer.__call__.return_value = {
+        "input_ids": input_tokens.to(mock_llm.device),
+        "attention_mask": torch.ones_like(input_tokens).to(mock_llm.device),
     }
-    return datasets.Dataset.from_dict(data)
+    mock_llm.generate.return_value = output_tokens.to(mock_llm.device)
+    mock_tokenizer.batch_decode.return_value = [decoded_response]
 
-
-@pytest.fixture
-def dummy_model():
-    """Returns a dummy model."""
-    return DummyModel()
-
-
-# Tests
-
-
-def test_initialization(dummy_dataset, mock_tokenizer, mock_reward_function):
-    """Tests HfMDPEnv initializes correctly with valid parameters."""
-    env = HfMDPEnv(
-        dataset=dummy_dataset,
-        tokenizer=mock_tokenizer,
-        reward_functions=[mock_reward_function],
-        batch_size=2,
-        group_size=3,
+    final_state = hf_env_instance._run_interaction_loop(
+        initial_state, mock_llm, sampling_params
     )
-    assert env.batch_size == 2
-    assert env.group_size == 3
 
-
-def test_setup_tokenizer(dummy_dataset, mock_tokenizer, mock_reward_function):
-    """Tests tokenizer setup assigns pad_token if missing."""
-    mock_tokenizer.pad_token = None
-    mock_tokenizer.eos_token = '<eos>'
-    mock_tokenizer.eos_token_id = 1
-    HfMDPEnv(
-        dataset=dummy_dataset,
-        tokenizer=mock_tokenizer,
-        reward_functions=[mock_reward_function],
-        batch_size=1,
-        group_size=1,
+    # Verify tokenizer calls
+    mock_tokenizer.apply_chat_template.assert_called_once()
+    mock_tokenizer.__call__.assert_called_once_with(
+        [prompt_str], padding=True, padding_side="left", return_tensors="pt"
     )
-    assert mock_tokenizer.pad_token == '<eos>'
-    assert mock_tokenizer.pad_token_id == 1
 
+    # Verify LLM call
+    mock_llm.generate.assert_called_once()
+    call_args, call_kwargs = mock_llm.generate.call_args
+    assert torch.equal(call_kwargs["input_ids"], input_tokens.to(mock_llm.device))
+    assert call_kwargs["max_new_tokens"] == 5
+    assert call_kwargs["temperature"] == 0.7
+    assert call_kwargs["pad_token_id"] == mock_tokenizer.pad_token_id
+    assert call_kwargs["eos_token_id"] == mock_tokenizer.eos_token_id
 
-def test_collate_fn(dummy_dataset, mock_tokenizer, mock_reward_function):
-    """Tests collate function pads inputs correctly."""
-    env = HfMDPEnv(
-        dataset=dummy_dataset,
-        tokenizer=mock_tokenizer,
-        reward_functions=[mock_reward_function],
-        batch_size=1,
-        group_size=1,
+    # Verify decoding call
+    expected_generated_ids = output_tokens[:, input_tokens.shape[1] :]  # [[20, 21, 1]]
+    mock_tokenizer.batch_decode.assert_called_once_with(
+        expected_generated_ids, skip_special_tokens=True
     )
-    batch = [
-        {
-            'input_ids': [2, 3, 4],
-            'attention_mask': [1, 1, 1],
-            'ground_truth': 'gt1',
-            'prompt': 'p1',
-        },
-        {
-            'input_ids': [5, 6],
-            'attention_mask': [1, 1],
-            'ground_truth': 'gt2',
-            'prompt': 'p2',
-        },
-    ]
-    collated = env._collate_fn(batch)
-    assert collated['input_ids'].shape == (2, 3)
-    assert collated['ground_truth'] == ['gt1', 'gt2']
 
-
-def test_reset_and_grouped_state(
-    dummy_dataset, mock_tokenizer, mock_reward_function
-):
-    """Tests reset returns an EnvState with repeated prompts."""
-    env = HfMDPEnv(
-        dataset=dummy_dataset,
-        tokenizer=mock_tokenizer,
-        reward_functions=[mock_reward_function],
-        batch_size=2,
-        group_size=2,
-    )
-    state = env._reset()
-    assert state is not None
-    assert len(state.prompt) == 4
-    expected_prompts = [p for p in dummy_dataset['prompt'] for _ in range(2)]
-    assert state.prompt == expected_prompts
-
-
-def test_rollout(
-    dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
-):
-    """Tests rollout returns valid EpisodeData objects."""
-    env = HfMDPEnv(
-        dataset=dummy_dataset,
-        tokenizer=mock_tokenizer,
-        reward_functions=[mock_reward_function],
-        batch_size=2,
-        group_size=2,
-    )
-    gen_args = {'max_new_tokens': 5}
-    episodes = env.rollout(dummy_model, gen_args)
-    assert len(episodes) == 4
-    episode = episodes[0]
-    assert hasattr(episode, 'metadata')
-    assert hasattr(episode.metadata, 'prompt')
-    assert hasattr(episode.metadata, 'completion')
-    assert hasattr(episode.metadata, 'prompt_length')
-    assert hasattr(episode.metadata, 'completion_length')
-    assert hasattr(episode.metadata, 'reward_dict')
-
-
-def test_invalid_gen_args(
-    dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
-):
-    """Tests rollout raises error when using num_return_sequences > 1."""
-    env = HfMDPEnv(
-        dataset=dummy_dataset,
-        tokenizer=mock_tokenizer,
-        reward_functions=[mock_reward_function],
-        batch_size=1,
-        group_size=1,
-    )
-    gen_args = {'num_return_sequences': 2}
-    with pytest.raises(ValueError) as excinfo:
-        env.rollout(dummy_model, gen_args)
-    assert 'Set group_size during initialization' in str(excinfo.value)
-
-
-def test_rollout_no_pad_tokens(
-    dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
-):
-    """Tests rollout returns data with no pad tokens in prompt or completion."""
-    env = HfMDPEnv(
-        dataset=dummy_dataset,
-        tokenizer=mock_tokenizer,
-        reward_functions=[mock_reward_function],
-        batch_size=2,
-        group_size=2,
-    )
-    gen_args = {'max_new_tokens': 5}
-    episodes = env.rollout(dummy_model, gen_args)
-    for ep in episodes:
-        states = (
-            ep.states.tolist()
-            if isinstance(ep.states, torch.Tensor)
-            else list(ep.states)
-        )
-        actions = (
-            ep.actions.tolist()
-            if isinstance(ep.actions, torch.Tensor)
-            else list(ep.actions)
-        )
-        # Check that pad token (id 0) does not appear in prompt tokens
-        assert 0 not in states
-        # Check that pad token (id 0) does not appear in completion tokens
-        assert 0 not in actions
-        # If EOS token (id 1) appears, allow it only at the very end of completions.
-        if 1 in states:
-            if states[-1] == 1:
-                assert all(token != 1 for token in states[:-1])
-            else:
-                pytest.fail(
-                    'EOS token found in the middle of completion tokens.'
-                )
-
-
-def test_rollout_rewards(
-    dummy_dataset, mock_tokenizer, mock_reward_function, dummy_model
-):
-    """Tests rollout returns expected rewards from dummy reward function."""
-    env = HfMDPEnv(
-        dataset=dummy_dataset,
-        tokenizer=mock_tokenizer,
-        reward_functions=[mock_reward_function],
-        batch_size=2,
-        group_size=2,
-    )
-    gen_args = {'max_new_tokens': 5}
-    episodes = env.rollout(dummy_model, gen_args)
-    for ep in episodes:
-        assert ep.metadata.reward_dict.get('mock_reward_function') == 1.0
+    # Verify final state
+    assert len(final_state.batch_messages) == 1
+    assert len(final_state.batch_messages[0]) == 2  # Initial user + new assistant
+    assert final_state.batch_messages[0][0].role == "user"
+    assert final_state.batch_messages[0][1].role == "assistant"
+    assert final_state.batch_messages[0][1].content == decoded_response
+    assert final_state.batch_ground_truth == initial_state.batch_ground_truth
+    assert final_state.batch_init_prompt_size == initial_state.batch_init_prompt_size

@@ -9,7 +9,7 @@ import torch
 from transformers import PreTrainedTokenizer
 
 # Objects under test
-from rl4llm.core.base_env import EpisodeData, EpisodeMetadata
+from rl4llm.core.base_env import EpisodeData
 from rl4llm.trainers.grpo_trainer import (
     GRPOConfig,
     GRPOTrainer,
@@ -55,7 +55,7 @@ def mock_tokenizer() -> MagicMock:
         ids = [len(word) % mock.vocab_size for word in text.split()]
         if not ids:  # Handle empty string
             ids = [mock.eos_token_id]
-        if return_tensors == 'pt':
+        if return_tensors == "pt":
             return torch.tensor(ids, dtype=torch.long)
         return ids
 
@@ -72,7 +72,7 @@ def mock_policy_engine(
 ) -> MagicMock:  # Depends on mock_tokenizer
     """Provides a mock DeepSpeedEngine for the policy model."""
     engine = MagicMock()
-    engine.device = torch.device('cpu')
+    engine.device = torch.device("cpu")
     vocab_size = mock_tokenizer.vocab_size  # Use vocab_size from mock
     engine.forward.return_value = Mock(
         logits=torch.randn(4, 10, vocab_size)
@@ -90,7 +90,7 @@ def mock_ref_model(
 ) -> MagicMock:  # Depends on mock_tokenizer
     """Provides a mock model for the reference model."""
     model = MagicMock()
-    model.device = torch.device('cpu')
+    model.device = torch.device("cpu")
     vocab_size = mock_tokenizer.vocab_size  # Use vocab_size from mock
     model.forward.return_value = Mock(
         logits=torch.randn(4, 10, vocab_size)
@@ -117,7 +117,7 @@ def mock_logger() -> MagicMock:
 def mock_train_env() -> MagicMock:
     """Provides a mock HfMDPEnv for training."""
     env = MagicMock()
-    env.reward_functions = {'reward1': Mock()}
+    env.reward_functions = {"reward1": Mock()}
     return env
 
 
@@ -126,11 +126,11 @@ def sample_episode_data(
     mock_tokenizer: MagicMock,
 ) -> EpisodeData:  # Depends on mock_tokenizer
     """Provides a sample EpisodeData instance."""
-    prompt = 'Once upon a time'
-    completion = ' there was a dragon.'
+    prompt = "Once upon a time"
+    completion = " there was a dragon."
     # Use the mock tokenizer's encode method
-    prompt_tokens = mock_tokenizer.encode(prompt, return_tensors='pt')
-    completion_tokens = mock_tokenizer.encode(completion, return_tensors='pt')
+    prompt_tokens = mock_tokenizer.encode(prompt, return_tensors="pt")
+    completion_tokens = mock_tokenizer.encode(completion, return_tensors="pt")
 
     full_seq = torch.concat([prompt_tokens, completion_tokens])
     states = full_seq[:-1]
@@ -138,21 +138,16 @@ def sample_episode_data(
     loss_mask = torch.zeros_like(actions, dtype=torch.bool)
     loss_mask[len(prompt_tokens) - 1 :] = True
 
-    meta = EpisodeMetadata(
-        prompt=prompt,
-        completion=completion,
-        prompt_length=len(prompt_tokens),
-        completion_length=len(completion_tokens),
-        reward_dict={'reward1': 1.5},
-        ground_truth='123',
-    )
-
     return EpisodeData(
         states=states,
         actions=actions,
         loss_mask=loss_mask,
         terminal_reward=1.5,
-        metadata=meta,
+        chat_history=[],
+        reward_dict={"reward1": 1.5},
+        ground_truth="123",
+        prompt_length=len(prompt_tokens),
+        completion_length=len(completion_tokens),
     )
 
 
@@ -208,7 +203,7 @@ def grpo_trainer(
     """Provides a GRPOTrainer instance with mocked dependencies."""
 
     mocker.patch(
-        'rl4llm.core.distributed.DistributedOps.get_instance',
+        "rl4llm.core.distributed.DistributedOps.get_instance",
         return_value=mock_dist_ops,
         autospec=True,
     )
@@ -218,7 +213,7 @@ def grpo_trainer(
     #     autospec=True
     # )
     mocker.patch(
-        'rl4llm.core.base_trainer.LoggingManager',
+        "rl4llm.core.base_trainer.LoggingManager",
         return_value=mock_logger,
         autospec=True,
     )
@@ -227,14 +222,14 @@ def grpo_trainer(
         config=grpo_config,
         tokenizer=mock_tokenizer,  # Pass the mock tokenizer
         policy_engine=mock_policy_engine,
-        log_config={'output_dir': '/tmp/test_rl_trainer'},
+        log_config={"output_dir": "/tmp/test_rl_trainer"},
         train_env=mock_train_env,
         ref_model=mock_ref_model,
         seed=42,
     )
 
     # Manually set device and dtype for consistency in tests
-    trainer.device = torch.device('cpu')
+    trainer.device = torch.device("cpu")
     trainer.initialize_trainer()  # Initialize trainer specific settings
     return trainer
 
@@ -243,7 +238,7 @@ def grpo_trainer(
 
 
 @pytest.mark.parametrize(
-    'rewards, zero_mean_only, expected_mean_approx, expected_std_approx',
+    "rewards, zero_mean_only, expected_mean_approx, expected_std_approx",
     [
         (
             torch.tensor([1.0, 2.0, 3.0, 4.0]),
@@ -288,16 +283,14 @@ def test_normalize_group_rewards(
         )
     else:
         # Check std is approx 1 (unless original std was 0)
-        if (
-            expected_std_approx > 1e-8
-        ):  # Avoid checking std=1 for zero-std input
-            assert normalized_rewards.std(
-                unbiased=False
-            ).item() == pytest.approx(1.0, abs=1e-5)
+        if expected_std_approx > 1e-8:  # Avoid checking std=1 for zero-std input
+            assert normalized_rewards.std(unbiased=False).item() == pytest.approx(
+                1.0, abs=1e-5
+            )
         else:
-            assert normalized_rewards.std(
-                unbiased=False
-            ).item() == pytest.approx(0.0, abs=1e-5)
+            assert normalized_rewards.std(unbiased=False).item() == pytest.approx(
+                0.0, abs=1e-5
+            )
 
 
 def test_normalize_group_rewards_raises_error_for_small_group(
@@ -306,7 +299,7 @@ def test_normalize_group_rewards_raises_error_for_small_group(
     """Tests that normalization fails if the group size is less than 4."""
     rewards = torch.tensor([1.0, 2.0, 3.0])
     with pytest.raises(
-        ValueError, match='Number of group rewards must be greater than 4'
+        ValueError, match="Number of group rewards must be greater than 4"
     ):
         grpo_trainer._normalize_group_rewards(rewards)
 
@@ -324,18 +317,14 @@ def test_train_collate_fn(
     sample2.ref_logprobs = sample2.ref_logprobs[:-1]
     sample2.advantages = sample2.advantages[:-1]
 
-    batch_list = [sample_transition_data] * 2 + [
-        sample2
-    ] * 2  # Batch of 4, two lengths
+    batch_list = [sample_transition_data] * 2 + [sample2] * 2  # Batch of 4, two lengths
     collated_batch = grpo_trainer._train_collate_fn(batch_list)
 
     assert isinstance(collated_batch, TransitionData)
     expected_batch_size = 4
     expected_max_seq_len = 10  # From sample_transition_data fixture
     expected_shape = (expected_batch_size, expected_max_seq_len)
-    pad_token_id = (
-        grpo_trainer.tokenizer.pad_token_id
-    )  # Use pad_token_id from mock
+    pad_token_id = grpo_trainer.tokenizer.pad_token_id  # Use pad_token_id from mock
 
     assert collated_batch.states.shape == expected_shape
     assert collated_batch.states.dtype == torch.long
@@ -387,9 +376,7 @@ def loss_inputs(
     vocab_size = mock_tokenizer.vocab_size  # Use vocab_size from mock
 
     # Ensure actions are within vocab size
-    actions = torch.randint(
-        0, vocab_size, (batch_size, seq_len), dtype=torch.long
-    )
+    actions = torch.randint(0, vocab_size, (batch_size, seq_len), dtype=torch.long)
     # Make loss mask have some False values
     loss_mask = torch.ones(batch_size, seq_len, dtype=torch.bool)
     loss_mask[0, :2] = False  # Mask first two tokens of first sequence
@@ -417,8 +404,8 @@ def loss_inputs(
     )
 
     return {
-        'pi_logits': pi_logits,
-        'experience_batch': experience_batch,
+        "pi_logits": pi_logits,
+        "experience_batch": experience_batch,
     }
 
 
@@ -434,35 +421,34 @@ def test_compute_loss_basic(
 
     # Check if logs were called - verify keys exist and values are floats
     log_calls = {
-        c.args[0]: c.args[1]
-        for c in grpo_trainer.logger.log_scalar.call_args_list
+        c.args[0]: c.args[1] for c in grpo_trainer.logger.log_scalar.call_args_list
     }
-    assert 'train/pg_loss' in log_calls
-    assert isinstance(log_calls['train/pg_loss'], float)
+    assert "train/pg_loss" in log_calls
+    assert isinstance(log_calls["train/pg_loss"], float)
 
-    assert 'train/entropy_loss' in log_calls
-    assert isinstance(log_calls['train/entropy_loss'], float)
+    assert "train/entropy_loss" in log_calls
+    assert isinstance(log_calls["train/entropy_loss"], float)
 
-    assert 'policy/entropy' in log_calls
-    assert isinstance(log_calls['policy/entropy'], float)
+    assert "policy/entropy" in log_calls
+    assert isinstance(log_calls["policy/entropy"], float)
 
-    assert 'policy/approxkl' in log_calls
-    assert isinstance(log_calls['policy/approxkl'], float)
+    assert "policy/approxkl" in log_calls
+    assert isinstance(log_calls["policy/approxkl"], float)
 
-    assert 'policy/clipfrac' in log_calls
-    assert isinstance(log_calls['policy/clipfrac'], float)
+    assert "policy/clipfrac" in log_calls
+    assert isinstance(log_calls["policy/clipfrac"], float)
 
     # KL loss is calculated because config has kl_loss_coef > 0
-    assert 'train/kl_loss' in log_calls
-    assert isinstance(log_calls['train/kl_loss'], float)
-    assert 'objective/kl' in log_calls
-    assert isinstance(log_calls['objective/kl'], float)
+    assert "train/kl_loss" in log_calls
+    assert isinstance(log_calls["train/kl_loss"], float)
+    assert "objective/kl" in log_calls
+    assert isinstance(log_calls["objective/kl"], float)
 
     # Check if the final loss roughly matches the sum of logged components
     expected_loss_approx = (
-        log_calls['train/pg_loss']
-        + log_calls['train/kl_loss']
-        + log_calls['train/entropy_loss']
+        log_calls["train/pg_loss"]
+        + log_calls["train/kl_loss"]
+        + log_calls["train/entropy_loss"]
     )
     assert loss.item() == pytest.approx(expected_loss_approx)
 
@@ -477,16 +463,13 @@ def test_compute_loss_no_kl(
 
     # Check that kl_loss related logs were not called
     log_calls = {
-        c.args[0]: c.args[1]
-        for c in grpo_trainer.logger.log_scalar.call_args_list
+        c.args[0]: c.args[1] for c in grpo_trainer.logger.log_scalar.call_args_list
     }
-    assert 'train/kl_loss' not in log_calls
-    assert 'objective/kl' not in log_calls
+    assert "train/kl_loss" not in log_calls
+    assert "objective/kl" not in log_calls
 
     # Check if the final loss roughly matches the sum of remaining logged components
-    expected_loss_approx = (
-        log_calls['train/pg_loss'] + log_calls['train/entropy_loss']
-    )
+    expected_loss_approx = log_calls["train/pg_loss"] + log_calls["train/entropy_loss"]
     assert loss.item() == pytest.approx(expected_loss_approx)
 
 
@@ -497,7 +480,7 @@ def test_compute_loss_no_advantage_norm(
     grpo_trainer.config.normalize_advantages = False
     # Mock masked_whiten to check it's not called
     with patch.object(
-        grpo_trainer, 'masked_whiten', wraps=grpo_trainer.masked_whiten
+        grpo_trainer, "masked_whiten", wraps=grpo_trainer.masked_whiten
     ) as mock_whiten:
         loss = grpo_trainer.compute_loss(**loss_inputs)
         assert isinstance(loss, torch.Tensor)
@@ -512,7 +495,7 @@ def test_compute_loss_with_advantage_norm(
     # Mock masked_whiten to check it's called
     with patch.object(
         grpo_trainer,
-        'dist_masked_whiten',
+        "dist_masked_whiten",
         wraps=grpo_trainer.dist_masked_whiten,
     ) as mock_whiten:
         loss = grpo_trainer.compute_loss(**loss_inputs)
@@ -523,7 +506,7 @@ def test_compute_loss_with_advantage_norm(
 # --- Integration-like Tests (Simplified) ---
 
 
-@patch('rl4llm.trainers.grpo_trainer.DataLoader')  # Mock DataLoader
+@patch("rl4llm.trainers.grpo_trainer.DataLoader")  # Mock DataLoader
 def test_build_train_loader(
     mock_dataloader_cls: MagicMock,
     grpo_trainer: GRPOTrainer,
@@ -545,7 +528,7 @@ def test_build_train_loader(
     # Mock models returning simple logits for conversion step
     # Determine max length needed for the mock forward pass in conversion
     max_len = max(
-        ep.metadata.prompt_length + ep.metadata.completion_length
+        ep.prompt_length + ep.completion_length
         for ep in sample_group_episodes
     )
     batch_size = len(sample_group_episodes)
@@ -559,7 +542,7 @@ def test_build_train_loader(
 
     with patch.object(
         grpo_trainer,
-        '_convert_group_episodes_to_transitions',
+        "_convert_group_episodes_to_transitions",
         return_value=[dummy_transition] * len(sample_group_episodes),
     ) as mock_convert:
         # Provide a list containing one group
@@ -575,29 +558,27 @@ def test_build_train_loader(
             sample_group_episodes
         )  # Number of samples
         assert (
-            dataloader_kwargs['batch_size']
+            dataloader_kwargs["batch_size"]
             == grpo_trainer.config.train_micro_batch_size
         )
-        assert dataloader_kwargs['shuffle'] is True
-        assert dataloader_kwargs['collate_fn'] == grpo_trainer._train_collate_fn
-        assert isinstance(
-            dataloader, MagicMock
-        )  # It returns the mocked instance
+        assert dataloader_kwargs["shuffle"] is True
+        assert dataloader_kwargs["collate_fn"] == grpo_trainer._train_collate_fn
+        assert isinstance(dataloader, MagicMock)  # It returns the mocked instance
 
 
 def test_build_train_loader_empty_experience(grpo_trainer: GRPOTrainer):
     """Tests that building a loader from empty experience raises ValueError."""
     # Mock conversion to return empty list
     with patch.object(
-        grpo_trainer, '_convert_group_episodes_to_transitions', return_value=[]
+        grpo_trainer, "_convert_group_episodes_to_transitions", return_value=[]
     ):
         # Mock _check_group_episodes to allow processing empty groups initially
-        with pytest.raises(ValueError, match='No samples for training'):
+        with pytest.raises(ValueError, match="No samples for training"):
             grpo_trainer.build_train_loader([[]])  # Empty group list
 
 
 @patch(
-    'rl4llm.trainers.grpo_trainer.pad_sequence',
+    "rl4llm.trainers.grpo_trainer.pad_sequence",
     side_effect=torch.nn.utils.rnn.pad_sequence,
 )  # Use real pad_sequence
 def test_convert_group_episodes_to_transitions(
@@ -612,7 +593,7 @@ def test_convert_group_episodes_to_transitions(
 
     # Mock model outputs
     max_len = max(
-        ep.metadata.prompt_length + ep.metadata.completion_length
+        ep.prompt_length + ep.completion_length
         for ep in sample_group_episodes
     )
     batch_size = len(sample_group_episodes)
@@ -628,7 +609,7 @@ def test_convert_group_episodes_to_transitions(
     # Mock reward normalization to avoid dependency on its correctness here
     with patch.object(
         grpo_trainer,
-        '_normalize_group_rewards',
+        "_normalize_group_rewards",
         side_effect=lambda x, y, **kwargs: x,
     ):
         transitions = grpo_trainer._convert_group_episodes_to_transitions(
@@ -643,7 +624,7 @@ def test_convert_group_episodes_to_transitions(
     for i, trans in enumerate(transitions):
         ep = sample_group_episodes[i]
         expected_seq_len = (
-            ep.metadata.prompt_length + ep.metadata.completion_length - 1
+            ep.prompt_length + ep.completion_length - 1
         )  # states/actions length
         assert isinstance(trans, TransitionData)
         assert trans.states.shape == (expected_seq_len,)
@@ -654,13 +635,9 @@ def test_convert_group_episodes_to_transitions(
         assert trans.advantages.shape == (expected_seq_len,)
 
         # Check loss mask correctness
-        assert torch.all(
-            trans.loss_mask[: ep.metadata.prompt_length - 1] == False
-        )
-        assert torch.all(
-            trans.loss_mask[ep.metadata.prompt_length - 1 :] == True
-        )
-        assert trans.loss_mask.sum().item() == ep.metadata.completion_length
+        assert torch.all(trans.loss_mask[: ep.prompt_length - 1] == False)
+        assert torch.all(trans.loss_mask[ep.prompt_length - 1 :] == True)
+        assert trans.loss_mask.sum().item() == ep.completion_length
 
         # # Check advantages are non-zero only where loss_mask is True (using original reward)
         # assert torch.all(trans.advantages[trans.loss_mask] == original_reward)
@@ -672,7 +649,5 @@ def test_convert_group_episodes_to_transitions_small_group(
 ):
     """Tests that conversion fails if group size is less than 4."""
     small_group = sample_group_episodes[:3]
-    with pytest.raises(
-        ValueError, match='Expect group episodes to be greater than 4'
-    ):
+    with pytest.raises(ValueError, match="Expect group episodes to be greater than 4"):
         grpo_trainer._convert_group_episodes_to_transitions(small_group)

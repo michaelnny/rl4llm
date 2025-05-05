@@ -6,13 +6,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from rl4llm.core.base_env import BaseEnv, EnvState, EpisodeData, EpisodeMetadata
+from rl4llm.core.base_env import BaseMDPEnv, EnvState, EpisodeData, BaseRewardFunction
 from rl4llm.core.base_inference_client import InferenceClient
 
 logger = logging.getLogger(__name__)
 
 
-class SglMDPEnv(BaseEnv):
+class SglMDPEnv(BaseMDPEnv):
     """
     Environment for generating samples using SGLang inference server with a custom HTTP client.
     """

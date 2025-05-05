@@ -11,7 +11,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from rl4llm.core.base_env import BaseEnv, EpisodeData
+from rl4llm.core.base_env import BaseMDPEnv, EpisodeData
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 
@@ -114,8 +114,8 @@ class PPOTrainer(BaseRLTrainer):
         policy_engine: DeepSpeedEngine,
         value_engine: DeepSpeedEngine,
         log_config: Dict[str, Any],
-        train_env: BaseEnv,
-        eval_env: Optional[BaseEnv] = None,
+        train_env: BaseMDPEnv,
+        eval_env: Optional[BaseMDPEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
         inference_client: Optional[InferenceClient] = None,
         seed: Optional[int] = 175,

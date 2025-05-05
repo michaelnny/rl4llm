@@ -127,13 +127,13 @@ train_env = SglMDPEnv(
 
 ### Creating Custom Environments
 
-It's very easy to build a custom environment, for example, multi-step scenarios or custom sampling with logits processors. All we need to do is extend the `BaseEnv` class and implement the `rollout` logic.
+It's very easy to build a custom environment, for example, multi-step scenarios or custom sampling with logits processors. All we need to do is extend the `BaseMDPEnv` class and implement the `rollout` logic.
 
 ```python
 
-from rl4llm.core.base_env import BaseEnv, EpisodeData
+from rl4llm.core.base_env import BaseMDPEnv, EpisodeData
 
-class MyCustomEnv(BaseEnv):
+class MyCustomEnv(BaseMDPEnv):
 
     def rollout(self,
         llm: Any,
