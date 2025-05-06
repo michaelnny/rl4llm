@@ -1,8 +1,6 @@
 """Implements MDP ENV for collect samples using HF model"""
 
-import functools
 import logging
-import random
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -11,10 +9,9 @@ from transformers import LogitsProcessorList, PreTrainedModel
 
 from rl4llm.core.base_env import (
     BaseMDPEnv,
-    EnvState,
     ChatMessage,
-    EpisodeData,
-    BaseRewardFunction,
+    EnvState,
+    SampleState,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,7 +29,7 @@ class HfMDPEnv(BaseMDPEnv):
     @torch.inference_mode()
     def _run_interaction_loop(
         self,
-        initial_state: EnvState,
+        env_state: EnvState,
         llm: PreTrainedModel,
         sampling_params: Dict[str, Any],
         **kwargs: Optional[Dict[str, Any]],
@@ -40,32 +37,29 @@ class HfMDPEnv(BaseMDPEnv):
         """
         Default interaction loop: Performs a single generation step.
 
-        Suitable for single-step MDPs where the full completion is generated at once.
-        Subclasses for multi-step MDPs or tool use should override this method.
-
         Args:
-            initial_state: The starting state from _prepare_initial_state.
+            env_state: The starting state from _prepare_initial_state.
             llm: The language model.
             generation_config: Configuration for generation (max_new_tokens, etc.).
             **kwargs: Additional arguments (unused in default).
 
         Returns:
-            EnvState: The final state after generation, with updated batch_messages.
+            EnvState: The final state after generation, with updated SampleStates.
         """
-        logger.debug(f"Rank {self.rank}: Running default single-step interaction loop.")
+        logger.debug(
+            f"Rank {self.rank}: Running default single-step interaction loop."
+        )
 
         # 1. Prepare inputs for the LLM
         # Convert initial messages to token IDs with padding
-        batch_prompts = self._convert_batch_message_to_prompt(
-            initial_state.batch_messages
-        )
+        batch_prompts = self._convert_to_batch_prompts(env_state)
 
         # Tokenize the formatted prompts
         batch_inputs = self.tokenizer(
             batch_prompts,
             padding=True,
-            padding_side="left",
-            return_tensors="pt",
+            padding_side='left',
+            return_tensors='pt',
         ).to(llm.device)
 
         # 2. Generate completions
@@ -80,24 +74,29 @@ class HfMDPEnv(BaseMDPEnv):
         # We need to reconstruct the chat history including the assistant's reply.
         # This is tricky because batch_decode gives the *full* text including prompt.
         # A robust way is to decode the generated part *only*.
-        prompt_lengths = batch_inputs["input_ids"].shape[1]
+        prompt_lengths = batch_inputs['input_ids'].shape[1]
         generated_ids = outputs[:, prompt_lengths:]
         generated_responses = self.tokenizer.batch_decode(
             generated_ids, skip_special_tokens=True
         )
 
-        final_batch_messages = []
-        for i, initial_msg_list in enumerate(initial_state.batch_messages):
-            new_history = initial_msg_list + [
-                ChatMessage(role="assistant", content=generated_responses[i].strip())
-            ]
-            final_batch_messages.append(new_history)
+        # 3. Update each SampleState object *in place*
+        for i, sample_state in enumerate(env_state.sample_states):
+            # Although it's single-step, check 'done' in case of prior errors or future reuse
+            if sample_state.done:
+                continue
 
-        # 4. Return the final state
-        final_state = EnvState(
-            batch_messages=final_batch_messages,  # Updated messages
-            batch_ground_truth=initial_state.batch_ground_truth,
-            batch_init_prompt_size=initial_state.batch_init_prompt_size,
-            # Copy any other relevant fields from initial_state if needed
-        )
-        return final_state
+            # Safely get the generated text from the corresponding output
+            generated_text = generated_responses[i].strip()
+
+            # Append the new assistant message to the sample's history
+            sample_state.messages.append(
+                ChatMessage(role='assistant', content=generated_text)
+            )
+
+            # Mark this sample as done and record the step
+            sample_state.done = True
+            sample_state.current_step = 1  # It always takes exactly one step
+
+        # 4. Return the *modified* EnvState object
+        return env_state

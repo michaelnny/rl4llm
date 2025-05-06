@@ -6,7 +6,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from rl4llm.core.base_env import BaseMDPEnv, EnvState, EpisodeData, BaseRewardFunction
+from rl4llm.core.base_env import (
+    BaseMDPEnv,
+    ChatMessage,
+    EnvState,
+    SampleState,
+)
 from rl4llm.core.base_inference_client import InferenceClient
 
 logger = logging.getLogger(__name__)
@@ -14,120 +19,62 @@ logger = logging.getLogger(__name__)
 
 class SglMDPEnv(BaseMDPEnv):
     """
-    Environment for generating samples using SGLang inference server with a custom HTTP client.
+    Simple one-step MDP Environment using SGLang inference server with a custom HTTP client.
     """
 
-    def _process_single_output_item(
-        self, item: Dict[str, Any]
-    ) -> Union[str, torch.Tensor]:
-        """Convert text to token IDs, ensuring EOS token if appropriate."""
-        text = item['text']
-
-        if not text:
-            # Use some default text to ensure code will not break
-            text = "I can't help with this question."
-
-        meta_info = item.get('meta_info')
-        token_ids = list(
-            self.tokenizer(
-                text,
-                padding=False,
-                truncation=False,
-                add_special_tokens=False,
-            )['input_ids']
-        )
-
-        # Add EOS token if needed
-        if meta_info and 'finish_reason' in meta_info:
-            finish_reason = meta_info['finish_reason']
-            if (
-                'type' in finish_reason
-                and finish_reason['type'] != 'length'
-                and token_ids[-1] != self.tokenizer.eos_token_id
-            ):
-                token_ids.append(self.tokenizer.eos_token_id)
-
-        return text, torch.tensor(token_ids, dtype=torch.long)
-
-    def _process_llm_output(
-        self, llm_output: List[Dict[str, Any]]
-    ) -> Tuple[List[str], List[torch.Tensor]]:
-        """Processes raw LLM output into texts and token tensors, handling EOS."""
-        texts = []
-        token_ids_list = []
-
-        for item in llm_output:
-            text, token_ids = self._process_single_output_item(item)
-            texts.append(text)
-            token_ids_list.append(token_ids)
-
-        return texts, token_ids_list
-
-    def _generate_completions(
-        self,
-        llm: InferenceClient,
-        sampling_params: Dict[str, Any],
-        state: EnvState,
-        **kwargs: Optional[Dict[str, Any]],
-    ) -> Tuple[List[str], List[torch.Tensor]]:
-        """
-        Generates completions using the LLM for the current state.
-
-        Args:
-            llm: The custom inference client for engine.
-            sampling_params: Dictionary of generation arguments (e.g., max_new_tokens, do_sample).
-            state: The current EnvState containing input_ids and attention_mask.
-            **kwargs: Additional custom arguments.
-
-        Returns:
-            A tuple containing:
-            - completion_texts: List of decoded completion strings (up to, but not including, EOS).
-            - completion_tokens: List of completion token tensors (unpadded, includes EOS if present).
-        """
-        output = llm.generate(
-            prompts=state.prompt,
-            sampling_params=sampling_params,
-        )
-
-        # Unpack completions
-        completion_texts, completion_ids = self._process_llm_output(output)
-
-        return completion_texts, completion_ids
-
     @torch.inference_mode()
-    def rollout(
+    def _run_interaction_loop(
         self,
+        env_state: EnvState,
         llm: InferenceClient,
         sampling_params: Dict[str, Any],
         **kwargs: Optional[Dict[str, Any]],
-    ) -> List[EpisodeData]:
+    ) -> EnvState:
         """
-        Performs a rollout step: gets a batch, generates completions, calculates rewards,
-        and returns structured episode data.
+        Performs a single generation step for all samples using the SampleState structure.
 
         Args:
-            llm: The custom inference client for engine.
-            sampling_params: Dictionary of generation arguments (e.g., max_new_tokens).
-            **kwargs: Additional custom arguments.
+            env_state: The starting state containing a list of SampleState objects.
+            llm: The language model inference client.
+            sampling_params: Configuration for generation.
+            **kwargs: Additional arguments (unused in default).
 
         Returns:
-            A list of EpisodeData objects, one for each generated sample in the batch
-            (batch_size * group_size samples). Returns an empty list if the dataset is exhausted.
+            EnvState: The final state after one generation step, with updated SampleStates.
         """
-        if sampling_params.get('n', 1) > 1:
-            raise ValueError(
-                'Set group_size during initialization instead of using n.'
-            )
-
-        state = self._reset()
-        if state is None:
-            logger.warning(
-                f"Rank {self.rank}: Reset returned None; dataset exhausted."
-            )
-            return []
-
-        completions, completion_tokens = self._generate_completions(
-            llm, sampling_params, state, **kwargs
+        logger.debug(
+            f"Rank {self.rank}: Running single-step interaction loop with SampleState design."
         )
 
-        return self._to_episodes(state, completions, completion_tokens)
+        # 1. Prepare inputs for the LLM from the list of SampleStates
+        # Convert message histories to prompt strings
+        batch_prompts = self._convert_to_batch_prompts(env_state)
+
+        # 2. Call the inference API for LLM generation
+        try:
+            outputs = llm.generate(
+                prompts=batch_prompts,
+                sampling_params=sampling_params,
+            )
+        except Exception as e:
+            logger.error(
+                f"Rank {self.rank}: Error during LLM generation in single-step loop: {e}",
+                exc_info=True,
+            )
+            # Return the state marked as done
+            return env_state
+
+        # 3. Update each SampleState object *in place*
+        for i, sample_state in enumerate(env_state.sample_states):
+            generated_text = outputs[i].get('text', '').strip()
+            # Append the new assistant message to the sample's history
+            sample_state.messages.append(
+                ChatMessage(role='assistant', content=generated_text)
+            )
+
+            # Mark this sample as done and record the step
+            sample_state.done = True
+            sample_state.current_step = 1  # It always takes exactly one step
+
+        # 4. Return the *modified* EnvState object
+        return env_state

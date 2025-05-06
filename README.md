@@ -72,7 +72,7 @@ This is especially useful in the context of LLM as we often need to handle speci
 ### Dataset Structure
 
 Each environment expects a dataset with at least two fields:
-- `prompt` (pre-formatted text for the model)
+- `messages` (chat-style message)
 - `ground_truth` (correct answer used for rewards)
 
 ---
@@ -84,26 +84,29 @@ You can easily define your own reward functions by subclassing the provided `Bas
 Example:
 
 ```python
-from rl4llm.core.base_env import BaseRewardFunction
+
+from rl4llm.core.base_env import ChatMessage, BaseRewardFunction
 
 class AccuracyRewardFunction(BaseRewardFunction):
 
     def __init__(self, name='accuracy_reward'):
         super().__init__(name)
 
-    def __call__(self, completions, ground_truths, **kwargs):
-        if isinstance(ground_truths, str):
-            ground_truths = [ground_truths]
-        if len(ground_truths) == 1:
-            ground_truths = [ground_truths] * len(completions)
-        if len(completions) != len(ground_truths):
-            raise ValueError(
-                'Completion and ground truth have mismatch elements'
-            )
+    def __call__(
+        self,
+        messages: List[ChatMessage],
+        ground_truth: Union[str | float | int],
+        **kwargs: Dict[str, Any],
+    ) -> List[float]:
 
-        for completion, truth in zip(completions, ground_truths):
-            rewards.append(random.rand()) # random scores
-        return rewards
+        # get last completion
+        completion = messages[-1].content
+
+        return math_problem_grader(
+            full_answer=completion,
+            ground_truth=ground_truth,
+        )
+
 ```
 
 For task using multiple rewards, consider use a `reward_transform_fn` to transformer them into a single signal. For example here's an very simple example of handling mixed rewards.
@@ -131,16 +134,19 @@ It's very easy to build a custom environment, for example, multi-step scenarios 
 
 ```python
 
-from rl4llm.core.base_env import BaseMDPEnv, EpisodeData
+from rl4llm.core.base_env import BaseMDPEnv, EnvState
 
 class MyCustomEnv(BaseMDPEnv):
 
-    def rollout(self,
+    @torch.inference_mode()
+    def _run_interaction_loop(
+        self,
+        env_state: EnvState,
         llm: Any,
-        sampling_params: Dict,
+        sampling_params: Dict[str, Any],
         **kwargs: Optional[Dict[str, Any]],
-    ) -> List[EpisodeData]:
-        # Your own sampling logic
+    ) -> EnvState:
+        # Your own loop
 ```
 
 > [!TIP]

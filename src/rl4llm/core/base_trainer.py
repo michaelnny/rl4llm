@@ -540,40 +540,24 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             # Save data to external file
             data_to_log = {
                 'rank': self.dist_ops.global_rank,
-                **ep.metadata.model_dump(),
+                'timestamp': ep.timestamp,
+                'ground_truth': ep.ground_truth,
+                'chat_history': ep.chat_history,
+                'terminal_reward': ep.terminal_reward,
+                **ep.reward_dict,
             }
             self.logger.log_sample(phase, data_to_log, step)
 
             # Logging metrics
-            for k, v in ep.metadata.reward_dict.items():
+            for k, v in ep.reward_dict.items():
                 self.logger.log_scalar(f"{metric_key}/{k}", v)
             self.logger.log_scalar(
                 f"{token_metric_key}/completion_length",
-                ep.metadata.completion_length,
+                ep.completion_length,
             )
             self.logger.log_scalar(
-                f"{token_metric_key}/prompt_length", ep.metadata.prompt_length
+                f"{token_metric_key}/prompt_length", ep.prompt_length
             )
-
-    def extract_state_action_sequences(
-        self, episodes: List[EpisodeData]
-    ) -> Tuple[List[int], List[List[int]], List[List[int]]]:
-        """Extract state and action sequences from the episode list"""
-
-        # Prepare batched sequences for model forward pass
-        sequences = [
-            torch.concat([ep.prompt_tokens, ep.completion_tokens]).long()
-            for ep in episodes
-        ]
-        sequence_lengths = [
-            len(seq) for seq in sequences
-        ]  # Total length (prompt + completion)
-
-        # States: tokens 0 to N-1; Actions: tokens 1 to N
-        state_sequences = [seq[:-1] for seq in sequences]
-        action_sequences = [seq[1:] for seq in sequences]
-
-        return sequence_lengths, state_sequences, action_sequences
 
     def train(self, job_config: Dict):
         """

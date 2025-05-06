@@ -3,6 +3,7 @@
 import logging
 import random
 import re
+import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import (
@@ -13,7 +14,6 @@ from typing import (
     Optional,
     Tuple,
     TypeAlias,
-    TypedDict,
     Union,
 )
 
@@ -22,105 +22,129 @@ import torch
 from datasets import Dataset
 from pydantic import BaseModel, Field, constr, field_validator, model_validator
 from torch.utils.data import DataLoader
-from transformers import (
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import PreTrainedTokenizer
 
 from rl4llm.utils.dataset_utils import shard_dataset
 
 logger = logging.getLogger(__name__)
 
 
-RewardTransform: TypeAlias = Optional[Callable[[Dict[str, List[float]]], torch.Tensor]]
+RewardTransform: TypeAlias = Optional[
+    Callable[[Dict[str, List[float]]], torch.Tensor]
+]
 
 
 class ChatMessage(BaseModel):
-    role: str = Field(..., description="Role of the chat turn")
-    content: str = Field(..., description="Chat content")
-    # Add optional fields for tool use if needed later
+    role: str = Field(..., description='Role of the chat turn')
+    content: str = Field(..., description='Chat content')
     tool_calls: Optional[List[Dict]] = None
     tool_call_id: Optional[str] = None
 
-    @model_validator(mode="after")
-    def check_role(cls, values):
-        # Allow 'tool' role if implementing tool use later
-        supported_roles = ["user", "assistant", "system", "tool"]
-        if values.role not in supported_roles:
+    @model_validator(mode='after')
+    def check_role(cls, model_instance):
+        supported_roles = ['user', 'assistant', 'system', 'tool']
+        if model_instance.role not in supported_roles:
             raise ValueError(
-                f"Invalid role {values.role}, only support {supported_roles}"
+                f"Invalid role {model_instance.role}, only support {supported_roles}"
             )
-        return values
-
-    class Config:
-        # Allow extra fields if needed for tool calls etc.
-        extra = "allow"
+        return model_instance
 
 
 class EpisodeData(BaseModel):
     """LLM ENV rollout episode"""
 
-    states: torch.Tensor = Field(..., description="Token sequences from t=0 to T-1")
-    actions: torch.Tensor = Field(..., description="Token sequences from t=1 to T")
-    loss_mask: torch.Tensor = Field(
-        ..., description="Mask for completion tokens (t=1 to T)"
+    states: torch.Tensor = Field(
+        ..., description='Token sequences from t=0 to T-1'
     )
-    terminal_reward: float = Field(..., description="Final transformed reward")
-    ground_truth: Union[str, float, int] = Field(..., description="Ground truth")
-    reward_dict: Dict[str, float] = Field(..., description="Individual rewards")
-    chat_history: List[ChatMessage] = Field(..., description="Full chat history")
-    prompt_length: int = Field(..., description="Initial prompt token size")
-    completion_length: int = Field(..., description="Generated completion token size")
-    timestamp: Optional[str] = Field(default_factory=lambda: datetime.now().isoformat())
+    actions: torch.Tensor = Field(
+        ..., description='Token sequences from t=1 to T'
+    )
+    loss_mask: torch.Tensor = Field(
+        ..., description='Mask for completion tokens (t=1 to T)'
+    )
+    terminal_reward: float = Field(..., description='Final transformed reward')
+    ground_truth: Union[str, float, int] = Field(
+        ..., description='Ground truth'
+    )
+    reward_dict: Dict[str, float] = Field(..., description='Individual rewards')
+    chat_history: List[ChatMessage] = Field(
+        ..., description='Full chat history'
+    )
+    prompt_length: int = Field(..., description='Initial prompt token size')
+    completion_length: int = Field(
+        ..., description='Generated completion token size'
+    )
+    timestamp: Optional[str] = Field(
+        default_factory=lambda: datetime.now().isoformat()
+    )
 
-    @model_validator(mode="after")
-    def check_tensor_shapes(cls, values):
+    @model_validator(mode='after')
+    def check_tensor_shapes(cls, model_instance):
         if (
-            values.states.shape != values.actions.shape
-            or values.states.shape != values.loss_mask.shape
+            model_instance.states.shape != model_instance.actions.shape
+            or model_instance.states.shape != model_instance.loss_mask.shape
         ):
             raise ValueError(
-                f"Tensor shape mismatch: states={values.states.shape}, "
-                f"actions={values.actions.shape}, loss_mask={values.loss_mask.shape}"
+                f"Tensor shape mismatch: states={model_instance.states.shape}, "
+                f"actions={model_instance.actions.shape}, loss_mask={model_instance.loss_mask.shape}"
             )
-        return values
+        return model_instance
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class SampleState(BaseModel):
+    """Represents the state of a single sample during interaction."""
+
+    id: Optional[str] = Field(
+        default_factory=lambda: str(uuid.uuid4().hex),
+        description='Unique ID of the sample',
+    )
+    messages: List[ChatMessage] = Field(
+        ..., description='Current message history for this sample'
+    )
+    ground_truth: Union[str, float, int] = Field(
+        ..., description='Ground truth for this sample'
+    )
+    init_msg_size: int = Field(
+        ..., description='Number of messages in the initial prompt'
+    )
+    current_step: int = Field(
+        default=0, description='Number of interaction steps taken'
+    )
+    done: bool = Field(
+        default=False,
+        description='Whether this sample has finished interaction',
+    )
 
     class Config:
         arbitrary_types_allowed = True
 
 
 class EnvState(BaseModel):
-    """Environment state for LLM generation"""
+    """Environment state holding individual states for each sample in the batch."""
 
-    # Represents the state *before* the next generation step
-    batch_messages: List[List[ChatMessage]] = Field(
-        ..., description="Batch list of chat messages"
+    sample_states: List[SampleState] = Field(
+        ..., description='List of individual sample states'
     )
-    batch_ground_truth: List[str | float | int] = Field(
-        ..., description="Batch list of ground truth"
-    )
-    batch_init_prompt_size: List[int] = Field(
-        ..., description="Batch list of initial prompt message count"
-    )
-    # Optional: Add fields needed for multi-step control (e.g., current step, done flags)
-    batch_done: Optional[List[bool]] = None
-    batch_current_step: Optional[List[int]] = None
 
     class Config:
         arbitrary_types_allowed = True
-        extra = "allow"  # Allow extra fields for subclasses
 
 
 class BaseRewardFunction(ABC):  # Made abstract
     """Base class for reward functions."""
 
-    _VALID_NAME_PATTERN = r"^[a-zA-Z0-9_\-]+$"
+    _VALID_NAME_PATTERN = r'^[a-zA-Z0-9_\-]+$'
 
     def __init__(self, name: str):
         if not isinstance(name, str):
-            raise TypeError(f"Reward function name must be a string, got {type(name)}.")
+            raise TypeError(
+                f"Reward function name must be a string, got {type(name)}."
+            )
         if not name:
-            raise ValueError("Reward function name cannot be empty.")
+            raise ValueError('Reward function name cannot be empty.')
         if not re.match(self._VALID_NAME_PATTERN, name):
             raise ValueError(
                 f"Invalid reward function name: '{name}'. Pattern: '{self._VALID_NAME_PATTERN}'"
@@ -130,20 +154,20 @@ class BaseRewardFunction(ABC):  # Made abstract
     @abstractmethod
     def __call__(
         self,
-        batch_messages: List[List[ChatMessage]],
-        batch_ground_truths: List[Union[str, float, int]],
+        messages: List[ChatMessage],
+        ground_truth: Union[str, float, int],
         **kwargs: Any,
-    ) -> List[float]:
+    ) -> float:
         """
-        Calculates rewards based on the final state (full chat history).
+        Calculates reward based on the final state (full chat history) for a single sample.
 
         Args:
-            batch_messages: List where each element is the full chat history for a sample.
-            batch_ground_truths: Corresponding ground truths.
+            messages: The full chat history for a single sample.
+            ground_truth: The corresponding ground truth for the sample.
             **kwargs: Additional data.
 
         Returns:
-            List[float]: Scalar rewards for each sample in the batch.
+            float: Scalar reward for the sample.
         """
         raise NotImplementedError
 
@@ -178,7 +202,7 @@ class BaseMDPEnv(ABC):
         reward_functions: List[BaseRewardFunction],
         batch_size: int,
         group_size: int,
-        max_steps: int = 1,  # Max interaction steps (for multi-step control)
+        max_steps: int = 1,
         rank: Optional[int] = 0,
         world_size: Optional[int] = 1,
         seed: Optional[int] = 42,
@@ -186,33 +210,43 @@ class BaseMDPEnv(ABC):
         num_workers: Optional[int] = 0,
         reward_transform_fn: Optional[RewardTransform] = None,
     ):
+        if world_size < 1:
+            raise ValueError('world_size must be >= 1')
+        if rank >= world_size:
+            raise ValueError('Rank must be less than world_size')
         if batch_size < 1:
-            raise ValueError("Batch size must be >= 1")
+            raise ValueError('Batch size must be >= 1')
         if group_size < 1:
-            raise ValueError("Group size must be >= 1")
+            raise ValueError('Group size must be >= 1')
         if max_steps < 1:
-            raise ValueError("Max steps must be >= 1")
+            raise ValueError('Max steps must be >= 1')
         if not reward_functions:
-            raise ValueError("reward_functions cannot be empty")
-        if not all(isinstance(fn, BaseRewardFunction) for fn in reward_functions):
+            raise ValueError('reward_functions cannot be empty')
+        if not all(
+            isinstance(fn, BaseRewardFunction) for fn in reward_functions
+        ):
             raise ValueError(
-                "All reward_functions must be instances of BaseRewardFunction"
+                'All reward_functions must be instances of BaseRewardFunction'
             )
         if not isinstance(dataset, Dataset):
-            raise TypeError("dataset must be a datasets.Dataset")
-        if not all(col in dataset.column_names for col in ["messages", "ground_truth"]):
-            raise ValueError("Dataset needs 'messages' and 'ground_truth' columns.")
+            raise TypeError('dataset must be a datasets.Dataset')
+        if not all(
+            col in dataset.column_names for col in ['messages', 'ground_truth']
+        ):
+            raise ValueError(
+                "Dataset needs 'messages' and 'ground_truth' columns."
+            )
         # Ensure 'messages' column contains lists of ChatMessage-like dicts
-        if not isinstance(dataset[0]["messages"], list) or not all(
-            isinstance(m, dict) and "role" in m and "content" in m
-            for m in dataset[0]["messages"]
+        if not isinstance(dataset[0]['messages'], list) or not all(
+            isinstance(m, dict) and 'role' in m and 'content' in m
+            for m in dataset[0]['messages']
         ):
             raise ValueError(
                 "'messages' column should contain lists of {'role': str, 'content': str} dicts."
             )
         if len(reward_functions) > 1 and not reward_transform_fn:
             raise ValueError(
-                "Multiple reward functions provided without a reward_transform_fn."
+                'Multiple reward functions provided without a reward_transform_fn.'
             )
 
         self.reward_transform_fn = (
@@ -235,8 +269,12 @@ class BaseMDPEnv(ABC):
 
         self._setup_tokenizer()
         self.random_state = np.random.RandomState(self.seed)
-        self.sharded_dataset = shard_dataset(dataset, self.world_size, self.rank)
-        logger.info(f"Env - Rank {self.rank} has {len(self.sharded_dataset)} samples")
+        self.sharded_dataset = shard_dataset(
+            dataset, self.world_size, self.rank
+        )
+        logger.info(
+            f"Env - Rank {self.rank} has {len(self.sharded_dataset)} samples"
+        )
 
         self.loader = DataLoader(
             self.sharded_dataset,
@@ -257,23 +295,23 @@ class BaseMDPEnv(ABC):
 
     def _setup_tokenizer(self):
         """Configures the tokenizer."""
-        self.tokenizer.padding_side = "left"
+        self.tokenizer.padding_side = 'left'
         if self.tokenizer.pad_token is None:
-            logger.warning("Tokenizer missing pad token; using eos_token.")
+            logger.warning('Tokenizer missing pad token; using eos_token.')
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         if self.tokenizer.pad_token_id is None:
-            raise ValueError("Tokenizer needs pad_token_id.")
+            raise ValueError('Tokenizer needs pad_token_id.')
         self.pad_token_id = self.tokenizer.pad_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
         # Ensure chat template exists
         try:
             _ = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": "test"}], tokenize=False
+                [{'role': 'user', 'content': 'test'}], tokenize=False
             )
         except Exception as e:
             raise ValueError(
-                "Tokenizer must have a chat template defined. "
+                'Tokenizer must have a chat template defined. '
                 f"Error during template test: {e}"
             )
 
@@ -291,7 +329,9 @@ class BaseMDPEnv(ABC):
         try:
             return next(self.dataset_iterator)
         except StopIteration:
-            logger.info(f"Rank {self.rank}: Dataset exhausted. Resetting DataLoader.")
+            logger.info(
+                f"Rank {self.rank}: Dataset exhausted. Resetting DataLoader."
+            )
             self.epoch += 1
             self.dataset_iterator = iter(self.loader)
             try:
@@ -305,7 +345,9 @@ class BaseMDPEnv(ABC):
         try:
             raw_batch = self._get_next_batch()
         except Exception as e:
-            logger.error(f"Rank {self.rank}: Error getting batch", exc_info=True)
+            logger.error(
+                f"Rank {self.rank}: Error getting batch", exc_info=True
+            )
             raise e
         if raw_batch is None:
             return None
@@ -319,67 +361,99 @@ class BaseMDPEnv(ABC):
             raise e
 
     def _prepare_initial_state(self, raw_batch: Dict[str, Any]) -> EnvState:
-        """Prepares EnvState, repeating items `group_size` times."""
-        num_samples = len(raw_batch["ground_truth"])
+        """Prepares EnvState containing a list of SampleState objects."""
+        num_samples = len(raw_batch['ground_truth'])
         if num_samples == 0:
             logger.warning(f"Rank {self.rank}: Empty batch received.")
-            # Attempt to get another batch
-            return self._reset()
+            return self._reset()  # Or handle appropriately
 
-        # Validate and parse messages
-        batch_messages = []
-        for msg_list in raw_batch["messages"]:
+        sample_states = []
+        for i in range(num_samples):
             try:
-                # Convert dicts to ChatMessage objects for validation
-                parsed_msgs = [ChatMessage(**msg) for msg in msg_list]
-                batch_messages.append(parsed_msgs)
+                # Parse messages for the original sample
+                parsed_msgs = [
+                    ChatMessage(**msg) for msg in raw_batch['messages'][i]
+                ]
+                ground_truth = raw_batch['ground_truth'][i]
+                init_msg_count = len(parsed_msgs)
+
+                # Repeat group_size times
+                for _ in range(self.group_size):
+                    # Create a deep copy of messages for each SampleState
+                    # to avoid shared mutable state issues.
+                    initial_messages_copy = [
+                        msg.model_copy(deep=True) for msg in parsed_msgs
+                    ]
+
+                    sample_state = SampleState(
+                        messages=initial_messages_copy,
+                        ground_truth=ground_truth,
+                        init_msg_size=init_msg_count,
+                        current_step=0,
+                        done=False,
+                    )
+                    sample_states.append(sample_state)
+
             except Exception as e:
-                logger.error(f"Failed to parse messages: {msg_list}. Error: {e}")
-                raise ValueError(f"Invalid message format in dataset: {e}")
+                logger.error(
+                    f"Failed to parse messages or create SampleState for raw sample {i}: {raw_batch['messages'][i]}. Error: {e}"
+                )
+                # Decide how to handle errors: skip sample, raise error?
+                # Skipping for now, but might lead to smaller batch sizes.
+                continue  # Skip this original sample and its group
 
-        expanded_messages = [p for p in batch_messages for _ in range(self.group_size)]
-        expanded_ground_truths = [
-            gt for gt in raw_batch["ground_truth"] for _ in range(self.group_size)
-        ]
+        if not sample_states:
+            logger.error(
+                f"Rank {self.rank}: No valid SampleStates created from the batch."
+            )
+            # Need robust error handling here, maybe try another batch?
+            # For now, returning None to signal failure upstream.
+            return None  # Or raise an exception
 
-        # Store the *count* of initial messages, not token length yet
-        init_prompt_size = [len(p) for p in expanded_messages]
-
-        return EnvState(
-            batch_messages=expanded_messages,
-            batch_ground_truth=expanded_ground_truths,
-            batch_init_prompt_size=init_prompt_size,
-        )
+        return EnvState(sample_states=sample_states)
 
     def _calculate_rewards(
-        self, batch_messages: List[List[ChatMessage]], batch_ground_truths: List[str]
+        self, batch_sample_states: List[SampleState]
     ) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
         """Calculates rewards using configured functions."""
-        if len(batch_messages) != len(batch_ground_truths):
-            raise ValueError(
-                f"Reward input size mismatch: {len(batch_messages)} vs {len(batch_ground_truths)}"
-            )
 
-        rewards_dict = {}
-        for fn in self.reward_functions:
-            try:
-                # Pass ChatMessage objects directly
-                rewards = fn(batch_messages, batch_ground_truths)
-                if not isinstance(rewards, list) or len(rewards) != len(batch_messages):
-                    raise ValueError(f"Reward func '{fn.name}' output mismatch.")
-                rewards_dict[fn.name] = rewards
-            except Exception as e:
-                logger.error(f"Reward func '{fn.name}' failed: {e}", exc_info=True)
-                # Provide default reward on failure
-                rewards_dict[fn.name] = [0.0] * len(batch_messages)
+        num_samples = len(batch_sample_states)
+        if num_samples == 0:
+            return torch.empty(0, dtype=torch.float32), {}
+
+        rewards_dict: Dict[str, List[float]] = {
+            fn.name: [0.0] * num_samples for fn in self.reward_functions
+        }
+
+        for i, sample_state in enumerate(batch_sample_states):
+            for fn in self.reward_functions:
+                try:
+                    reward_value = fn(
+                        sample_state.messages, sample_state.ground_truth
+                    )
+                    if not isinstance(reward_value, (float, int)):
+                        raise ValueError(
+                            f"Reward func '{fn.name}' must return a float or int, got {type(reward_value)}."
+                        )
+                    rewards_dict[fn.name][i] = float(reward_value)
+                except Exception as e:
+                    logger.error(
+                        f"Reward func '{fn.name}' for sample ID {sample_state.id} failed: {e}",
+                        exc_info=True,
+                    )
+                    rewards_dict[fn.name][i] = 0.0
 
         terminal_reward_tensor = self._transform_rewards(rewards_dict)
         return terminal_reward_tensor, rewards_dict
 
-    def _transform_rewards(self, rewards_dict: Dict[str, List[float]]) -> torch.Tensor:
+    def _transform_rewards(
+        self, rewards_dict: Dict[str, List[float]]
+    ) -> torch.Tensor:
         """Transforms multiple rewards into a single tensor."""
         if not rewards_dict:
-            return torch.zeros(self.batch_size * self.group_size)  # Handle empty case
+            return torch.zeros(
+                self.batch_size * self.group_size
+            )  # Handle empty case
 
         if self.reward_transform_fn:
             try:
@@ -387,7 +461,9 @@ class BaseMDPEnv(ABC):
                 if not isinstance(transformed, torch.Tensor):
                     # Try converting if it's list/numpy
                     try:
-                        transformed = torch.tensor(transformed, dtype=torch.float32)
+                        transformed = torch.tensor(
+                            transformed, dtype=torch.float32
+                        )
                     except Exception:
                         raise TypeError(
                             f"Reward transform function must return a torch.Tensor, got {type(transformed)}"
@@ -400,60 +476,70 @@ class BaseMDPEnv(ABC):
                     )
                 return transformed.float()  # Ensure float
             except Exception as e:
-                logger.error(f"Reward transformation failed: {e}", exc_info=True)
+                logger.error(
+                    f"Reward transformation failed: {e}", exc_info=True
+                )
                 # Fallback: use the first reward function's output
                 first_reward_key = next(iter(rewards_dict.keys()))
                 logger.warning(
                     f"Falling back to using reward '{first_reward_key}' due to transform error."
                 )
-                return torch.tensor(rewards_dict[first_reward_key], dtype=torch.float32)
+                return torch.tensor(
+                    rewards_dict[first_reward_key], dtype=torch.float32
+                )
         else:
             # Should have been handled in __init__, but as a safeguard
             first_reward_key = next(iter(rewards_dict.keys()))
-            return torch.tensor(rewards_dict[first_reward_key], dtype=torch.float32)
+            return torch.tensor(
+                rewards_dict[first_reward_key], dtype=torch.float32
+            )
 
-    def _convert_to_episodes(self, final_state: EnvState) -> List[EpisodeData]:
-        """Converts the final state after interaction into EpisodeData list."""
+    def _convert_to_episodes(self, env_state: EnvState) -> List[EpisodeData]:
+        """Converts the final list of SampleStates into EpisodeData list."""
 
-        # Calculate rewards based on the final messages
-        batch_terminal_rewards_tensor, batch_rewards_dict = self._calculate_rewards(
-            final_state.batch_messages, final_state.batch_ground_truth
+        if not env_state.sample_states:
+            return []
+
+        # 1. Calculate rewards in batch
+        batch_terminal_rewards_tensor, batch_rewards_dict = (
+            self._calculate_rewards(env_state.sample_states)
         )
-        # Convert tensor back to list for easier per-sample processing
+
+        num_samples = len(env_state.sample_states)
+        if batch_terminal_rewards_tensor.size(0) != num_samples:
+            logger.error(
+                f"Mismatch between number of sample states ({num_samples}) "
+                f"and number of terminal rewards ({batch_terminal_rewards_tensor.size(0)}). "
+                'Skipping episode conversion for this batch.'
+            )
+            return []
+
         batch_terminal_rewards = batch_terminal_rewards_tensor.tolist()
 
+        # 2. Create EpisodeData for each sample
         results = []
-        effective_batch_size = len(final_state.batch_messages)
-
-        for i in range(effective_batch_size):
-            messages = final_state.batch_messages[i]  # List[ChatMessage]
-            ground_truth = final_state.batch_ground_truth[i]
-            init_prompt_msg_count = final_state.batch_init_prompt_size[i]
+        for i, sample_state in enumerate(env_state.sample_states):
             terminal_reward = batch_terminal_rewards[i]
-            # Extract per-sample reward dict
             reward_dict = {k: v[i] for k, v in batch_rewards_dict.items()}
 
-            # Convert ChatMessage objects back to dicts for apply_chat_template if needed
-            # (Some tokenizers might expect dicts, others might handle Pydantic models)
-            messages_as_dicts = [msg.model_dump() for msg in messages]
-
+            # --- Apply tokenization and masking logic PER SAMPLE ---
             try:
-                # 1. Tokenize the entire conversation
+                messages_as_dicts = [
+                    msg.model_dump() for msg in sample_state.messages
+                ]
                 full_sequence_ids = self.tokenizer.apply_chat_template(
-                    messages_as_dicts, tokenize=True, add_generation_prompt=False
+                    messages_as_dicts,
+                    tokenize=True,
+                    add_generation_prompt=False,
                 )
                 if not isinstance(full_sequence_ids, list):
-                    full_sequence_ids = full_sequence_ids.tolist()  # Ensure it's a list
+                    full_sequence_ids = full_sequence_ids.tolist()
 
-                # 2. Initialize loss mask
                 loss_mask = [0] * len(full_sequence_ids)
-
-                # 3. Identify assistant content tokens for loss calculation
+                prompt_token_len = -1
                 current_pos = 0
-                prompt_token_len = -1  # Track prompt length in tokens
 
                 for msg_idx, msg in enumerate(messages_as_dicts):
-                    # Tokenize sequence up to *including* current message
                     prefix_tokens = self.tokenizer.apply_chat_template(
                         messages_as_dicts[: msg_idx + 1],
                         tokenize=True,
@@ -461,112 +547,66 @@ class BaseMDPEnv(ABC):
                     )
                     if not isinstance(prefix_tokens, list):
                         prefix_tokens = prefix_tokens.tolist()
-
                     message_tokens = prefix_tokens[current_pos:]
 
-                    # Record prompt token length after processing the last prompt message
-                    if msg_idx == init_prompt_msg_count - 1:
+                    if msg_idx == sample_state.init_msg_size - 1:
                         prompt_token_len = len(prefix_tokens)
 
-                    # Mask loss only for assistant messages *after* the initial prompt
-                    if msg["role"] == "assistant" and msg_idx >= init_prompt_msg_count:
-                        content = msg.get("content")
-                        if (
-                            content
-                        ):  # Handle potential empty content (e.g., tool call start)
-                            # Tokenize content *without* special tokens
+                    # Only process assistant's turns after the initial prompt messages
+                    if (
+                        msg['role'] == 'assistant'
+                        and msg_idx >= sample_state.init_msg_size
+                    ):
+                        # --- Masking llm generated content ---
+                        content = msg.get('content')
+                        if content:
                             content_tokens = self.tokenizer.encode(
                                 content, add_special_tokens=False
                             )
-
+                            # TODO: should we also include the EOS token here?
                             if content_tokens:
-                                # Find content within the message's tokens
                                 content_start_in_msg = find_subsequence(
                                     message_tokens, content_tokens
                                 )
-
                                 if content_start_in_msg != -1:
                                     global_content_start = (
                                         current_pos + content_start_in_msg
                                     )
-                                    global_content_end = global_content_start + len(
-                                        content_tokens
+                                    global_content_end = (
+                                        global_content_start
+                                        + len(content_tokens)
                                     )
-
-                                    # Set mask to 1 for these tokens
                                     for j in range(
                                         global_content_start, global_content_end
                                     ):
                                         if j < len(loss_mask):
                                             loss_mask[j] = 1
-                                        else:
-                                            logger.warning(
-                                                f"Index {j} out of bounds for loss_mask (len {len(loss_mask)})."
-                                            )
-                                else:
-                                    # This is tricky - chat templates add roles/separators.
-                                    # If find_subsequence fails, it might be due to template structure.
-                                    # A less precise but often workable fallback: assume the *end* of message_tokens corresponds to content.
-                                    # This heuristic might incorrectly mask template tokens if content is short.
-                                    approx_content_start = len(message_tokens) - len(
-                                        content_tokens
+                                else:  # Fallback heuristic or error
+                                    logger.warning(
+                                        f"Sample ID {sample_state.id}: Could not precisely locate content tokens for assistant msg {msg_idx}. Using heuristic or skipping."
                                     )
-                                    if approx_content_start >= 0:
-                                        logger.warning(
-                                            f"Could not precisely locate content tokens for assistant msg {msg_idx}. Using end-of-message heuristic."
-                                        )
-                                        global_content_start = (
-                                            current_pos + approx_content_start
-                                        )
-                                        global_content_end = global_content_start + len(
-                                            content_tokens
-                                        )
-                                        for j in range(
-                                            global_content_start, global_content_end
-                                        ):
-                                            if j < len(loss_mask):
-                                                loss_mask[j] = 1
-                                    else:
-                                        logger.error(
-                                            f"Failed to locate or approximate content tokens for assistant msg {msg_idx}. Content: '{content}', Content Tokens: {content_tokens}, Message Tokens: {message_tokens}"
-                                        )
-                                        # Decide: raise error or skip masking for this message? Skipping for now.
-                                        # raise ValueError(f"Could not locate content tokens for assistant message {msg_idx}")
+                                    # Add heuristic/error handling as before
 
-                    # Update position for next iteration
                     current_pos = len(prefix_tokens)
+                # --- End Masking Logic ---
 
-                # --- Verification ---
-                if len(full_sequence_ids) != len(loss_mask):
-                    raise ValueError(
-                        f"Length mismatch: sequence {len(full_sequence_ids)} vs mask {len(loss_mask)}"
-                    )
-                if prompt_token_len == -1 and init_prompt_msg_count > 0:
-                    # This happens if the prompt itself was empty after tokenization, or if init_prompt_msg_count was 0
+                if prompt_token_len == -1:
+                    prompt_token_len = 0  # Handle cases with no prompt messages
+
+                if len(full_sequence_ids) < 2:
                     logger.warning(
-                        f"Could not determine prompt token length for sample {i}. Setting to 0."
+                        f"Sample ID {sample_state.id} resulted in sequence length < 2. Skipping."
                     )
-                    prompt_token_len = 0
-                elif init_prompt_msg_count == 0:
-                    prompt_token_len = 0  # No initial prompt messages
+                    continue
 
-                # Convert to tensors
-                full_sequence_tensor = torch.tensor(full_sequence_ids, dtype=torch.long)
-                loss_mask_tensor = torch.tensor(
-                    loss_mask, dtype=torch.bool
-                )  # Use bool for mask
-
-                # Create states (0..N-1), actions (1..N), mask (1..N)
-                if len(full_sequence_tensor) < 2:
-                    logger.warning(
-                        f"Sample {i} resulted in sequence length < 2. Skipping."
-                    )
-                    continue  # Cannot create state/action pairs
+                full_sequence_tensor = torch.tensor(
+                    full_sequence_ids, dtype=torch.long
+                )
+                loss_mask_tensor = torch.tensor(loss_mask, dtype=torch.bool)
 
                 states = full_sequence_tensor[:-1]
                 actions = full_sequence_tensor[1:]
-                final_loss_mask = loss_mask_tensor[1:]  # Align mask with actions
-
+                final_loss_mask = loss_mask_tensor[1:]
                 completion_len = final_loss_mask.sum().item()
 
                 ep = EpisodeData(
@@ -575,8 +615,8 @@ class BaseMDPEnv(ABC):
                     loss_mask=final_loss_mask,
                     terminal_reward=terminal_reward,
                     reward_dict=reward_dict,
-                    ground_truth=ground_truth,
-                    chat_history=messages,  # Store ChatMessage objects
+                    ground_truth=sample_state.ground_truth,
+                    chat_history=sample_state.messages,
                     prompt_length=prompt_token_len,
                     completion_length=completion_len,
                 )
@@ -584,25 +624,29 @@ class BaseMDPEnv(ABC):
 
             except Exception as e:
                 logger.error(
-                    f"Failed converting sample {i} to EpisodeData: {e}", exc_info=True
+                    f"Failed converting Sample ID {sample_state.id} to EpisodeData: {e}",
+                    exc_info=True,
                 )
-                # Optionally skip this sample or re-raise
-                continue
+                continue  # Skip this sample on conversion error
 
         return results
 
-    def _convert_batch_message_to_prompt(
-        self, batch_messages: List[List[ChatMessage]]
-    ) -> List[str]:
+    def _convert_to_batch_prompts(self, env_state: EnvState) -> List[str]:
         """Converts a batch messages to chat-style prompt for generation"""
+
         batch_prompts = []
-        for messages in batch_messages:
+        for d in env_state.sample_states:
+            messages = d.messages
             messages_as_dicts = [msg.model_dump() for msg in messages]
-            # Apply chat template with assistant's generation prompt for generation
+            # Handles continue generation if the message ends with assistant's turn
+            continue_gen = False
+            if messages[-1].role == 'assistant':
+                continue_gen = True
             prompt = self.tokenizer.apply_chat_template(
                 messages_as_dicts,
                 tokenize=False,
-                add_generation_prompt=True,
+                add_generation_prompt=not continue_gen,
+                continue_final_message=continue_gen,
             )
             batch_prompts.append(prompt)
 
@@ -611,7 +655,7 @@ class BaseMDPEnv(ABC):
     @torch.inference_mode()
     def _run_interaction_loop(
         self,
-        initial_state: EnvState,
+        env_state: EnvState,
         llm: Any,
         sampling_params: Dict[str, Any],
         **kwargs: Optional[Dict[str, Any]],
@@ -623,8 +667,8 @@ class BaseMDPEnv(ABC):
         Subclasses for multi-step MDPs or tool use should override this method.
 
         Args:
-            initial_state: The starting state from _prepare_initial_state.
-            llm: The language model.
+            env_state: The starting state containing a list of SampleState objects.
+            llm: The language model or inference client.
             generation_config: Configuration for generation (max_new_tokens, etc.).
             **kwargs: Additional arguments (unused in default).
 
@@ -659,7 +703,7 @@ class BaseMDPEnv(ABC):
             )
             return []
 
-        # 2. Run the interaction loop (delegated to potentially overridden method)
+        # 2. Run the interaction loop, should be handled by the subclass
         try:
             final_state = self._run_interaction_loop(
                 initial_state, llm, sampling_params, **kwargs
@@ -669,7 +713,7 @@ class BaseMDPEnv(ABC):
                 f"Rank {self.rank}: Error during _run_interaction_loop: {e}",
                 exc_info=True,
             )
-            # Decide how to handle: return empty, partial, or raise? Returning empty for now.
+            # Decide how to handle: return empty, partial, or raise?
             return []
 
         # 3. Convert the final state to training episodes
@@ -680,8 +724,10 @@ class BaseMDPEnv(ABC):
                 f"Rank {self.rank}: Error during _convert_to_episodes: {e}",
                 exc_info=True,
             )
-            # Decide how to handle: return empty, partial, or raise? Returning empty for now.
+            # Decide how to handle: return empty, partial, or raise?
             return []
 
-        logger.debug(f"Rank {self.rank}: Rollout generated {len(episodes)} episodes.")
+        logger.debug(
+            f"Rank {self.rank}: Rollout generated {len(episodes)} episodes."
+        )
         return episodes
