@@ -43,7 +43,7 @@ class InferenceClient(ABC):
             retry_attempts: Number of retry attempts for failed requests.
             retry_delay: Delay between retry attempts.
         """
-        if not host.startswith(("http://", "https://")):
+        if not host.startswith(('http://', 'https://')):
             self.base_url = f"http://{host}:{port}"
         else:
             self.base_url = f"{host}:{port}"  # Allow user-specified schema
@@ -61,8 +61,10 @@ class InferenceClient(ABC):
 
         self.session = requests.Session()
         if self.api_key:
-            self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
-        self.session.headers.update({"Content-Type": "application/json"})
+            self.session.headers.update(
+                {'Authorization': f"Bearer {self.api_key}"}
+            )
+        self.session.headers.update({'Content-Type': 'application/json'})
 
         self.logger.info(
             f"InferenceClient initialized for server at {self.base_url} "
@@ -72,7 +74,7 @@ class InferenceClient(ABC):
         # Perform a quick health check on initialization
         try:
             self.health()
-            self.logger.info("Successfully connected to inference server.")
+            self.logger.info('Successfully connected to inference server.')
         except InferenceClientError as e:
             raise RuntimeError(f"Initial health check failed: {e}")
 
@@ -119,8 +121,8 @@ class InferenceClient(ABC):
                 # Treat these as success, returning a standard dict
                 if response.status_code == 200 and not response.content:
                     return {
-                        "status": "success",
-                        "message": "Operation successful (no content returned).",
+                        'status': 'success',
+                        'message': 'Operation successful (no content returned).',
                     }
 
                 # Attempt to parse JSON
@@ -131,7 +133,7 @@ class InferenceClient(ABC):
                         f"Failed to decode JSON response from {method} {url}. Response text: {response.text}"
                     )
                     raise InferenceClientError(
-                        "Invalid JSON response received from server."
+                        'Invalid JSON response received from server.'
                     ) from json_err
 
             except requests.exceptions.Timeout as e:
@@ -148,8 +150,8 @@ class InferenceClient(ABC):
                 )
             except requests.exceptions.RequestException as e:
                 last_exception = e
-                status_code = getattr(e.response, "status_code", "N/A")
-                response_text = getattr(e.response, "text", "N/A")
+                status_code = getattr(e.response, 'status_code', 'N/A')
+                response_text = getattr(e.response, 'text', 'N/A')
                 self.logger.warning(
                     f"Request failed ({method} {url}): {e}. "
                     f"Status Code: {status_code}. Response: {response_text}. "
@@ -159,7 +161,9 @@ class InferenceClient(ABC):
                 if e.response is not None:
                     try:
                         error_details = e.response.json()
-                        self.logger.warning(f"Server error details: {error_details}")
+                        self.logger.warning(
+                            f"Server error details: {error_details}"
+                        )
                         # Optionally re-raise with server details if needed
                         # raise InferenceClientError(f"Server error: {error_details.get('error', {}).get('message', response_text)}") from e
                     except json.JSONDecodeError:
@@ -178,7 +182,7 @@ class InferenceClient(ABC):
                 raise InferenceClientError(error_message) from last_exception
 
         # Should be unreachable, but added for type safety
-        raise InferenceClientError("Request failed unexpectedly after retries.")
+        raise InferenceClientError('Request failed unexpectedly after retries.')
 
     def is_cohost_mode(self) -> bool:
         """Checks are we cohost inference engine and training models on the same devices"""
@@ -187,15 +191,6 @@ class InferenceClient(ABC):
     @abstractmethod
     def health(self) -> bool:
         """Checks the health status of remote inference server"""
-        pass
-
-    @abstractmethod
-    def batch_chat_completion(
-        self,
-        batch_messages: Optional[Union[str, List[str]]] = None,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """Calls the remote inference server for a batch of chat completions"""
         pass
 
     @abstractmethod

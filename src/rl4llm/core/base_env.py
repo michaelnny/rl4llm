@@ -24,9 +24,10 @@ from pydantic import BaseModel, Field, constr, field_validator, model_validator
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer
 
+from rl4llm.constants import LOGGER_NAME
 from rl4llm.utils.dataset_utils import shard_dataset
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(LOGGER_NAME)
 
 
 RewardTransform: TypeAlias = Optional[
@@ -37,8 +38,8 @@ RewardTransform: TypeAlias = Optional[
 class ChatMessage(BaseModel):
     role: str = Field(..., description='Role of the chat turn')
     content: str = Field(..., description='Chat content')
-    tool_calls: Optional[List[Dict]] = None
-    tool_call_id: Optional[str] = None
+    # tool_calls: Optional[List[Dict]] = None
+    # tool_call_id: Optional[str] = None
 
     @model_validator(mode='after')
     def check_role(cls, model_instance):
@@ -133,7 +134,7 @@ class EnvState(BaseModel):
         arbitrary_types_allowed = True
 
 
-class BaseRewardFunction(ABC):  # Made abstract
+class BaseRewardFunction(ABC):
     """Base class for reward functions."""
 
     _VALID_NAME_PATTERN = r'^[a-zA-Z0-9_\-]+$'
@@ -172,7 +173,7 @@ class BaseRewardFunction(ABC):  # Made abstract
         raise NotImplementedError
 
 
-# Helper function (assuming it exists or is defined elsewhere)
+# Helper function
 def find_subsequence(main_list, sub_list):
     """Finds the start index of the first occurrence of sub_list within main_list."""
     if not sub_list or not main_list:
@@ -427,21 +428,14 @@ class BaseMDPEnv(ABC):
 
         for i, sample_state in enumerate(batch_sample_states):
             for fn in self.reward_functions:
-                try:
-                    reward_value = fn(
-                        sample_state.messages, sample_state.ground_truth
+                reward_value = fn(
+                    sample_state.messages, sample_state.ground_truth
+                )
+                if not isinstance(reward_value, (float, int)):
+                    raise ValueError(
+                        f"Reward func '{fn.name}' must return a float or int, got {type(reward_value)}."
                     )
-                    if not isinstance(reward_value, (float, int)):
-                        raise ValueError(
-                            f"Reward func '{fn.name}' must return a float or int, got {type(reward_value)}."
-                        )
-                    rewards_dict[fn.name][i] = float(reward_value)
-                except Exception as e:
-                    logger.error(
-                        f"Reward func '{fn.name}' for sample ID {sample_state.id} failed: {e}",
-                        exc_info=True,
-                    )
-                    rewards_dict[fn.name][i] = 0.0
+                rewards_dict[fn.name][i] = float(reward_value)
 
         terminal_reward_tensor = self._transform_rewards(rewards_dict)
         return terminal_reward_tensor, rewards_dict
@@ -533,7 +527,12 @@ class BaseMDPEnv(ABC):
                     add_generation_prompt=False,
                 )
                 if not isinstance(full_sequence_ids, list):
-                    full_sequence_ids = full_sequence_ids.tolist()
+                    full_sequence_ids = full_sequence_ids.squeeze(0).tolist()
+
+                if len(full_sequence_ids) < 2:
+                    raise RuntimeError(
+                        'Sample resulted in sequence length < 2. Skipping.'
+                    )
 
                 loss_mask = [0] * len(full_sequence_ids)
                 prompt_token_len = -1
@@ -581,23 +580,16 @@ class BaseMDPEnv(ABC):
                                     ):
                                         if j < len(loss_mask):
                                             loss_mask[j] = 1
-                                else:  # Fallback heuristic or error
-                                    logger.warning(
-                                        f"Sample ID {sample_state.id}: Could not precisely locate content tokens for assistant msg {msg_idx}. Using heuristic or skipping."
+                                else:
+                                    raise RuntimeError(
+                                        f"Could not precisely locate content tokens for assistant msg {msg_idx}."
                                     )
-                                    # Add heuristic/error handling as before
 
                     current_pos = len(prefix_tokens)
                 # --- End Masking Logic ---
 
                 if prompt_token_len == -1:
                     prompt_token_len = 0  # Handle cases with no prompt messages
-
-                if len(full_sequence_ids) < 2:
-                    logger.warning(
-                        f"Sample ID {sample_state.id} resulted in sequence length < 2. Skipping."
-                    )
-                    continue
 
                 full_sequence_tensor = torch.tensor(
                     full_sequence_ids, dtype=torch.long
@@ -623,11 +615,9 @@ class BaseMDPEnv(ABC):
                 results.append(ep)
 
             except Exception as e:
-                logger.error(
-                    f"Failed converting Sample ID {sample_state.id} to EpisodeData: {e}",
-                    exc_info=True,
+                raise RuntimeError(
+                    f"Failed converting Sample to EpisodeData: {e}",
                 )
-                continue  # Skip this sample on conversion error
 
         return results
 
@@ -637,16 +627,18 @@ class BaseMDPEnv(ABC):
         batch_prompts = []
         for d in env_state.sample_states:
             messages = d.messages
+            # TODO merge consecutive assistant's turns into a single turn
             messages_as_dicts = [msg.model_dump() for msg in messages]
-            # Handles continue generation if the message ends with assistant's turn
-            continue_gen = False
-            if messages[-1].role == 'assistant':
-                continue_gen = True
+            # # Handles continue generation if the message ends with assistant's turn
+            # continue_gen = False
+            # if messages[-1].role == 'assistant':
+            #     continue_gen = True
+            # TODO how to avoid add default system prompt???
             prompt = self.tokenizer.apply_chat_template(
                 messages_as_dicts,
                 tokenize=False,
-                add_generation_prompt=not continue_gen,
-                continue_final_message=continue_gen,
+                add_generation_prompt=True,
+                # continue_final_message=continue_gen,
             )
             batch_prompts.append(prompt)
 
@@ -708,12 +700,22 @@ class BaseMDPEnv(ABC):
             final_state = self._run_interaction_loop(
                 initial_state, llm, sampling_params, **kwargs
             )
+
+            # Ensure every sample state's messages ends with assistant's turn
+            if any(
+                [
+                    d.messages[-1].role != 'assistant'
+                    for d in final_state.sample_states
+                ]
+            ):
+                raise RuntimeError(
+                    f"Rank {self.rank}: Error during _run_interaction_loop: expect all messages ends with assistant's turn"
+                )
         except Exception as e:
             logger.error(
                 f"Rank {self.rank}: Error during _run_interaction_loop: {e}",
                 exc_info=True,
             )
-            # Decide how to handle: return empty, partial, or raise?
             return []
 
         # 3. Convert the final state to training episodes

@@ -51,18 +51,10 @@ class SglMDPEnv(BaseMDPEnv):
         batch_prompts = self._convert_to_batch_prompts(env_state)
 
         # 2. Call the inference API for LLM generation
-        try:
-            outputs = llm.generate(
-                prompts=batch_prompts,
-                sampling_params=sampling_params,
-            )
-        except Exception as e:
-            logger.error(
-                f"Rank {self.rank}: Error during LLM generation in single-step loop: {e}",
-                exc_info=True,
-            )
-            # Return the state marked as done
-            return env_state
+        outputs = llm.generate(
+            prompts=batch_prompts,
+            sampling_params=sampling_params,
+        )
 
         # 3. Update each SampleState object *in place*
         for i, sample_state in enumerate(env_state.sample_states):

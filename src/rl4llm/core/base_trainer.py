@@ -542,7 +542,9 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 'rank': self.dist_ops.global_rank,
                 'timestamp': ep.timestamp,
                 'ground_truth': ep.ground_truth,
-                'chat_history': ep.chat_history,
+                'chat_history': [
+                    msg.model_dump() for msg in ep.chat_history
+                ],  # make it compatible for json dump
                 'terminal_reward': ep.terminal_reward,
                 **ep.reward_dict,
             }

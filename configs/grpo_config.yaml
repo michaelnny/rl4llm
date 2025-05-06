@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_qwen2.5_1.5b_math"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_grpo_qwen2.5_0.5b_gsm8k_run2"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -12,13 +12,13 @@ logging:
 
 dataset: 
   names:                                # List of math datasets to load
-    # - "gsm"
-    - "math"
+    - "gsm"
+    # - "math"
   # max_train_samples: 4096             # for a quick run
   # max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B"
+  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
@@ -28,7 +28,7 @@ grpo:
   max_steps: 100
   train_rollout_size: 512
   num_updates: 1
-  train_micro_batch_size: 2
+  train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
   clip_eps: 0.2                         # PPO-style policy clip parameter
@@ -39,9 +39,8 @@ grpo:
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout
-  max_prompt_tokens: 512                # skip sample question that's too long
   group_size: 8                         # for each sample we generate a group of answers
-  max_completion_tokens: 2048
+  max_completion_tokens: 1024
   temperature: 0.9                      
   repetition_penalty: 1.0
   top_p: 0.95
@@ -50,7 +49,7 @@ grpo:
   # evaluation
   eval_rollout_size: 512    
   eval_batch_size: 64
-  eval_interval: 20                     # every N global steps
+  eval_interval: 0                     # every N global steps
 
   # others
   checkpoint_interval: 100              # every N global steps

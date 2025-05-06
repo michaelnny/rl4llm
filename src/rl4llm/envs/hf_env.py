@@ -72,8 +72,6 @@ class HfMDPEnv(BaseMDPEnv):
 
         # 3. Decode and update state
         # We need to reconstruct the chat history including the assistant's reply.
-        # This is tricky because batch_decode gives the *full* text including prompt.
-        # A robust way is to decode the generated part *only*.
         prompt_lengths = batch_inputs['input_ids'].shape[1]
         generated_ids = outputs[:, prompt_lengths:]
         generated_responses = self.tokenizer.batch_decode(
@@ -82,10 +80,6 @@ class HfMDPEnv(BaseMDPEnv):
 
         # 3. Update each SampleState object *in place*
         for i, sample_state in enumerate(env_state.sample_states):
-            # Although it's single-step, check 'done' in case of prior errors or future reuse
-            if sample_state.done:
-                continue
-
             # Safely get the generated text from the corresponding output
             generated_text = generated_responses[i].strip()
 

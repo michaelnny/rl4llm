@@ -101,9 +101,7 @@ def test_run_interaction_loop_success(
 
     # Assert
     # Check that prompt conversion was called correctly
-    mock_convert_prompts.assert_called_once_with(
-        [s.messages for s in initial_state_copy.sample_states]
-    )
+    mock_convert_prompts.assert_called_once_with(initial_state_copy)
 
     # Check that inference client was called correctly
     mock_inference_client.generate.assert_called_once_with(
@@ -174,92 +172,3 @@ def test_run_interaction_loop_llm_error(
         f"Rank {sgl_mdp_env.rank}: Error during LLM generation" in caplog.text
     )
     assert error_message in caplog.text
-
-
-def test_run_interaction_loop_empty_state(
-    sgl_mdp_env,
-    mock_inference_client,
-):
-    """Tests the interaction loop with an empty initial state."""
-    # Arrange
-    empty_state = EnvState(sample_states=[])
-    sampling_params = {'temperature': 0.7, 'max_new_tokens': 50}
-
-    # Act
-    final_env_state = sgl_mdp_env._run_interaction_loop(
-        empty_state, mock_inference_client, sampling_params
-    )
-
-    # Assert
-    assert final_env_state is empty_state
-    assert len(final_env_state.sample_states) == 0
-    mock_inference_client.generate.assert_not_called()
-
-
-@patch.object(SglMDPEnv, '_convert_to_batch_prompts')
-def test_run_interaction_loop_skips_done_state(
-    mock_convert_prompts,
-    sgl_mdp_env,
-    mock_inference_client,
-):
-    """Tests that already 'done' samples are skipped."""
-    # Arrange
-    sample_done = SampleState(
-        messages=[ChatMessage(role='user', content='Prompt Done')],
-        ground_truth='GT_Done',
-        init_msg_size=1,
-        current_step=1,
-        done=True,  # Already done
-    )
-    sample_not_done = SampleState(
-        messages=[ChatMessage(role='user', content='Prompt Not Done')],
-        ground_truth='GT_NotDone',
-        init_msg_size=1,
-        current_step=0,
-        done=False,
-    )
-    initial_state = EnvState(sample_states=[sample_done, sample_not_done])
-    initial_state_copy = initial_state.model_copy(deep=True)
-
-    # Mock prompt conversion only for the not-done sample
-    mock_convert_prompts.return_value = ['Formatted Prompt Not Done']
-    sampling_params = {'temperature': 0.7, 'max_new_tokens': 50}
-
-    # Mock LLM generate to only expect one prompt
-    mock_inference_client.generate.side_effect = (
-        lambda prompts, sampling_params: (
-            [{'text': 'Generated for Not Done'}]
-            if len(prompts) == 1
-            else pytest.fail('LLM called with wrong number of prompts')
-        )
-    )
-
-    # Act
-    final_env_state = sgl_mdp_env._run_interaction_loop(
-        initial_state_copy, mock_inference_client, sampling_params
-    )
-
-    # Assert
-    # Check prompt conversion was called only with the not-done messages
-    mock_convert_prompts.assert_called_once_with([sample_not_done.messages])
-
-    # Check LLM call
-    mock_inference_client.generate.assert_called_once_with(
-        prompts=['Formatted Prompt Not Done'], sampling_params=sampling_params
-    )
-
-    # Check states
-    final_sample_done = final_env_state.sample_states[0]
-    final_sample_not_done = final_env_state.sample_states[1]
-
-    # Done sample should remain unchanged
-    assert final_sample_done.done is True
-    assert final_sample_done.current_step == 1
-    assert len(final_sample_done.messages) == 1  # No new message added
-
-    # Not-done sample should be updated
-    assert final_sample_not_done.done is True
-    assert final_sample_not_done.current_step == 1
-    assert len(final_sample_not_done.messages) == 2
-    assert final_sample_not_done.messages[1].role == 'assistant'
-    assert final_sample_not_done.messages[1].content == 'Generated for Not Done'

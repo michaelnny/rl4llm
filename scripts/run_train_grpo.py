@@ -70,15 +70,16 @@ def parse_args():
     return args
 
 
-SYSTEM_PROMPT = """Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}."""
+# SYSTEM_PROMPT = """Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}."""
+SYSTEM_PROMPT = """Please first think about the reasoning process step by step before give your final answer."""
 
 
 def prepare_initial_chat_messages(item: Dict) -> Dict:
     """Build chat-style messages for initial state"""
     messages = [
-        # {"role": "system", "content": SYSTEM_PROMPT.strip()},
+        {'role': 'system', 'content': SYSTEM_PROMPT.strip()},
         {'role': 'user', 'content': item['question'].strip()},
-        {'role': 'assistant', 'content': "Let's think step by step"},
+        # {'role': 'assistant', 'content': "Let's think step by step"},
     ]
     return {'messages': messages}
 
