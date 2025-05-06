@@ -231,6 +231,10 @@ class PPOTrainer(BaseRLTrainer):
         advantages = experience_batch.advantages.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
+        advantages = advantages.float()
+        behavior_logprobs = behavior_logprobs.float()
+        pi_logits = pi_logits.float()
+
         if self.config.normalize_advantages:
             advantages = self.dist_masked_whiten(advantages, loss_mask, dim=1)
 
@@ -314,6 +318,10 @@ class PPOTrainer(BaseRLTrainer):
         values = experience_batch.values.to(self.device)
         returns = experience_batch.returns.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
+
+        values = values.float()
+        returns = returns.float()
+        pred_values = pred_values.float()
 
         # # Value loss using MC returns
         # losses = 0.5 * torch.square(returns - pred_values)
@@ -657,7 +665,6 @@ class PPOTrainer(BaseRLTrainer):
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""
         pad_token_id = self.tokenizer.pad_token_id
-        torch_dtype = self.torch_dtype
 
         # Pad states and actions (long tensors)
         batch_states = pad_sequence(
@@ -679,51 +686,31 @@ class PPOTrainer(BaseRLTrainer):
         ).bool()
 
         # Pad values, return, advantages, pi_logprobs, and ref_logprobs (float tensors)
-        batch_values = (
-            pad_sequence(
-                [item.values for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
-        batch_returns = (
-            pad_sequence(
-                [item.returns for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
-        batch_advantages = (
-            pad_sequence(
-                [item.advantages for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
-        batch_pi_logprobs = (
-            pad_sequence(
-                [item.pi_logprobs for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
-        batch_ref_logprobs = (
-            pad_sequence(
-                [item.ref_logprobs for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
+        batch_values = pad_sequence(
+            [item.values for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
+        batch_returns = pad_sequence(
+            [item.returns for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
+        batch_advantages = pad_sequence(
+            [item.advantages for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
+        batch_pi_logprobs = pad_sequence(
+            [item.pi_logprobs for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
+        batch_ref_logprobs = pad_sequence(
+            [item.ref_logprobs for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
 
         return TransitionData(
             states=batch_states,

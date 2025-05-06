@@ -23,19 +23,35 @@ from rl4llm.core.base_env import (
 # --- Fixtures ---
 
 
+# Consistent Mock Tokenizer Fixture
 @pytest.fixture
 def mock_tokenizer():
-    """Provides a mock PreTrainedTokenizer."""
     tokenizer = MagicMock(spec=PreTrainedTokenizer)
     tokenizer.padding_side = 'left'
     tokenizer.pad_token = '<pad>'
     tokenizer.eos_token = '<eos>'
     tokenizer.pad_token_id = 0
-    tokenizer.eos_token_id = 1
+    tokenizer.eos_token_id = 1  # EOS
 
-    # Store the word map globally within the mock instance for consistency
+    # These are reset by fixture scope if 'function'
     tokenizer.word_map = {}
     tokenizer.next_word_id = 100
+
+    tokenizer.role_map_tok_ids = {
+        'user': 10,
+        'assistant': 11,
+        'system': 12,
+        'tool': 13,
+    }
+    # Text markers for roles (used by tokenize=False and parsed by encode)
+    tokenizer.role_markers_text = {
+        role_id: role_name + ':'
+        for role_name, role_id in tokenizer.role_map_tok_ids.items()
+    }
+    tokenizer.text_to_role_id = {
+        text_marker: role_id
+        for role_id, text_marker in tokenizer.role_markers_text.items()
+    }
 
     def _get_word_id(word):
         if word not in tokenizer.word_map:
@@ -43,59 +59,87 @@ def mock_tokenizer():
             tokenizer.next_word_id += 1
         return tokenizer.word_map[word]
 
-    def _mock_apply_chat_template_v2(
+    tokenizer._get_word_id = _get_word_id
+
+    def _mock_apply_chat_template_consistent(
         messages,
         tokenize=True,
         add_generation_prompt=False,
         continue_final_message=False,
     ):
-        tokens = []
-        full_text = ''
-        role_map = {'user': 10, 'assistant': 11, 'system': 12, 'tool': 13}
-        # Reset map for each call to simulate fresh tokenization *if needed*
-        # For these tests, let's keep the map persistent across calls within a single test setup
-        # unless explicitly reset by the test.
-
-        for i, msg in enumerate(messages):
-            # Use .get() for safer dictionary access if msg is a dict
-            role = msg.get('role') if isinstance(msg, dict) else msg.role
-            content = (
-                msg.get('content') if isinstance(msg, dict) else msg.content
-            )
-
-            role_token = role_map.get(role, 99)
-            tokens.append(role_token)
-            full_text += f"{role}: {content}\n"
-            content_tokens = []
-            if content:  # Handle potential None content
-                for word in content.split():
-                    content_tokens.append(_get_word_id(word))
-            tokens.extend(content_tokens)
-            tokens.append(tokenizer.eos_token_id)  # Add EOS after each message
-
-        if add_generation_prompt:
-            tokens.append(role_map['assistant'])
-            full_text += 'assistant:\n'
-
         if tokenize:
-            return tokens
-        else:
-            return full_text
+            output_tokens = []
+            for i, msg_dict in enumerate(messages):
+                role = msg_dict.get('role')
+                content = msg_dict.get('content')
+                output_tokens.append(
+                    tokenizer.role_map_tok_ids.get(role, 99)
+                )  # Role ID
+                if content:
+                    for word in content.split():
+                        output_tokens.append(_get_word_id(word))  # Word IDs
 
-    def _mock_encode_v2(text, add_special_tokens=False):
+                is_last_msg = i == len(messages) - 1
+                if not (is_last_msg and continue_final_message):
+                    output_tokens.append(tokenizer.eos_token_id)  # EOS ID
+
+            if (
+                add_generation_prompt
+            ):  # Not used by _convert_to_episodes' calls to this
+                output_tokens.append(tokenizer.role_map_tok_ids['assistant'])
+            return output_tokens
+        else:  # tokenize=False
+            parts = []
+            for i, msg_dict in enumerate(messages):
+                role = msg_dict.get('role')
+                content = msg_dict.get('content')
+
+                parts.append(
+                    tokenizer.role_markers_text[
+                        tokenizer.role_map_tok_ids.get(role, 99)
+                    ]
+                )
+                if content:
+                    parts.append(content)
+                    for word in content.split():
+                        _get_word_id(word)  # Ensure in map
+
+                is_last_msg = i == len(messages) - 1
+                if not (is_last_msg and continue_final_message):
+                    parts.append(tokenizer.eos_token)
+
+            if (
+                add_generation_prompt
+            ):  # Not used by _convert_to_episodes' calls to this
+                parts.append(
+                    tokenizer.role_markers_text[
+                        tokenizer.role_map_tok_ids['assistant']
+                    ]
+                )
+            return ' '.join(parts)
+
+    def _mock_encode_consistent(text, add_special_tokens=False):
         tokens = []
-        if text:  # Handle potential None text
-            for word in text.split():
+        if not text:
+            return tokens
+
+        words = text.split()
+        for word in words:
+            if word == tokenizer.eos_token:
+                tokens.append(tokenizer.eos_token_id)
+            elif word == tokenizer.pad_token:
+                tokens.append(tokenizer.pad_token_id)
+            elif word in tokenizer.text_to_role_id:  # e.g. "user:"
+                tokens.append(tokenizer.text_to_role_id[word])
+            else:  # Content word
                 tokens.append(_get_word_id(word))
         return tokens
 
     tokenizer.apply_chat_template = MagicMock(
-        side_effect=_mock_apply_chat_template_v2
+        side_effect=_mock_apply_chat_template_consistent
     )
-    tokenizer.encode = MagicMock(side_effect=_mock_encode_v2)
-
-    # Needed for _setup_tokenizer check
-    tokenizer.chat_template = 'mock_template'  # Indicate a template exists
+    tokenizer.encode = MagicMock(side_effect=_mock_encode_consistent)
+    tokenizer.chat_template = 'mock_template'  # For _setup_tokenizer check
 
     return tokenizer
 
@@ -236,9 +280,6 @@ def test_chat_message_creation():
     msg = ChatMessage(role='user', content='Hello')
     assert msg.role == 'user'
     assert msg.content == 'Hello'
-    # Check default optional fields
-    assert msg.tool_calls is None
-    assert msg.tool_call_id is None
 
 
 @pytest.mark.parametrize('invalid_role', ['agent', '', None, 123])
@@ -644,22 +685,11 @@ def test_calculate_rewards_function_error(
         def __call__(self, *args, **kwargs):
             raise ValueError('Simulated error')
 
-    base_mdp_env.reward_functions = [ErrorReward()]  # Replace reward function
-    terminal_rewards, rewards_dict = base_mdp_env._calculate_rewards(
-        env_state_fixture.sample_states  # Pass list of SampleState
-    )
-
-    # env_state_fixture.sample_states[0].id will be part of the log message
-    sample_id = env_state_fixture.sample_states[0].id
-    assert (
-        f"Reward func 'error_reward' for sample ID {sample_id} failed"
-        in caplog.text
-    )
-    assert (
-        'Simulated error' in caplog.text
-    )  # Check for the specific error message
-    assert terminal_rewards.tolist() == [0.0]  # Default reward on error
-    assert rewards_dict['error_reward'] == [0.0]
+    base_mdp_env.reward_functions = [ErrorReward()]
+    with pytest.raises(ValueError, match='Simulated error'):
+        terminal_rewards, rewards_dict = base_mdp_env._calculate_rewards(
+            env_state_fixture.sample_states
+        )
 
 
 def test_transform_rewards_fallback_on_error(base_mdp_env, caplog):
@@ -705,22 +735,16 @@ def test_convert_to_batch_prompts(base_mdp_env, mock_tokenizer):
         {
             'role': 'user',
             'content': 'Hello',
-            'tool_calls': None,
-            'tool_call_id': None,
         }
     ]
     expected_msg_2 = [
         {
             'role': 'user',
             'content': 'How are you',
-            'tool_calls': None,
-            'tool_call_id': None,
         },
         {
             'role': 'assistant',
             'content': 'I am fine',
-            'tool_calls': None,
-            'tool_call_id': None,
         },
     ]
 
@@ -740,336 +764,354 @@ def test_convert_to_batch_prompts(base_mdp_env, mock_tokenizer):
         add_generation_prompt=False,
         continue_final_message=True,
     )
-    assert mock_tokenizer.apply_chat_template.call_count >= 2  # Keep this check
+    assert mock_tokenizer.apply_chat_template.call_count >= 2
 
 
-# --- Tests for _convert_to_episodes (High Priority) ---
+# --- Test Cases for _convert_to_episodes ---
 
 
-def test_convert_to_episodes_simple_case(base_mdp_env, mock_tokenizer):
-    """Tests converting a simple user-assistant interaction."""
-    # Reset word map for this specific test
-    mock_tokenizer.word_map = {'Hello': 100, 'Hi': 101, 'there': 102}
-    mock_tokenizer.next_word_id = 103
+def test_convert_to_episodes_empty_env_state(base_mdp_env):
+    """Test with an EnvState containing no sample states."""
+    empty_env_state = EnvState(sample_states=[])
+    episodes = base_mdp_env._convert_to_episodes(empty_env_state)
+    assert episodes == []
 
-    # Define expected token sequences based on the mock logic
-    prompt_tokens = [10, 100, 1]  # U: Hello EOS
-    full_tokens = [10, 100, 1, 11, 101, 102, 1]  # U: Hello EOS A: Hi there EOS
-    content_tokens = [101, 102]  # Hi there
 
-    # Configure side effects for apply_chat_template based on expected calls
-    mock_tokenizer.apply_chat_template.side_effect = [
-        full_tokens,  # Initial call for full sequence
-        prompt_tokens,  # Loop call msg_idx=0 (prompt)
-        full_tokens,  # Loop call msg_idx=1 (full again)
-    ]
-    # Configure side effect for encode (only called for assistant message content)
-    mock_tokenizer.encode.side_effect = [
-        content_tokens  # Tokens for "Hi there"
-    ]
-
+def test_convert_to_episodes_reward_mismatch(base_mdp_env):
+    """Test scenario where reward calculation yields mismatched number of rewards."""
     sample_state = SampleState(
         messages=[
-            ChatMessage(role='user', content='Hello'),
-            ChatMessage(role='assistant', content='Hi there'),
+            ChatMessage(role='user', content='Q'),
+            ChatMessage(role='assistant', content='A'),
         ],
-        ground_truth='Greeting',
-        init_msg_size=1,  # User message is the prompt
-        current_step=1,
+        ground_truth='GT',
+        init_msg_size=1,
         done=True,
     )
     env_state = EnvState(sample_states=[sample_state])
 
-    episodes = base_mdp_env._convert_to_episodes(env_state)
+    # Mock _calculate_rewards to return an empty tensor for rewards
+    with patch.object(
+        base_mdp_env, '_calculate_rewards', return_value=(torch.empty(0), {})
+    ):
+        episodes = base_mdp_env._convert_to_episodes(env_state)
 
-    assert len(episodes) == 1
-    ep = episodes[0]
-
-    expected_full_sequence = torch.tensor(full_tokens, dtype=torch.long)
-    expected_states = expected_full_sequence[:-1]
-    expected_actions = expected_full_sequence[1:]
-    # Masking logic derived in thought process:
-    # loss_mask = [0, 0, 0, 0, 1, 1, 0]
-    # final_loss_mask = loss_mask[1:] = [0, 0, 0, 1, 1, 0]
-    expected_loss_mask = torch.tensor([0, 0, 0, 1, 1, 0], dtype=torch.bool)
-
-    assert torch.equal(ep.states, expected_states)
-    assert torch.equal(ep.actions, expected_actions)
-    assert torch.equal(ep.loss_mask, expected_loss_mask)
-    assert ep.prompt_length == len(prompt_tokens)  # Should be 3
-    assert ep.completion_length == len(content_tokens)  # Should be 2
-    assert ep.terminal_reward == 1.0  # From mock reward
-    assert ep.ground_truth == 'Greeting'
-    assert ep.chat_history == sample_state.messages
+    assert episodes == []
 
 
-def test_convert_to_episodes_multi_turn(base_mdp_env, mock_tokenizer):
-    """Tests converting a multi-turn conversation with masking only the last assistant turn."""
-    # Reset word map
-    mock_tokenizer.word_map = {'Q1': 100, 'A1': 101, 'Q2': 102, 'A2': 103}
-    mock_tokenizer.next_word_id = 104
+def test_convert_to_episodes_simple_case(base_mdp_env):
+    """Test a single sample with a simple user-assistant interaction."""
+    tokenizer = base_mdp_env.tokenizer
+    ID_U, ID_A = (
+        tokenizer.role_map_tok_ids['user'],
+        tokenizer.role_map_tok_ids['assistant'],
+    )
+    ID_Q, ID_R = tokenizer._get_word_id('Q'), tokenizer._get_word_id('R')
+    ID_EOS = tokenizer.eos_token_id
 
-    # Define expected token sequences
-    msg0_tokens = [10, 100, 1]  # U: Q1 EOS
-    msg1_tokens = [10, 100, 1, 11, 101, 1]  # U: Q1 EOS A: A1 EOS
-    msg2_tokens = [10, 100, 1, 11, 101, 1, 10, 102, 1]  # ... U: Q2 EOS (prompt)
-    msg3_tokens = [
-        10,
-        100,
-        1,
-        11,
-        101,
-        1,
-        10,
-        102,
-        1,
-        11,
-        103,
-        1,
-    ]  # ... A: A2 EOS (full)
-    content_a1_tokens = [101]  # A1
-    content_a2_tokens = [103]  # A2
-
-    # Configure side effects for apply_chat_template
-    mock_tokenizer.apply_chat_template.side_effect = [
-        msg3_tokens,  # Initial call for full sequence
-        msg0_tokens,  # Loop msg_idx=0
-        msg1_tokens,  # Loop msg_idx=1
-        msg2_tokens,  # Loop msg_idx=2 (prompt)
-        msg3_tokens,  # Loop msg_idx=3 (full again)
+    sample_messages = [
+        ChatMessage(role='user', content='Q'),
+        ChatMessage(
+            role='assistant', content='R'
+        ),  # This is the generated part
     ]
-    # Configure side effect for encode (only called for assistant messages >= init_msg_size)
-    mock_tokenizer.encode.side_effect = [
-        content_a2_tokens,  # Only A2 content is encoded for masking
-    ]
-
     sample_state = SampleState(
-        messages=[
-            ChatMessage(role='user', content='Q1'),
-            ChatMessage(role='assistant', content='A1'),
-            ChatMessage(role='user', content='Q2'),  # Prompt ends here
-            ChatMessage(
-                role='assistant', content='A2'
-            ),  # This should be masked
-        ],
-        ground_truth='Multi-turn GT',
-        init_msg_size=3,  # U:Q1, A:A1, U:Q2 form the prompt
-        current_step=1,  # Assume one generation step produced A2
-        done=True,
+        messages=sample_messages, ground_truth='GT', init_msg_size=1, done=True
     )
     env_state = EnvState(sample_states=[sample_state])
 
-    episodes = base_mdp_env._convert_to_episodes(env_state)
+    # Expected tokenization:
+    # User: Q <eos> Assistant: R <eos_programmatic>
+    # [ID_U, ID_Q, ID_EOS, ID_A, ID_R, ID_EOS]
+    expected_full_ids = [ID_U, ID_Q, ID_EOS, ID_A, ID_R, ID_EOS]
+    # states: [ID_U, ID_Q, ID_EOS, ID_A, ID_R]
+    # actions: [ID_Q, ID_EOS, ID_A, ID_R, ID_EOS]
+    # loss_mask (shifted): [0,0,0, 1 (for R), 1 (for final EOS)] (length 5)
+    # Original loss_mask for full_sequence_ids: [0,0,0, 1(R),0, 1(final EOS)] - error in manual trace, content R is masked, then final EOS
+    # Let's trace masking:
+    # msg_idx=0 (user Q), init_msg_size=1. msg_idx != init_msg_size-1. Not assistant.
+    #   prompt_token_len not set yet. current_pos updated.
+    # msg_idx=1 (assistant R), init_msg_size=1. msg_idx >= init_msg_size. Is assistant.
+    #   content="R", content_tokens=[ID_R]
+    #   prefix_tokens for [U,A] = [ID_U, ID_Q, ID_EOS, ID_A, ID_R, ID_EOS] (cfm=F for apply_chat_template(tokenize=T))
+    #   current_pos (after U msg) = 3 ([ID_U, ID_Q, ID_EOS])
+    #   message_tokens (for A msg) = [ID_A, ID_R, ID_EOS]
+    #   find_subsequence([ID_A,ID_R,ID_EOS], [ID_R]) -> returns 1 (index of ID_R in message_tokens)
+    #   global_content_start = current_pos + 1 = 3 + 1 = 4. (index of ID_R in full_sequence_ids)
+    #   loss_mask[4] = 1.
+    # prompt_token_len is set when msg_idx == init_msg_size - 1 (0 == 0).
+    #   prefix_tokens for [U] = [ID_U, ID_Q, ID_EOS]. prompt_token_len = 3.
+    # Final loss_mask for full_sequence_ids: [0,0,0,0,1,0] initially. Then loss_mask[4]=1. Then loss_mask[-1]=1.
+    # So, [0,0,0,0,1,1]. Shifted: [0,0,0,1,1]
 
-    assert len(episodes) == 1
-    ep = episodes[0]
-
-    expected_full_sequence = torch.tensor(msg3_tokens, dtype=torch.long)
-    expected_states = expected_full_sequence[:-1]
-    expected_actions = expected_full_sequence[1:]
-    # Masking logic derived in thought process:
-    # loss_mask = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
-    # final_loss_mask = loss_mask[1:] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+    expected_states = torch.tensor(
+        [ID_U, ID_Q, ID_EOS, ID_A, ID_R], dtype=torch.long
+    )
+    expected_actions = torch.tensor(
+        [ID_Q, ID_EOS, ID_A, ID_R, ID_EOS], dtype=torch.long
+    )
     expected_loss_mask = torch.tensor(
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0], dtype=torch.bool
-    )
-
-    assert torch.equal(ep.states, expected_states)
-    assert torch.equal(ep.actions, expected_actions)
-    assert torch.equal(ep.loss_mask, expected_loss_mask)
-    assert ep.prompt_length == len(msg2_tokens)  # Should be 9
-    assert ep.completion_length == len(content_a2_tokens)  # Should be 1
-    assert ep.terminal_reward == 1.0
-    assert ep.ground_truth == 'Multi-turn GT'
-
-
-def test_convert_to_episodes_no_assistant_response_after_prompt(
-    base_mdp_env, mock_tokenizer
-):
-    """Tests conversion when only prompt messages exist (no generation happened)."""
-    # Reset word map
-    mock_tokenizer.word_map = {'Hello': 100}
-    mock_tokenizer.next_word_id = 101
-
-    # Define expected token sequences
-    prompt_tokens = [10, 100, 1]  # U: Hello EOS
-
-    # Configure side effects for apply_chat_template
-    mock_tokenizer.apply_chat_template.side_effect = [
-        prompt_tokens,  # Initial call for full sequence (which is just the prompt)
-        prompt_tokens,  # Loop call msg_idx=0 (prompt)
-    ]
-    # Configure side effect for encode (should not be called)
-    mock_tokenizer.encode.side_effect = []
-
-    sample_state = SampleState(
-        messages=[ChatMessage(role='user', content='Hello')],
-        ground_truth='No response GT',
-        init_msg_size=1,
-        current_step=0,  # No steps taken
-        done=False,  # Not technically done, but represents state before generation
-    )
-    env_state = EnvState(sample_states=[sample_state])
+        [False, False, False, True, True], dtype=torch.bool
+    )  # R and final EOS
+    expected_prompt_len = 3  # [ID_U, ID_Q, ID_EOS]
+    expected_completion_len = 2  # R, EOS
 
     episodes = base_mdp_env._convert_to_episodes(env_state)
-
     assert len(episodes) == 1
     ep = episodes[0]
 
-    expected_full_sequence = torch.tensor(prompt_tokens, dtype=torch.long)
-    expected_states = expected_full_sequence[:-1]  # [10, 100]
-    expected_actions = expected_full_sequence[1:]  # [100, 1]
-    # Masking logic derived in thought process:
-    # loss_mask = [0, 0, 0]
-    # final_loss_mask = loss_mask[1:] = [0, 0]
-    expected_loss_mask = torch.tensor([0, 0], dtype=torch.bool)
-
     assert torch.equal(ep.states, expected_states)
     assert torch.equal(ep.actions, expected_actions)
     assert torch.equal(ep.loss_mask, expected_loss_mask)
-    assert ep.prompt_length == len(prompt_tokens)  # Should be 3
-    assert ep.completion_length == 0  # No assistant tokens masked
-    assert ep.terminal_reward == 1.0
-    assert ep.ground_truth == 'No response GT'
+    assert ep.prompt_length == expected_prompt_len
+    assert ep.completion_length == expected_completion_len
+    assert ep.terminal_reward == 1.0  # from mock_reward_function
+    assert ep.reward_dict == {'mock_reward': 1.0}
+    assert ep.ground_truth == 'GT'
+    assert len(ep.chat_history) == 2
 
 
-def test_convert_to_episodes_batch(base_mdp_env, mock_tokenizer):
-    """Tests converting a batch of samples."""
-    # Reset word map
-    mock_tokenizer.word_map = {
-        'Hi': 100,
-        'Hey': 101,
-        'Bye': 102,
-        'See': 103,
-        'ya': 104,
-    }
-    mock_tokenizer.next_word_id = 105
+def test_convert_to_episodes_messages_too_short(base_mdp_env):
+    """Test scenario where messages is too short."""
 
-    # Define expected token sequences for Sample 0
-    s0_prompt_tokens = [10, 100, 1]  # U: Hi EOS
-    s0_full_tokens = [10, 100, 1, 11, 101, 1]  # U: Hi EOS A: Hey EOS
-    s0_content_tokens = [101]  # Hey
-
-    # Define expected token sequences for Sample 1
-    s1_prompt_tokens = [10, 102, 1]  # U: Bye EOS
-    s1_full_tokens = [10, 102, 1, 11, 103, 104, 1]  # U: Bye EOS A: See ya EOS
-    s1_content_tokens = [103, 104]  # See ya
-
-    # Configure side effects for apply_chat_template (interleaved calls)
-    mock_tokenizer.apply_chat_template.side_effect = [
-        # --- Sample 0 ---
-        s0_full_tokens,  # Initial call for full sequence
-        s0_prompt_tokens,  # Loop msg_idx=0 (prompt)
-        s0_full_tokens,  # Loop msg_idx=1 (full again)
-        # --- Sample 1 ---
-        s1_full_tokens,  # Initial call for full sequence
-        s1_prompt_tokens,  # Loop msg_idx=0 (prompt)
-        s1_full_tokens,  # Loop msg_idx=1 (full again)
-    ]
-    # Configure side effect for encode
-    mock_tokenizer.encode.side_effect = [
-        s0_content_tokens,  # Sample 0, content "Hey"
-        s1_content_tokens,  # Sample 1, content "See ya"
-    ]
-
-    sample_state_1 = SampleState(
+    sample_state = SampleState(
         messages=[
-            ChatMessage(role='user', content='Hi'),
-            ChatMessage(role='assistant', content='Hey'),
+            ChatMessage(role='user', content='Q'),
         ],
-        ground_truth='GT1',
+        ground_truth='GT',
         init_msg_size=1,
         done=True,
     )
-    sample_state_2 = SampleState(
-        messages=[
-            ChatMessage(role='user', content='Bye'),
-            ChatMessage(role='assistant', content='See ya'),
-        ],
-        ground_truth='GT2',
-        init_msg_size=1,
-        done=True,
+    env_state = EnvState(sample_states=[sample_state])
+
+    with pytest.raises(
+        RuntimeError, match='Sample resulted in messages length < 2'
+    ):
+        base_mdp_env._convert_to_episodes(env_state)
+
+
+def test_convert_to_episodes_content_not_found(base_mdp_env):
+    """Test when assistant content tokens cannot be found in message tokens."""
+    tokenizer = base_mdp_env.tokenizer
+
+    # Normal apply_chat_template behavior
+    original_apply_chat_template = tokenizer.apply_chat_template
+
+    def faulty_encode_for_content(text, add_special_tokens=False):
+        if text == 'R':  # The assistant's content
+            return [tokenizer._get_word_id('NonExistentToken')]
+        # Fallback to original encode logic for other calls (like chat history string)
+        # This is tricky, better to control find_subsequence directly or ensure mock is precise
+        # For simplicity, let's assume the main encode for history works, but content encode is faulty
+
+        # Simplified: just make content tokens for "R" different from what apply_chat_template would produce
+        # The consistent_mock_tokenizer should already make this work if inputs are normal.
+        # To force failure, we can patch find_subsequence.
+        words = text.split()
+        tokens = []
+        for word in words:
+            if word == tokenizer.eos_token:
+                tokens.append(tokenizer.eos_token_id)
+            elif word in tokenizer.text_to_role_id:
+                tokens.append(tokenizer.text_to_role_id[word])
+            else:
+                tokens.append(tokenizer._get_word_id(word))
+        return tokens
+
+    tokenizer.encode = MagicMock(side_effect=faulty_encode_for_content)
+    # This setup is a bit fragile. A more direct way:
+    # Patch `find_subsequence` to return -1 for the specific call.
+
+    sample_messages = [
+        ChatMessage(role='user', content='Q'),
+        ChatMessage(role='assistant', content='R'),
+    ]
+    sample_state = SampleState(
+        messages=sample_messages, ground_truth='GT', init_msg_size=1, done=True
     )
-    env_state = EnvState(sample_states=[sample_state_1, sample_state_2])
+    env_state = EnvState(sample_states=[sample_state])
+
+    with patch(
+        'rl4llm.core.base_env.find_subsequence', return_value=-1
+    ) as mock_find_sub:
+        with pytest.raises(
+            RuntimeError,
+            match='Could not precisely locate content tokens for assistant msg 1.',
+        ):
+            base_mdp_env._convert_to_episodes(env_state)
+        # Ensure find_subsequence was actually called for the assistant message content
+        # Expected content tokens for "R" would be [ID_R]
+        # Expected message_tokens would be [ID_A, ID_R, ID_EOS]
+        # mock_find_sub.assert_any_call(ANY, [tokenizer._get_word_id("R")]) # Check it was called with content tokens of "R"
+
+
+def test_convert_to_episodes_masking_and_prompt_len_detailed(base_mdp_env):
+    """Test more complex masking with system message and multiple turns."""
+    tokenizer = base_mdp_env.tokenizer
+    ID_S, ID_U, ID_A = (
+        tokenizer.role_map_tok_ids['system'],
+        tokenizer.role_map_tok_ids['user'],
+        tokenizer.role_map_tok_ids['assistant'],
+    )
+    ID_CTX = tokenizer._get_word_id('context')
+    ID_Q1 = tokenizer._get_word_id('Q1')
+    ID_R1 = tokenizer._get_word_id('R1')  # Part of prompt
+    ID_Q2 = tokenizer._get_word_id('Q2')
+    ID_R2 = tokenizer._get_word_id('R2')  # Generated
+    ID_EOS = tokenizer.eos_token_id
+
+    # Messages: Sys, User, Asst (prompt), User, Asst (generated)
+    # init_msg_size = 3 (Sys, User, Asst are the initial prompt)
+    sample_messages = [
+        ChatMessage(role='system', content='context'),  # Prompt
+        ChatMessage(role='user', content='Q1'),  # Prompt
+        ChatMessage(role='assistant', content='R1'),  # Prompt
+        ChatMessage(role='user', content='Q2'),  # New User Query
+        ChatMessage(role='assistant', content='R2'),  # Generated Response
+    ]
+    sample_state = SampleState(
+        messages=sample_messages, ground_truth='GT', init_msg_size=3, done=True
+    )
+    env_state = EnvState(sample_states=[sample_state])
+
+    # Expected full sequence:
+    # S:context<E> U:Q1<E> A:R1<E> U:Q2<E> A:R2<E_prog>
+    # [S, CTX, E,  U, Q1, E,  A, R1, E,  U, Q2, E,  A, R2, E]
+    # Token IDs:
+    # [12,100,1,  10,101,1,  11,102,1,  10,103,1,  11,104,1] (total 15 tokens)
+
+    # Prompt part (init_msg_size=3): S:context<E> U:Q1<E> A:R1<E>
+    # Tokens: [12,100,1, 10,101,1, 11,102,1] -> length 9. So, prompt_token_len = 9.
+
+    # Loss mask for full sequence (before shift):
+    # Indices:0  1   2   3  4   5   6  7   8   9 10  11  12 13  14
+    # Tokens: S CTX  E   U  Q1  E   A  R1  E   U  Q2  E   A  R2  E_prog
+    # Mask:   0  0   0   0  0   0   0  0   0   0  0   0   0  1   1  (R2 and final EOS)
+    # (Because R1 is part of prompt, R2 is generated as msg_idx=4 >= init_msg_size=3)
+
+    # Shifted loss_mask (length 14):
+    # [0,0,0,0,0,0,0,0,0,0,0,0,1,1]
+
+    expected_prompt_len = 9
+    expected_completion_len = 2  # R2, EOS_prog
+    # Last two elements of loss_mask should be True
 
     episodes = base_mdp_env._convert_to_episodes(env_state)
+    assert len(episodes) == 1
+    ep = episodes[0]
 
-    assert len(episodes) == 2
+    assert ep.prompt_length == expected_prompt_len
+    assert ep.completion_length == expected_completion_len
 
-    # Check episode 1
-    ep1 = episodes[0]
-    assert ep1.prompt_length == len(s0_prompt_tokens)  # 3
-    assert ep1.completion_length == len(s0_content_tokens)  # 1
-    # Trace: full=[10, 100, 1, 11, 101, 1], loss_mask=[0,0,0,0,1,0], final=[0,0,0,1,0]
-    expected_loss_mask_1 = torch.tensor([0, 0, 0, 1, 0], dtype=torch.bool)
-    assert torch.equal(ep1.loss_mask, expected_loss_mask_1)
-    assert ep1.ground_truth == 'GT1'
+    # Check loss mask: only last two tokens (R2, final_EOS) should be True
+    # ep.loss_mask is for actions (length N-1)
+    # Expected: [F,F,F,F,F,F,F,F,F,F,F,F, T (R2), T (EOS_prog)]
+    assert not torch.any(ep.loss_mask[:-2])  # All False until the last two
+    assert torch.all(ep.loss_mask[-2:])  # Last two are True
+    assert ep.loss_mask.sum().item() == expected_completion_len
 
-    # Check episode 2
-    ep2 = episodes[1]
-    assert ep2.prompt_length == len(s1_prompt_tokens)  # 3
-    assert ep2.completion_length == len(s1_content_tokens)  # 2
-    # Trace: full=[10, 102, 1, 11, 103, 104, 1], loss_mask=[0,0,0,0,1,1,0], final=[0,0,0,1,1,0]
-    expected_loss_mask_2 = torch.tensor([0, 0, 0, 1, 1, 0], dtype=torch.bool)
-    assert torch.equal(ep2.loss_mask, expected_loss_mask_2)
-    assert ep2.ground_truth == 'GT2'
+    # Verify states and actions shapes
+    assert ep.states.shape[0] == 14
+    assert ep.actions.shape[0] == 14
+    assert ep.loss_mask.shape[0] == 14
 
 
-def test_convert_to_episodes_error_handling(
-    base_mdp_env, mock_tokenizer, caplog
-):
-    """Tests that conversion skips samples where tokenization fails."""
-    # Reset word map
-    mock_tokenizer.word_map = {'OK': 100}
-    mock_tokenizer.next_word_id = 101
-
-    sample_state_ok = SampleState(
-        messages=[ChatMessage(role='user', content='OK')],
-        ground_truth='GT_OK',
-        init_msg_size=1,
-        done=True,
+def test_convert_to_episodes_init_msg_size_zero(base_mdp_env):
+    """Test when init_msg_size is 0, all assistant messages are masked."""
+    tokenizer = base_mdp_env.tokenizer
+    ID_U, ID_A = (
+        tokenizer.role_map_tok_ids['user'],
+        tokenizer.role_map_tok_ids['assistant'],
     )
-    # Create a unique ID for the bad state to check log message
-    bad_state_id = str(uuid.uuid4().hex)
-    sample_state_bad = SampleState(
-        id=bad_state_id,
-        messages=[ChatMessage(role='user', content='BAD')],
-        ground_truth='GT_BAD',
-        init_msg_size=1,
-        done=True,
+    ID_Q = tokenizer._get_word_id('Q')
+    ID_R = tokenizer._get_word_id('R')
+    ID_EOS = tokenizer.eos_token_id
+
+    sample_messages = [
+        ChatMessage(role='user', content='Q'),
+        ChatMessage(role='assistant', content='R'),
+    ]
+    # init_msg_size = 0 means the initial prompt was empty or not from these messages.
+    # All assistant messages here are considered "generated".
+    sample_state = SampleState(
+        messages=sample_messages, ground_truth='GT', init_msg_size=0, done=True
     )
-    env_state = EnvState(sample_states=[sample_state_ok, sample_state_bad])
+    env_state = EnvState(sample_states=[sample_state])
 
-    # Make apply_chat_template fail on the second sample's initial call
-    ok_tokens = [10, 100, 1]
+    # Expected full sequence: U:Q<E> A:R<E_prog>
+    # Tokens: [ID_U, ID_Q, ID_EOS, ID_A, ID_R, ID_EOS] (len 6)
+    # prompt_token_len should be 0 (as init_msg_size is 0)
 
-    def faulty_apply_template(*args, **kwargs):
-        messages = args[0]
-        # Check content of the first message for simplicity
-        first_content = (
-            messages[0].get('content')
-            if isinstance(messages[0], dict)
-            else messages[0].content
-        )
+    # Masking: msg_idx=0 (user Q). Not assistant.
+    # msg_idx=1 (assistant R). msg_idx=1 >= init_msg_size=0. Is assistant.
+    #   Content "R" is masked. global_content_start = index of R.
+    #   Index of R is 4. loss_mask[4]=1.
+    # Final EOS is masked: loss_mask[5]=1.
+    # Original loss_mask: [0,0,0,0,1,1]
+    # Shifted loss_mask: [0,0,0,1,1] (length 5)
 
-        if first_content == 'BAD':
-            raise ValueError('Simulated tokenization error')
-        elif first_content == 'OK':
-            return ok_tokens
-        return [1]  # Default fallback
-
-    mock_tokenizer.apply_chat_template.side_effect = faulty_apply_template
-    mock_tokenizer.encode.return_value = []  # No assistant response needed
+    expected_prompt_len = 0
+    expected_completion_len = 2  # R, EOS_prog
 
     episodes = base_mdp_env._convert_to_episodes(env_state)
+    assert len(episodes) == 1
+    ep = episodes[0]
 
-    assert len(episodes) == 1  # Only the OK sample should be converted
-    assert episodes[0].ground_truth == 'GT_OK'
-    assert (
-        f"Failed converting Sample ID {bad_state_id} to EpisodeData"
-        in caplog.text
+    assert ep.prompt_length == expected_prompt_len
+    assert ep.completion_length == expected_completion_len
+    # Shifted loss mask: [F,F,F, T(R), T(EOS)]
+    assert torch.equal(
+        ep.loss_mask,
+        torch.tensor([False, False, False, True, True], dtype=torch.bool),
     )
-    assert 'Simulated tokenization error' in caplog.text
+
+
+def test_convert_to_episodes_assistant_empty_content(base_mdp_env):
+    """Test when an assistant message has empty content."""
+    tokenizer = base_mdp_env.tokenizer
+    ID_U, ID_A = (
+        tokenizer.role_map_tok_ids['user'],
+        tokenizer.role_map_tok_ids['assistant'],
+    )
+    ID_Q = tokenizer._get_word_id('Q')
+    ID_EOS = tokenizer.eos_token_id
+
+    sample_messages = [
+        ChatMessage(role='user', content='Q'),
+        ChatMessage(role='assistant', content=''),  # Empty content
+    ]
+    sample_state = SampleState(
+        messages=sample_messages, ground_truth='GT', init_msg_size=1, done=True
+    )
+    env_state = EnvState(sample_states=[sample_state])
+
+    # Expected full sequence: U:Q<E> A:<E_prog> (no content for A)
+    # Tokens: [ID_U, ID_Q, ID_EOS, ID_A, ID_EOS] (len 5)
+    # prompt_token_len for U:Q<E> is 3.
+
+    # Masking: msg_idx=1 (assistant, empty content). msg_idx=1 >= init_msg_size=1.
+    #   content="", content_tokens=[] (or depends on tokenizer, mock encode gives [])
+    #   The `if content_tokens:` block is skipped. No content masking.
+    # Final EOS is masked: loss_mask[4]=1.
+    # Original loss_mask: [0,0,0,0,1]
+    # Shifted loss_mask: [0,0,0,1] (length 4)
+
+    expected_prompt_len = 3
+    expected_completion_len = 1  # Only final EOS
+
+    episodes = base_mdp_env._convert_to_episodes(env_state)
+    assert len(episodes) == 1
+    ep = episodes[0]
+
+    assert ep.prompt_length == expected_prompt_len
+    assert ep.completion_length == expected_completion_len
+    # Shifted loss mask: [F,F,F, T(EOS)]
+    assert torch.equal(
+        ep.loss_mask,
+        torch.tensor([False, False, False, True], dtype=torch.bool),
+    )
+    assert ep.states.shape[0] == 4  # [ID_U, ID_Q, ID_EOS, ID_A]
+    assert ep.actions.shape[0] == 4  # [ID_Q, ID_EOS, ID_A, ID_EOS]
 
 
 # Test Rollout Flow (requires MockMDPEnv)

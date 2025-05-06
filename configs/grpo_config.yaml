@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_qwen2.5_0.5b_gsm8k_run2"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_grpo_qwen2.5_0.5b_inst_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -25,7 +25,7 @@ model:
   model_max_length: 4000
 
 grpo:
-  max_steps: 100
+  max_steps: 200
   train_rollout_size: 512
   num_updates: 1
   train_micro_batch_size: 4

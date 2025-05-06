@@ -200,11 +200,12 @@ class GRPOTrainer(BaseRLTrainer):
         advantages = experience_batch.advantages.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
-        if self.config.normalize_advantages:
-            advantages = self.dist_masked_whiten(advantages, loss_mask, dim=1)
-
+        advantages = advantages.float()
         behavior_logprobs = behavior_logprobs.float()
         pi_logits = pi_logits.float()
+
+        if self.config.normalize_advantages:
+            advantages = self.dist_masked_whiten(advantages, loss_mask, dim=1)
 
         # PPO clipped surrogate PG loss
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
@@ -354,7 +355,7 @@ class GRPOTrainer(BaseRLTrainer):
                 'top_p': self.config.top_p,
                 'top_k': self.config.top_k,
                 'repetition_penalty': self.config.repetition_penalty,
-                'num_return_sequences': 1,  # we handle the group size inside the HfMDPEnv
+                'num_return_sequences': 1,  # we handle the group size inside the MDPEnv
                 'do_sample': True,
             }
 

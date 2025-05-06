@@ -518,23 +518,36 @@ class BaseMDPEnv(ABC):
 
             # --- Apply tokenization and masking logic PER SAMPLE ---
             try:
+                if len(sample_state.messages) < 2:
+                    raise RuntimeError('Sample resulted in messages length < 2')
+
                 messages_as_dicts = [
                     msg.model_dump() for msg in sample_state.messages
                 ]
-                full_sequence_ids = self.tokenizer.apply_chat_template(
+                # We use 'continue_final_message' to skip add EOS to the last turn
+                # in some cases the chat template will add other tokens after the EOS token
+                formatted_chat_history = self.tokenizer.apply_chat_template(
                     messages_as_dicts,
-                    tokenize=True,
+                    tokenize=False,
                     add_generation_prompt=False,
+                    continue_final_message=True,
                 )
+                full_sequence_ids = self.tokenizer.encode(
+                    formatted_chat_history, add_special_tokens=False
+                )
+
                 if not isinstance(full_sequence_ids, list):
                     full_sequence_ids = full_sequence_ids.squeeze(0).tolist()
 
-                if len(full_sequence_ids) < 2:
-                    raise RuntimeError(
-                        'Sample resulted in sequence length < 2. Skipping.'
-                    )
+                # Ensure the last assistant's turn ends with EOS token id
+                if full_sequence_ids[-1] != self.tokenizer.eos_token_id:
+                    full_sequence_ids = full_sequence_ids + [
+                        self.tokenizer.eos_token_id
+                    ]
 
                 loss_mask = [0] * len(full_sequence_ids)
+                # Ensure we use the last EOS token id for training
+                loss_mask[-1] = 1
                 prompt_token_len = -1
                 current_pos = 0
 
@@ -544,8 +557,9 @@ class BaseMDPEnv(ABC):
                         tokenize=True,
                         add_generation_prompt=False,
                     )
+
                     if not isinstance(prefix_tokens, list):
-                        prefix_tokens = prefix_tokens.tolist()
+                        prefix_tokens = prefix_tokens.squeeze(0).tolist()
                     message_tokens = prefix_tokens[current_pos:]
 
                     if msg_idx == sample_state.init_msg_size - 1:
@@ -562,8 +576,16 @@ class BaseMDPEnv(ABC):
                             content_tokens = self.tokenizer.encode(
                                 content, add_special_tokens=False
                             )
-                            # TODO: should we also include the EOS token here?
+
                             if content_tokens:
+                                # Also add EOS to intermediate turns from assistant's generation
+                                if (
+                                    content_tokens[-1]
+                                    != self.tokenizer.eos_token_id
+                                ):
+                                    content_tokens = content_tokens + [
+                                        self.tokenizer.eos_token_id
+                                    ]
                                 content_start_in_msg = find_subsequence(
                                     message_tokens, content_tokens
                                 )
@@ -627,18 +649,58 @@ class BaseMDPEnv(ABC):
         batch_prompts = []
         for d in env_state.sample_states:
             messages = d.messages
-            # TODO merge consecutive assistant's turns into a single turn
-            messages_as_dicts = [msg.model_dump() for msg in messages]
-            # # Handles continue generation if the message ends with assistant's turn
-            # continue_gen = False
-            # if messages[-1].role == 'assistant':
-            #     continue_gen = True
-            # TODO how to avoid add default system prompt???
+            # Merge consecutive assistant's turns into a single turn
+            if not messages:
+                merged_messages = []
+            else:
+                merged_messages = [messages[0]]  # Start with the first message
+                for i in range(1, len(messages)):
+                    current_msg_obj = messages[i]
+                    last_merged_obj = merged_messages[-1]
+
+                    if (
+                        current_msg_obj.role == 'assistant'
+                        and last_merged_obj.role == 'assistant'
+                    ):
+                        # Merge content. Using a newline as a separator.
+                        merged_content = (
+                            last_merged_obj.content + current_msg_obj.content
+                        )
+                        # Replace the last message object with a new one containing the merged content
+                        merged_messages[-1] = ChatMessage(
+                            role='assistant', content=merged_content
+                        )
+                        logger.debug(
+                            f"Merged assistant turn: '{last_merged_obj.content}' + '{current_msg_obj.content}' -> '{merged_content}'"
+                        )
+                    else:
+                        merged_messages.append(current_msg_obj)
+
+            # Convert merged messages to dictionaries
+            messages_as_dicts = [msg.model_dump() for msg in merged_messages]
+
+            # Handle continue generation if the message ends with assistant's turn
+            continue_gen = False
+            if merged_messages[-1].role == 'assistant':
+                continue_gen = True
+
+            # # A simple hack to avoid add default system prompt
+            # # Note: This will still render system tokens if the template includes them,
+            # # but the content part of the system prompt will be empty.
+            # # A better way might be to set the chat_template for the tokenizer
+            # has_system_prompt = (
+            #     messages_as_dicts and messages_as_dicts[0]['role'] == 'system'
+            # )
+            # if not has_system_prompt:
+            #     messages_as_dicts = [
+            #         {'role': 'system', 'content': ''}
+            #     ] + messages_as_dicts
+
             prompt = self.tokenizer.apply_chat_template(
                 messages_as_dicts,
                 tokenize=False,
-                add_generation_prompt=True,
-                # continue_final_message=continue_gen,
+                add_generation_prompt=not continue_gen,
+                continue_final_message=continue_gen,
             )
             batch_prompts.append(prompt)
 
@@ -653,10 +715,7 @@ class BaseMDPEnv(ABC):
         **kwargs: Optional[Dict[str, Any]],
     ) -> EnvState:
         """
-        Default interaction loop: Performs a single generation step.
-
-        Suitable for single-step MDPs where the full completion is generated at once.
-        Subclasses for multi-step MDPs or tool use should override this method.
+        LLM interaction loop for single-step or multi-step MDPs or tool use.
 
         Args:
             env_state: The starting state containing a list of SampleState objects.
@@ -665,7 +724,7 @@ class BaseMDPEnv(ABC):
             **kwargs: Additional arguments (unused in default).
 
         Returns:
-            EnvState: The final state after generation, with updated batch_messages.
+            EnvState: The final state after generation, with updated SampleState.
         """
         raise NotImplementedError
 
@@ -680,8 +739,8 @@ class BaseMDPEnv(ABC):
         Performs a rollout: resets env, runs interaction, converts to episodes.
 
         Args:
-            llm: The language model.
-            sampling_params: Sampling parameters generation.
+            llm: The HF language model or inference client.
+            sampling_params: Sampling parameters for generation.
             **kwargs: Additional custom arguments passed to _run_interaction_loop.
 
         Returns:
