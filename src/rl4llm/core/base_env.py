@@ -399,17 +399,13 @@ class BaseMDPEnv(ABC):
                 logger.error(
                     f"Failed to parse messages or create SampleState for raw sample {i}: {raw_batch['messages'][i]}. Error: {e}"
                 )
-                # Decide how to handle errors: skip sample, raise error?
-                # Skipping for now, but might lead to smaller batch sizes.
-                continue  # Skip this original sample and its group
+                continue  # Or raise an exception ???
 
         if not sample_states:
             logger.error(
                 f"Rank {self.rank}: No valid SampleStates created from the batch."
             )
-            # Need robust error handling here, maybe try another batch?
-            # For now, returning None to signal failure upstream.
-            return None  # Or raise an exception
+            return None  # Or raise an exception ???
 
         return EnvState(sample_states=sample_states)
 
@@ -541,9 +537,7 @@ class BaseMDPEnv(ABC):
 
                 # Ensure the last assistant's turn ends with EOS token id
                 if full_sequence_ids[-1] != self.tokenizer.eos_token_id:
-                    full_sequence_ids = full_sequence_ids + [
-                        self.tokenizer.eos_token_id
-                    ]
+                    full_sequence_ids.append(self.tokenizer.eos_token_id)
 
                 loss_mask = [0] * len(full_sequence_ids)
                 # Ensure we use the last EOS token id for training
@@ -552,10 +546,13 @@ class BaseMDPEnv(ABC):
                 current_pos = 0
 
                 for msg_idx, msg in enumerate(messages_as_dicts):
-                    prefix_tokens = self.tokenizer.apply_chat_template(
+                    prefix_msg = self.tokenizer.apply_chat_template(
                         messages_as_dicts[: msg_idx + 1],
-                        tokenize=True,
+                        tokenize=False,
                         add_generation_prompt=False,
+                    )
+                    prefix_tokens = self.tokenizer.encode(
+                        prefix_msg, add_special_tokens=False
                     )
 
                     if not isinstance(prefix_tokens, list):
@@ -576,16 +573,17 @@ class BaseMDPEnv(ABC):
                             content_tokens = self.tokenizer.encode(
                                 content, add_special_tokens=False
                             )
-
+                            # Is this the most reliable way of construct the loss mask???
                             if content_tokens:
-                                # Also add EOS to intermediate turns from assistant's generation
-                                if (
-                                    content_tokens[-1]
-                                    != self.tokenizer.eos_token_id
-                                ):
-                                    content_tokens = content_tokens + [
-                                        self.tokenizer.eos_token_id
-                                    ]
+                                # # Also add EOS to intermediate turns from assistant's generation
+                                # if (
+                                #     content_tokens[-1]
+                                #     != self.tokenizer.eos_token_id
+                                # ):
+                                #     content_tokens.append(
+                                #         self.tokenizer.eos_token_id
+                                #     )
+
                                 content_start_in_msg = find_subsequence(
                                     message_tokens, content_tokens
                                 )

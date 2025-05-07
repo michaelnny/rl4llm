@@ -238,61 +238,41 @@ def grpo_trainer(
 
 
 @pytest.mark.parametrize(
-    'rewards, zero_mean_only, expected_mean_approx, expected_std_approx',
+    'rewards, expected_mean_approx, expected_std_approx',
     [
         (
             torch.tensor([1.0, 2.0, 3.0, 4.0]),
-            False,
             0.0,
             1.11803,
         ),  # unbiased=False std
         (
             torch.tensor([1.0, 1.0, 1.0, 1.0]),
-            False,
             0.0,
             0.0,
         ),  # Std is 0, handled by eps
-        (
-            torch.tensor([5.0, 6.0, 7.0, 8.0]),
-            True,
-            0.0,
-            1.11803,
-        ),  # Only mean subtracted, mean becomes 0
     ],
 )
 def test_normalize_group_rewards(
     grpo_trainer: GRPOTrainer,
     rewards: torch.Tensor,
-    zero_mean_only: bool,
     expected_mean_approx: float,
     expected_std_approx: float,
 ):
     """Tests the normalization of group rewards."""
-    normalized_rewards = grpo_trainer._normalize_group_rewards(
-        rewards, zero_mean_only=zero_mean_only
-    )
+    normalized_rewards = grpo_trainer._normalize_group_rewards(rewards)
     assert normalized_rewards.mean().item() == pytest.approx(
         expected_mean_approx, abs=1e-5
     )
-    if zero_mean_only:
-        # Check if only mean was subtracted
-        assert torch.allclose(normalized_rewards, rewards - rewards.mean())
-        # Check std is preserved (approx)
+
+    # Check std is approx 1 (unless original std was 0)
+    if expected_std_approx > 1e-8:  # Avoid checking std=1 for zero-std input
         assert normalized_rewards.std(unbiased=False).item() == pytest.approx(
-            expected_std_approx, abs=1e-5
+            1.0, abs=1e-5
         )
     else:
-        # Check std is approx 1 (unless original std was 0)
-        if (
-            expected_std_approx > 1e-8
-        ):  # Avoid checking std=1 for zero-std input
-            assert normalized_rewards.std(
-                unbiased=False
-            ).item() == pytest.approx(1.0, abs=1e-5)
-        else:
-            assert normalized_rewards.std(
-                unbiased=False
-            ).item() == pytest.approx(0.0, abs=1e-5)
+        assert normalized_rewards.std(unbiased=False).item() == pytest.approx(
+            0.0, abs=1e-5
+        )
 
 
 def test_normalize_group_rewards_raises_error_for_small_group(
@@ -559,7 +539,7 @@ def test_convert_group_episodes_to_transitions(
     with patch.object(
         grpo_trainer,
         '_normalize_group_rewards',
-        side_effect=lambda x, y, **kwargs: x,
+        side_effect=lambda x: x,
     ):
         transitions = grpo_trainer._convert_group_episodes_to_transitions(
             sample_group_episodes
@@ -591,14 +571,3 @@ def test_convert_group_episodes_to_transitions(
         # # Check advantages are non-zero only where loss_mask is True (using original reward)
         # assert torch.all(trans.advantages[trans.loss_mask] == original_reward)
         # assert torch.all(trans.advantages[~trans.loss_mask] == 0)
-
-
-def test_convert_group_episodes_to_transitions_small_group(
-    grpo_trainer: GRPOTrainer, sample_group_episodes: List[EpisodeData]
-):
-    """Tests that conversion fails if group size is less than 4."""
-    small_group = sample_group_episodes[:3]
-    with pytest.raises(
-        ValueError, match='Expect group episodes to be greater than 4'
-    ):
-        grpo_trainer._convert_group_episodes_to_transitions(small_group)

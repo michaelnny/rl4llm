@@ -1,5 +1,6 @@
 """Implements GRPO trainer"""
 
+import math
 import os
 from typing import Any, Dict, List, Optional, Union
 
@@ -18,12 +19,25 @@ from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 class GRPOConfig(BaseRLConfig):
     """GRPO config instance for RL LLM"""
 
-    group_reward_zero_mean: bool = Field(
+    token_level_loss: bool = Field(
         False,
-        description='Normalized group reward to have a zero mean without standard deviation scaling',
+        description='Token-Level Policy Gradient Loss, from DAPO paper: https://arxiv.org/abs/2503.14476',
     )
-    clip_eps: float = Field(
-        0.2, ge=0.0, le=1.0, description='PPO policy loss clip epsilon'
+    skip_group_same_rewards: bool = Field(
+        False,
+        description='Filter out group samples with the rewards equal to 1 and 0 for training, similar to DAPO paper: https://arxiv.org/abs/2503.14476',
+    )
+    clip_eps_high: float = Field(
+        0.2,
+        ge=0.0,
+        le=1.0,
+        description='PPO policy loss clip epsilon higher bound',
+    )
+    clip_eps_low: float = Field(
+        0.2,
+        ge=0.0,
+        le=1.0,
+        description='PPO policy loss clip epsilon lower bound',
     )
     num_updates: int = Field(
         1,
@@ -88,7 +102,15 @@ class TransitionData(BaseModel):
 
 
 class GRPOTrainer(BaseRLTrainer):
-    """GRPO trainer for LLM"""
+    """GRPO trainer for LLM
+
+    GRPO paper:
+    https://arxiv.org/abs/2402.03300
+
+    DAPO paper:
+    https://arxiv.org/abs/2503.14476
+
+    """
 
     def __init__(
         self,
@@ -128,11 +150,17 @@ class GRPOTrainer(BaseRLTrainer):
 
         self.config: GRPOConfig = config  # for better type hinting
 
-        self.clip_eps = self.config.clip_eps
-
     def initialize_trainer(self):
         """Initialize GRPO specific settings"""
-        pass
+        # avoid adding group of samples with almost identical outcomes
+        _dummy_rewards = torch.tensor(
+            [0] * self.config.group_size, dtype=torch.float32
+        )
+        _idx = math.ceil(self.config.group_size * 0.05)
+        _dummy_rewards[:_idx] = 1.0
+        self.group_reward_std_threshold = torch.std(
+            _dummy_rewards, unbiased=False
+        )
 
     def save_checkpoint(self, tag: str) -> None:
         """Save trained model in HF format"""
@@ -200,9 +228,11 @@ class GRPOTrainer(BaseRLTrainer):
         advantages = experience_batch.advantages.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
-        advantages = advantages.float()
-        behavior_logprobs = behavior_logprobs.float()
-        pi_logits = pi_logits.float()
+        # advantages = advantages.float()
+        # behavior_logprobs = behavior_logprobs.float()
+        # pi_logits = pi_logits.float()
+
+        assert pi_logits.dtype == behavior_logprobs.dtype == advantages.dtype
 
         if self.config.normalize_advantages:
             advantages = self.dist_masked_whiten(advantages, loss_mask, dim=1)
@@ -210,7 +240,9 @@ class GRPOTrainer(BaseRLTrainer):
         # PPO clipped surrogate PG loss
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clipped_ratio = ratio.clamp(1 - self.clip_eps, 1 + self.clip_eps)
+        clipped_ratio = ratio.clamp(
+            1 - self.config.clip_eps_low, 1 + self.config.clip_eps_high
+        )
         pg_losses1 = ratio * advantages.detach()
         pg_losses2 = clipped_ratio * advantages.detach()
         pg_losses = -torch.min(pg_losses1, pg_losses2)
@@ -228,8 +260,11 @@ class GRPOTrainer(BaseRLTrainer):
                 torch.lt(pg_losses2, pg_losses1), loss_mask, dim=1
             ).mean()
 
-        # First average over the sequence length, then average over the batch
-        pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
+        if self.config.token_level_loss:
+            pg_loss = self.masked_sum(pg_losses, loss_mask) / loss_mask.sum()
+        else:
+            # First average over the sequence length, then average over the batch
+            pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
 
         # Compute entropy for the policy
         entropies = self.compute_entropy_from_logits(
@@ -372,7 +407,7 @@ class GRPOTrainer(BaseRLTrainer):
                     policy_model, train_sampling_params
                 )
 
-                if outputs:
+                if self._check_group_episodes(outputs):
                     # IMPORTANT: do not flatten the episodes yet
                     # as we need to normalize the rewards on group level
                     collected_episodes.extend([outputs])
@@ -394,6 +429,32 @@ class GRPOTrainer(BaseRLTrainer):
 
         return collected_episodes
 
+    def _check_group_episodes(self, episodes: List[EpisodeData]) -> bool:
+        """Checks if the group of episode is valid for training"""
+        if not episodes:
+            return False
+        if len(episodes) < self.config.group_size:
+            return False
+
+        if self.config.skip_group_same_rewards:
+            # Discard samples with rewards of low std, as they leads to zero advantages -> zero gradients
+            terminal_rewards = torch.concat(
+                [torch.tensor([ep.terminal_reward]) for ep in episodes]
+            ).to(self.torch_dtype)
+            if (
+                torch.std(terminal_rewards, unbiased=False)
+                <= self.group_reward_std_threshold
+            ):
+                self.logger.debug(
+                    f"Skipping group samples with rewards of low std, minimum group reward std: {self.group_reward_std_threshold:.4f}"
+                )
+                self.logger.log_scalar(
+                    'other/skipped_samples', len(terminal_rewards)
+                )
+                return False
+
+        return True
+
     @torch.no_grad()
     def _convert_group_episodes_to_transitions(
         self,
@@ -409,8 +470,6 @@ class GRPOTrainer(BaseRLTrainer):
 
         if not episodes:
             return []
-        if len(episodes) < 4:
-            raise ValueError('Expect group episodes to be greater than 4')
 
         # Training specific pre-processing
         terminal_rewards = torch.concat(
@@ -418,7 +477,7 @@ class GRPOTrainer(BaseRLTrainer):
         ).to(self.torch_dtype)
 
         normalized_terminal_rewards = self._normalize_group_rewards(
-            terminal_rewards, self.config.group_reward_zero_mean
+            terminal_rewards
         )
 
         # Prepare batched sequences for model forward pass
@@ -523,7 +582,6 @@ class GRPOTrainer(BaseRLTrainer):
     def _normalize_group_rewards(
         self,
         rewards: torch.Tensor,
-        zero_mean_only: bool = True,
         eps: float = 1e-8,
     ) -> torch.Tensor:
         """
@@ -532,6 +590,7 @@ class GRPOTrainer(BaseRLTrainer):
         Args:
             rewards (torch.Tensor): List of rewards for the group.
             eps (float): Small value to prevent division by zero.
+
         Returns:
             torch.Tensor: Normalized rewards.
         """
@@ -542,8 +601,6 @@ class GRPOTrainer(BaseRLTrainer):
 
         mean_reward = rewards.mean()
         std_reward = rewards.std(unbiased=False)
-        if zero_mean_only:
-            return rewards - mean_reward
 
         return (rewards - mean_reward) / (std_reward + eps)
 
@@ -575,17 +632,17 @@ class GRPOTrainer(BaseRLTrainer):
             [item.advantages for item in batch],
             batch_first=True,
             padding_value=0.0,
-        ).float()
+        ).to(self.torch_dtype)
         batch_pi_logprobs = pad_sequence(
             [item.pi_logprobs for item in batch],
             batch_first=True,
             padding_value=0.0,
-        ).float()
+        ).to(self.torch_dtype)
         batch_ref_logprobs = pad_sequence(
             [item.ref_logprobs for item in batch],
             batch_first=True,
             padding_value=0.0,
-        ).float()
+        ).to(self.torch_dtype)
 
         return TransitionData(
             states=batch_states,

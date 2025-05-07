@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_qwen2.5_0.5b_inst_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_grpo_enhanced_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -18,7 +18,7 @@ dataset:
   # max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-0.5B"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
@@ -31,15 +31,18 @@ grpo:
   train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
-  clip_eps: 0.2                         # PPO-style policy clip parameter
-  group_reward_zero_mean: false         # group reward is normalized to have a zero mean without standard deviation scaling    
+  # DAPO improvements
+  clip_eps_high: 0.25                   # PPO-style policy clip higher bound
+  clip_eps_low: 0.15                     # PPO-style policy clip lower bound
+  token_level_loss: false                # sums and then average over the entire batch instead of sequence    
+  skip_group_same_rewards: false          # skip group samples with identical rewards for training
   normalize_advantages: false
   kl_loss_coef: 0.0
-  entropy_loss_coef: 0.0
+  entropy_loss_coef: 0.01
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout
-  group_size: 8                         # for each sample we generate a group of answers
+  group_size: 16                        # for each sample we generate a group of answers
   max_completion_tokens: 1024
   temperature: 0.9                      
   repetition_penalty: 1.0
@@ -47,9 +50,9 @@ grpo:
   top_k: -1                             # -1 to disable
 
   # evaluation
-  eval_rollout_size: 512    
+  eval_rollout_size: 1024    
   eval_batch_size: 64
-  eval_interval: 0                     # every N global steps
+  eval_interval: 20                     # every N global steps
 
   # others
   checkpoint_interval: 100              # every N global steps

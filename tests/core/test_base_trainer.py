@@ -7,7 +7,7 @@ import torch
 from deepspeed import DeepSpeedEngine
 
 from rl4llm.constants import TRAIN_PHASE
-from rl4llm.core.base_env import EpisodeData, EpisodeMetadata
+from rl4llm.core.base_env import ChatMessage, EpisodeData
 from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 
 
@@ -68,21 +68,16 @@ def sample_episode_data() -> EpisodeData:
     loss_mask = torch.zeros_like(actions, dtype=torch.bool)
     loss_mask[len(prompt_tokens) - 1 :] = True
 
-    meta = EpisodeMetadata(
-        prompt=prompt,
-        completion=completion,
-        prompt_length=len(prompt_tokens),
-        completion_length=len(completion_tokens),
-        reward_dict={'reward1': 1.5},
-        ground_truth='123',
-    )
-
     return EpisodeData(
         states=states,
         actions=actions,
         loss_mask=loss_mask,
         terminal_reward=1.5,
-        metadata=meta,
+        chat_history=[],
+        reward_dict={'reward1': 1.5},
+        ground_truth='123',
+        prompt_length=len(prompt_tokens),
+        completion_length=len(completion_tokens),
     )
 
 
@@ -193,21 +188,19 @@ def test_log_batch_episodes_invalid_phase(trainer_base):
 def test_log_batch_episodes_valid(trainer_base):
     """Logs sample and scalar for valid training episode."""
 
-    meta = EpisodeMetadata(
-        prompt='a',
-        completion='b',
-        prompt_length=1,
-        completion_length=2,
-        reward_dict={'reward1': 1.5},
-        ground_truth='123',
-    )
-
     episode = EpisodeData(
         states=torch.tensor([1]),
         actions=torch.tensor([1]),
         loss_mask=torch.tensor([1]),
         terminal_reward=torch.tensor([1]),
-        metadata=meta,
+        chat_history=[
+            ChatMessage(role='user', content='Test'),
+            ChatMessage(role='assistant', content='Response here'),
+        ],
+        prompt_length=1,
+        completion_length=2,
+        reward_dict={'reward1': 1.5},
+        ground_truth='123',
     )
     trainer_base.log_batch_episodes(TRAIN_PHASE, [episode], 1)
     trainer_base.logger.log_sample.assert_called()
@@ -519,62 +512,3 @@ def test_sync_policy_model_success_non_master(
     trainer_base.inference_client.resume_memory.assert_not_called()
     trainer_base.inference_client.update_weights_from_file.assert_not_called()
     trainer_base.dist_ops.barrier.assert_called()
-
-
-# def test_transform_batch_rewards_single_reward(
-#     trainer_base, sample_group_episodes
-# ):
-#     """Tests reward transformation when only one reward function is present."""
-#     # Ensure only one reward function is mocked
-#     trainer_base.train_env.reward_functions = {'reward1': Mock()}
-#     trainer_base.reward_transform_fn = None  # Should not be needed
-
-#     rewards = trainer_base.transform_batch_rewards(sample_group_episodes)
-#     expected = torch.tensor(
-#         [1.5, 2.0, 1.0, 2.5], dtype=trainer_base.torch_dtype
-#     )
-#     assert torch.equal(rewards, expected)
-
-
-# def test_transform_batch_rewards_multiple_rewards(
-#     trainer_base,
-#     sample_group_episodes,
-#     mock_reward_transform_fn,
-# ):
-#     """Tests reward transformation with multiple reward functions using the transform function."""
-#     # Add a second reward
-#     for ep in sample_group_episodes:
-#         ep.reward_dict['reward2'] = 0.5
-#     trainer_base.train_env.reward_functions = {
-#         'reward1': Mock(),
-#         'reward2': Mock(),
-#     }
-#     trainer_base.reward_transform_fn = mock_reward_transform_fn
-
-#     rewards = trainer_base.transform_batch_rewards(sample_group_episodes)
-
-#     # Check that the transform function was called correctly
-#     mock_reward_transform_fn.assert_called_once()
-#     call_args = mock_reward_transform_fn.call_args[0][0]
-#     assert 'reward1' in call_args
-#     assert 'reward2' in call_args
-#     assert torch.equal(
-#         call_args['reward1'],
-#         torch.tensor([1.5, 2.0, 1.0, 2.5], dtype=trainer_base.torch_dtype),
-#     )
-#     assert torch.equal(
-#         call_args['reward2'],
-#         torch.tensor([0.5, 0.5, 0.5, 0.5], dtype=trainer_base.torch_dtype),
-#     )
-
-#     # Check the output (based on the mock's side effect: sum)
-#     expected = torch.tensor(
-#         [2.0, 2.5, 1.5, 3.0], dtype=trainer_base.torch_dtype
-#     )
-#     assert torch.equal(rewards, expected)
-
-
-# def test_transform_batch_rewards_empty_list(trainer_base):
-#     """Tests that transforming rewards on an empty list raises ValueError."""
-#     with pytest.raises(ValueError, match='Episodes list cannot be empty'):
-#         trainer_base.transform_batch_rewards([])

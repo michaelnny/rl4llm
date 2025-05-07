@@ -70,16 +70,30 @@ def parse_args():
     return args
 
 
-# SYSTEM_PROMPT = """Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}."""
-SYSTEM_PROMPT = """Please first think about the reasoning process step by step before give your final answer."""
+def apply_custom_chat_template(tokenizer):
+    """This could be useful for training on base-model or for special use cases (like with special pre-filling for generation)"""
+    # Define a Jinja2 chat template string
+
+    jinja_chat_template = (
+        '{% for message in messages %}'
+        "{% if message.role == 'user' %}"
+        'Question: {{ message.content }}\n\n'
+        "Answer: Let's think step by step.\n"
+        "{% elif message.role == 'assistant' %}"
+        '{{ message.content }}'
+        "{% elif message.role == 'system' %}"
+        '{{ message.content }}\n\n'
+        '{% endif %}'
+        '{% endfor %}'
+    )
+
+    tokenizer.chat_template = jinja_chat_template
 
 
 def prepare_initial_chat_messages(item: Dict) -> Dict:
     """Build chat-style messages for initial state"""
     messages = [
-        {'role': 'system', 'content': SYSTEM_PROMPT.strip()},
         {'role': 'user', 'content': item['question'].strip()},
-        # {'role': 'assistant', 'content': "Let's think step by step"},
     ]
     return {'messages': messages}
 
@@ -172,6 +186,9 @@ def main():
     policy_model, tokenizer = build_policy_model_and_tokenizer(
         model_config, torch_dtype
     )
+
+    # Use our own template for base model training
+    apply_custom_chat_template(tokenizer)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
