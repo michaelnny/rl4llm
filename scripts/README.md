@@ -47,8 +47,8 @@ PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
 **Step 2**: Launch the training script and set the inference server arguments
 
 ```bash
-PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_extended_grpo.py \
-    --config-file ./configs/extended_grpo_config.yaml \
+PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_explore_grpo.py \
+    --config-file ./configs/explore_grpo_config.yaml \
     --use-infer-server \
     --infer-host localhost \
     --infer-port 30000 \

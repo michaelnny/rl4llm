@@ -411,78 +411,52 @@ class BaseMDPEnv(ABC):
 
     def _calculate_rewards(
         self, batch_sample_states: List[SampleState]
-    ) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Calculates rewards using configured functions."""
-
         num_samples = len(batch_sample_states)
         if num_samples == 0:
             return torch.empty(0, dtype=torch.float32), {}
 
-        rewards_dict: Dict[str, List[float]] = {
-            fn.name: [0.0] * num_samples for fn in self.reward_functions
+        # Initialize rewards_dict with zero tensors
+        rewards_dict: Dict[str, torch.Tensor] = {
+            fn.name: torch.zeros(num_samples, dtype=torch.float32)
+            for fn in self.reward_functions
         }
 
+        # Calculate rewards
         for i, sample_state in enumerate(batch_sample_states):
             for fn in self.reward_functions:
-                reward_value = fn(
-                    sample_state.messages, sample_state.ground_truth
-                )
-                if not isinstance(reward_value, (float, int)):
+                reward = fn(sample_state.messages, sample_state.ground_truth)
+                if not isinstance(reward, (float, int)):
                     raise ValueError(
-                        f"Reward func '{fn.name}' must return a float or int, got {type(reward_value)}."
+                        f"Reward func '{fn.name}' must return float/int, got {type(reward)}"
                     )
-                rewards_dict[fn.name][i] = float(reward_value)
+                rewards_dict[fn.name][i] = float(reward)
 
-        terminal_reward_tensor = self._transform_rewards(rewards_dict)
-        return terminal_reward_tensor, rewards_dict
+        return self._transform_rewards(rewards_dict), rewards_dict
 
     def _transform_rewards(
-        self, rewards_dict: Dict[str, List[float]]
+        self, rewards_dict: Dict[str, torch.Tensor]
     ) -> torch.Tensor:
         """Transforms multiple rewards into a single tensor."""
         if not rewards_dict:
             return torch.zeros(
-                self.batch_size * self.group_size
-            )  # Handle empty case
+                self.batch_size * self.group_size, dtype=torch.float32
+            )
 
         if self.reward_transform_fn:
-            try:
-                transformed = self.reward_transform_fn(rewards_dict)
-                if not isinstance(transformed, torch.Tensor):
-                    # Try converting if it's list/numpy
-                    try:
-                        transformed = torch.tensor(
-                            transformed, dtype=torch.float32
-                        )
-                    except Exception:
-                        raise TypeError(
-                            f"Reward transform function must return a torch.Tensor, got {type(transformed)}"
-                        )
-                # Ensure shape matches batch size
-                expected_len = len(next(iter(rewards_dict.values())))
-                if transformed.shape != (expected_len,):
-                    raise ValueError(
-                        f"Transformed reward shape mismatch. Expected ({expected_len},), got {transformed.shape}"
-                    )
-                return transformed.float()  # Ensure float
-            except Exception as e:
-                logger.error(
-                    f"Reward transformation failed: {e}", exc_info=True
+            transformed = self.reward_transform_fn(rewards_dict)
+            if not isinstance(transformed, torch.Tensor):
+                transformed = torch.tensor(transformed, dtype=torch.float32)
+
+            expected_len = len(next(iter(rewards_dict.values())))
+            if transformed.shape != (expected_len,):
+                raise ValueError(
+                    f"Expected shape ({expected_len},), got {transformed.shape}"
                 )
-                # Fallback: use the first reward function's output
-                first_reward_key = next(iter(rewards_dict.keys()))
-                logger.warning(
-                    f"Falling back to using reward '{first_reward_key}' due to transform error."
-                )
-                return torch.tensor(
-                    rewards_dict[first_reward_key], dtype=torch.float32
-                )
-        else:
-            # Should have been handled in __init__, but as a safeguard
-            first_reward_key = next(iter(rewards_dict.keys()))
-            return torch.tensor(
-                rewards_dict[first_reward_key], dtype=torch.float32
-            )
+            return transformed.float()
+
+        return next(iter(rewards_dict.values()))
 
     def _convert_to_episodes(self, env_state: EnvState) -> List[EpisodeData]:
         """Converts the final list of SampleStates into EpisodeData list."""

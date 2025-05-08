@@ -628,9 +628,9 @@ def test_calculate_rewards_single_function(base_mdp_env, env_state_fixture):
     assert isinstance(terminal_rewards, torch.Tensor)
     # env_state_fixture has 1 sample by default
     assert terminal_rewards.shape == (len(env_state_fixture.sample_states),)
-    assert terminal_rewards.tolist() == [1.0]  # From mock_reward_function
+    assert terminal_rewards.tolist() == [1.0]
     assert 'mock_reward' in rewards_dict
-    assert rewards_dict['mock_reward'] == [1.0]
+    assert rewards_dict['mock_reward'].tolist() == [1.0]
 
 
 def test_calculate_rewards_multiple_functions(
@@ -669,8 +669,8 @@ def test_calculate_rewards_multiple_functions(
     assert terminal_rewards.tolist() == [1.5]
     assert 'mock_reward' in rewards_dict
     assert 'mock_reward_alt' in rewards_dict
-    assert rewards_dict['mock_reward'] == [1.0]
-    assert rewards_dict['mock_reward_alt'] == [0.5]
+    assert rewards_dict['mock_reward'].tolist() == [1.0]
+    assert rewards_dict['mock_reward_alt'].tolist() == [0.5]
 
 
 def test_calculate_rewards_function_error(
@@ -690,24 +690,6 @@ def test_calculate_rewards_function_error(
         terminal_rewards, rewards_dict = base_mdp_env._calculate_rewards(
             env_state_fixture.sample_states
         )
-
-
-def test_transform_rewards_fallback_on_error(base_mdp_env, caplog):
-    """Tests that reward transformation falls back to the first reward if the transform function fails."""
-    rewards_dict = {'reward1': [1.0, 2.0], 'reward2': [0.5, 0.6]}
-
-    def error_transform(r_dict):
-        raise ValueError('Transform error')
-
-    base_mdp_env.reward_transform_fn = error_transform
-
-    transformed = base_mdp_env._transform_rewards(rewards_dict)
-
-    assert 'Reward transformation failed' in caplog.text
-    assert "Falling back to using reward 'reward1'" in caplog.text
-    assert torch.equal(
-        transformed, torch.tensor([1.0, 2.0], dtype=torch.float32)
-    )
 
 
 def test_convert_to_batch_prompts(base_mdp_env, mock_tokenizer):

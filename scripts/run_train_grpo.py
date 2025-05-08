@@ -189,7 +189,7 @@ def main():
         model_config, torch_dtype
     )
 
-    # Use our own template for base model training
+    # Optional, use custom template for training with base model
     apply_custom_chat_template(tokenizer)
 
     policy_engine, *_ = deepspeed.initialize(

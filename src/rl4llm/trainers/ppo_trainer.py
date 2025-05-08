@@ -229,43 +229,43 @@ class PPOTrainer(BaseRLTrainer):
         self._configure_model(self.value_engine, self.device, 'reload')
         self._train_value_step(train_dataloader)
 
-    @torch.inference_mode()
-    def evaluate_step(self):
-        """Run the policy on evaluation dataset"""
+    # @torch.inference_mode()
+    # def evaluate_step(self):
+    #     """Run the policy on evaluation dataset"""
 
-        if self.eval_env is None:
-            return
+    #     if self.eval_env is None:
+    #         return
 
-        local_rollout_size = (
-            self.config.eval_rollout_size
-            // self.config.eval_batch_size
-            // self.dist_ops.world_size
-        )
+    #     local_rollout_size = (
+    #         self.config.eval_rollout_size
+    #         // self.config.eval_batch_size
+    #         // self.dist_ops.world_size
+    #     )
 
-        # Use greedy sampling
-        if self.is_inference_engine_enabled():
-            eval_sampling_params = {
-                'max_new_tokens': self.config.max_completion_tokens,
-                'temperature': 0.0,
-            }
-        else:
-            eval_sampling_params = {
-                'max_new_tokens': self.config.max_completion_tokens,
-                'temperature': None,
-                'top_p': None,
-                'top_k': None,
-                'repetition_penalty': None,
-                'do_sample': False,
-            }
+    #     # Use greedy sampling
+    #     if self.is_inference_engine_enabled():
+    #         eval_sampling_params = {
+    #             'max_new_tokens': self.config.max_completion_tokens,
+    #             'temperature': 0.0,
+    #         }
+    #     else:
+    #         eval_sampling_params = {
+    #             'max_new_tokens': self.config.max_completion_tokens,
+    #             'temperature': None,
+    #             'top_p': None,
+    #             'top_k': None,
+    #             'repetition_penalty': None,
+    #             'do_sample': False,
+    #         }
 
-        with self.unwrapped_model_for_generation() as policy_model:
-            for _ in range(local_rollout_size):
-                outputs = self.eval_env.rollout(
-                    policy_model, eval_sampling_params
-                )
-                self.log_batch_episodes(
-                    self._eval_phase, outputs, self.global_step
-                )
+    #     with self.unwrapped_model_for_generation() as policy_model:
+    #         for _ in range(local_rollout_size):
+    #             outputs = self.eval_env.rollout(
+    #                 policy_model, eval_sampling_params
+    #             )
+    #             self.log_batch_episodes(
+    #                 self._eval_phase, outputs, self.global_step
+    #             )
 
     @torch.inference_mode()
     def generate_experience(self) -> List[EpisodeData]:

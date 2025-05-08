@@ -1,4 +1,4 @@
-"""Script to run RL value model training."""
+"""Script using a fixed policy to collect RL rollout to train value model."""
 
 import argparse
 import os

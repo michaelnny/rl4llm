@@ -247,14 +247,6 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         pass
 
     @abstractmethod
-    @torch.inference_mode()
-    def evaluate_step(self) -> None:
-        """
-        Runs evaluation on current policy.
-        """
-        pass
-
-    @abstractmethod
     def train_step(self, train_dataloader: DataLoader) -> None:
         """
         Performs a training step using a DataLoader.
@@ -265,6 +257,52 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     def save_checkpoint(self, tag: str) -> None:
         """Saves model checkpoint"""
         pass
+
+    # @abstractmethod
+    # @torch.inference_mode()
+    # def evaluate_step(self) -> None:
+    #     """
+    #     Runs evaluation on current policy.
+    #     """
+    #     pass
+
+    @torch.inference_mode()
+    def evaluate_step(self):
+        """Run the policy on evaluation dataset"""
+
+        if self.eval_env is None:
+            return
+
+        local_rollout_size = (
+            self.config.eval_rollout_size
+            // self.config.eval_batch_size
+            // self.dist_ops.world_size
+        )
+
+        # Use greedy sampling
+        if self.is_inference_engine_enabled():
+            eval_sampling_params = {
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': 0.0,
+            }
+        else:
+            eval_sampling_params = {
+                'max_new_tokens': self.config.max_completion_tokens,
+                'temperature': None,
+                'top_p': None,
+                'top_k': None,
+                'repetition_penalty': None,
+                'do_sample': False,
+            }
+
+        with self.unwrapped_model_for_generation() as policy_model:
+            for _ in range(local_rollout_size):
+                outputs = self.eval_env.rollout(
+                    policy_model, eval_sampling_params
+                )
+                self.log_batch_episodes(
+                    self._eval_phase, outputs, self.global_step
+                )
 
     @contextmanager
     def unwrapped_model_for_generation(
@@ -608,7 +646,7 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     self.clean_up()
                 self.dist_ops.barrier()
 
-                self.logger.info('Starting train model...')
+                self.logger.info('Training model...')
                 with self.logger.timer('train_step'):
                     self._prepare_for_training()
                     self.train_step(train_dataloader)

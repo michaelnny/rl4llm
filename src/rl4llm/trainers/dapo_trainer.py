@@ -26,13 +26,13 @@ class DAPOConfig(BaseRLConfig):
         description='PPO policy loss clip epsilon lower bound',
     )
     length_max: int = Field(
-        1,
+        10240,
         ge=10,
         le=20480,
         description='Maximum completion length for length penalty reward',
     )
     length_cache: int = Field(
-        1,
+        1024,
         ge=10,
         le=10240,
         description='Maximum completion length cache buffer for length penalty reward',
@@ -80,9 +80,9 @@ class DAPOTrainer(GRPOTrainer):
         advantages = experience_batch.advantages.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
-        # advantages = advantages.float()
-        # behavior_logprobs = behavior_logprobs.float()
-        # pi_logits = pi_logits.float()
+        advantages = advantages.float()
+        behavior_logprobs = behavior_logprobs.float()
+        pi_logits = pi_logits.float()
 
         assert pi_logits.dtype == behavior_logprobs.dtype == advantages.dtype
 

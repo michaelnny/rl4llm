@@ -10,7 +10,7 @@ from rl4llm.core.base_env import EpisodeData
 from rl4llm.trainers.grpo_trainer import GRPOConfig, GRPOTrainer, TransitionData
 
 
-class ExtendedGRPOConfig(GRPOConfig):
+class ExploreGRPOConfig(GRPOConfig):
     """GRPO config instance for RL LLM"""
 
     filter_low_reward_std: Optional[bool] = Field(
@@ -86,24 +86,24 @@ class ExtendedGRPOConfig(GRPOConfig):
     random_start_top_k: Optional[int] = Field(
         0, ge=0, le=500, description='Explore start top-k'
     )
-    replace_top_k: Optional[int] = Field(
-        1,
-        ge=0,
-        le=10,
-        description='Check for special source token during token replacement',
-    )
-    replace_max_count: Optional[int] = Field(
-        0,
-        ge=0,
-        le=10,
-        description='Maximum number of continue generation by adding the special token and continue generation',
-    )
-    replace_prob: Optional[float] = Field(
-        0,
-        ge=0,
-        le=1.0,
-        description='Probability to continue generation',
-    )
+    # replace_top_k: Optional[int] = Field(
+    #     1,
+    #     ge=0,
+    #     le=10,
+    #     description='Check for special source token during token replacement',
+    # )
+    # replace_max_count: Optional[int] = Field(
+    #     0,
+    #     ge=0,
+    #     le=10,
+    #     description='Maximum number of continue generation by adding the special token and continue generation',
+    # )
+    # replace_prob: Optional[float] = Field(
+    #     0,
+    #     ge=0,
+    #     le=1.0,
+    #     description='Probability to continue generation',
+    # )
 
     @model_validator(mode='after')
     def check_discounts_and_clip_epsilons(cls, values):
@@ -114,20 +114,20 @@ class ExtendedGRPOConfig(GRPOConfig):
         return values
 
 
-class ExtendedGRPOTrainer(GRPOTrainer):
+class ExploreGRPOTrainer(GRPOTrainer):
     """Extended GRPO trainer for LLM"""
 
     def initialize_trainer(self):
         """Initialize GRPO specific settings"""
 
         # better type hint
-        self.config: ExtendedGRPOConfig = self.config
+        self.config: ExploreGRPOConfig = self.config
 
         # avoid adding group of samples with almost identical outcomes
         _dummy_rewards = torch.tensor(
             [0] * self.config.group_size, dtype=torch.float32
         )
-        _idx = math.ceil(self.config.group_size * 0.05)
+        _idx = math.ceil(self.config.group_size * 0.1)
         _dummy_rewards[:_idx] = 1.0
         self.group_reward_std_threshold = torch.std(
             _dummy_rewards, unbiased=False

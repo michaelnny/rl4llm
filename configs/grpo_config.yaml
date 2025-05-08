@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_enhanced_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -25,15 +25,15 @@ model:
   model_max_length: 4000
 
 grpo:
-  max_steps: 200
+  max_steps: 100
   train_rollout_size: 512
   num_updates: 1
   train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
   # DAPO improvements
-  clip_eps_high: 0.25                   # PPO-style policy clip higher bound
-  clip_eps_low: 0.15                     # PPO-style policy clip lower bound
+  clip_eps_high: 0.2                   # PPO-style policy clip higher bound
+  clip_eps_low: 0.2                     # PPO-style policy clip lower bound
   token_level_loss: false                # sums and then average over the entire batch instead of sequence    
   skip_group_same_rewards: false          # skip group samples with identical rewards for training
   normalize_advantages: false

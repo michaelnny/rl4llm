@@ -1,8 +1,8 @@
-# RL extended GRPO config
+# RL explore GRPO config
 seed: 117
 
 logging:
-  output_dir: "./runs/test_extended_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_explore_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -33,20 +33,18 @@ grpo:
   gamma_min: 0.998                      # discount bounds
   gamma_max: 0.9998                     
   clip_eps_max: 0.3                     # PPO-style policy clip eps bounds
-  clip_eps_min: 0.1                     
-  group_reward_zero_mean: false         # group reward is normalized to have a zero mean without standard deviation scaling
+  clip_eps_min: 0.15                     
   normalize_advantages: false
   kl_loss_coef: 0.0
   entropy_loss_coef: 0.001
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout
-  max_prompt_tokens: 512                # skip sample question that's too long
   group_size: 16                        # for each sample we generate a group of answers
   max_completion_tokens: 1024
   temperature: 0.9                      # not used
   repetition_penalty: 1.0               # not used
-  top_p: 0.95
+  top_p: 0.95                           # not used
   top_k: -1                             # -1 to disable
 
   # evaluation
@@ -57,27 +55,22 @@ grpo:
   # others
   checkpoint_interval: 100              # every N global steps
 
-  filter_low_reward_std: false          # filter out group samples with near identical rewards
-
-  # exploration generation
-  min_top_p: 0.9
-  max_top_p: 1.0
-  min_temperature: 0.6
-  max_temperature: 1.0
+  filter_low_reward_std: true          # filter out group samples with near identical rewards
 
   # control rate of explore
   explore_eps_max: 0.9                 # exploration epsilon decay
   explore_eps_min: 0.0
-  explore_percentage: 0.3                   # percentage of total training steps
+  explore_percentage: 0.5              # percentage of total training steps
+
+  # group sampling params
+  min_top_p: 0.8
+  max_top_p: 1.0
+  min_temperature: 0.6
+  max_temperature: 1.2
 
   # exploring start
-  random_start_steps: 0                     # initial start steps to do random sampling
-  random_start_top_k: 0                    # Top K tokens to random sample during initial start steps
-  
-  # continue generation with token replacement
-  replace_top_k: 0
-  replace_prob: 0.0
-  replace_max_count: 0                 # max number of retry by adding the special token and continue generation
+  random_start_steps: 5                # initial start steps to do random sampling
+  random_start_top_k: 16               # Top K tokens to random sample during initial start steps
 
 
 deepspeed:

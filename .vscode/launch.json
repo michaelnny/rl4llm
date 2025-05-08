@@ -11,9 +11,9 @@
             "module": "deepspeed.launcher.runner", // Use deepspeed launcher as module
             "args": [
                 "--num_gpus=1",
-                "scripts/run_train_extended_grpo.py",
+                "scripts/run_train_explore_grpo.py",
                 "--config-file",
-                "./configs/extended_grpo_config.yaml",
+                "./configs/explore_grpo_config.yaml",
                 "--infer-host",
                 "localhost",
                 "--infer-port",
@@ -24,8 +24,30 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                // "HTTP_PROXY": "http://127.0.0.1:1081",
-                // "HTTPS_PROXY": "http://127.0.0.1:1081",
+                "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
+                "NCCL_P2P_DISABLE": "1"
+            },
+        },
+        {
+            "name": "Debug DAPO Training",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "deepspeed.launcher.runner", // Use deepspeed launcher as module
+            "args": [
+                "--num_gpus=1",
+                "scripts/run_train_dapo_grpo.py",
+                "--config-file",
+                "./configs/dapo_grpo_config.yaml",
+                "--infer-host",
+                "localhost",
+                "--infer-port",
+                "30000",
+                "--use-infer-server",
+                "--infer-cohost-mode",
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "NCCL_P2P_DISABLE": "1"
             },
@@ -50,8 +72,6 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                // "HTTP_PROXY": "http://127.0.0.1:1081",
-                // "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "NCCL_P2P_DISABLE": "1"
             },
@@ -76,8 +96,6 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                // "HTTP_PROXY": "http://127.0.0.1:1081",
-                // "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "NCCL_P2P_DISABLE": "1"
             },
@@ -102,8 +120,6 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                // "HTTP_PROXY": "http://127.0.0.1:1081",
-                // "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
                 "NCCL_P2P_DISABLE": "1"
             },
@@ -116,8 +132,6 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                "HTTP_PROXY": "http://127.0.0.1:1081",
-                "HTTPS_PROXY": "http://127.0.0.1:1081",
                 "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
             },
         },
