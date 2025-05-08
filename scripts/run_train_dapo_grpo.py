@@ -1,34 +1,28 @@
-"""Script to run RL extended GRPO fine-tuning."""
+"""Script to run RL DAPO fine-tuning using GRPO as base trainer."""
 
 import argparse
 import os
-from functools import partial
 from typing import Any, Dict, List, Union
 
 import deepspeed
 import torch
-from transformers import PreTrainedTokenizer
 
 from rl4llm.core.base_env import BaseRewardFunction, ChatMessage
-from rl4llm.core.distributed import DistributedOps
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import ExploreSglMDPEnv, SglMDPEnv
+from rl4llm.envs import HfMDPEnv, SglMDPEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.trainers.extended_grpo_trainer import (
-    ExtendedGRPOConfig,
-    ExtendedGRPOTrainer,
-)
+from rl4llm.trainers.dapo_grpo_trainer import DAPOConfig, DAPOTrainer
 from rl4llm.utils import load_yaml_config_file, set_seed
 from rl4llm.utils.model_utils import build_policy_model_and_tokenizer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='RL extended GRPO fine-tuning')
+    parser = argparse.ArgumentParser(description='RL DAPO GRPO fine-tuning')
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/extended_grpo_config.yaml',
+        default='./configs/dapo_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -76,13 +70,29 @@ def parse_args():
     return args
 
 
-SYSTEM_PROMPT = """Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}."""
+def apply_custom_chat_template(tokenizer):
+    """This could be useful for training on base-model or for special use cases (like with special pre-filling for generation)"""
+    # Define a Jinja2 chat template string
+
+    jinja_chat_template = (
+        '{% for message in messages %}'
+        "{% if message.role == 'user' %}"
+        'Question: {{ message.content }}\n\n'
+        "Answer: Let's think step by step.\n"
+        "{% elif message.role == 'assistant' %}"
+        '{{ message.content }}'
+        "{% elif message.role == 'system' %}"
+        '{{ message.content }}\n\n'
+        '{% endif %}'
+        '{% endfor %}'
+    )
+
+    tokenizer.chat_template = jinja_chat_template
 
 
 def prepare_initial_chat_messages(item: Dict) -> Dict:
     """Build chat-style messages for initial state"""
     messages = [
-        {'role': 'system', 'content': SYSTEM_PROMPT.strip()},
         {'role': 'user', 'content': item['question'].strip()},
     ]
     return {'messages': messages}
@@ -122,60 +132,95 @@ class AccuracyRewardFunction(BaseRewardFunction):
         )
 
 
+class LengthPenaltyRewardFunction(BaseRewardFunction):
+    """Implements the soft overlong penalty reward as in DAPO"""
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        L_max: int,
+        L_cache: int,
+        name: str = 'length_penalty_reward',
+    ):
+        if L_max <= 0 or L_cache <= 0 or L_cache < L_max:
+            raise ValueError('L_max and L_cache must be positive integers')
+        super().__init__(name)
+        self.tokenizer = tokenizer
+        self.L_max = L_max
+        self.L_cache = L_cache
+        if self.L_cache <= 0:
+            # To prevent division by zero if L_cache is not positive.
+            # If L_cache is 0, the penalty becomes a hard step: 0 if <= L_max, -1 if > L_max.
+            # The paper implies L_cache > 0 for the linear ramp.
+            print(
+                'Warning: L_cache is not positive. The linear penalty ramp will not apply as intended.'
+            )
+
+    def __call__(
+        self,
+        messages: List[ChatMessage],
+        ground_truth: Union[str | float | int],
+        **kwargs: Dict[str, Any],
+    ) -> float:
+        """Implements the length penalty reward function.
+
+        Args:
+            messages (List[ChatMessage]]: Full chat history for the sample.
+            ground_truth (Union[str | float | int]): Ground truth for the problem.
+            **kwargs (Dict[str, Any]): Any additional data.
+
+        Returns:
+            float: A scalar rewards.
+        """
+        completion_text = messages[-1].content
+
+        # Get token length. Ensure this matches how your LLM counts tokens.
+        # For many Hugging Face tokenizers, `encode` returns token IDs.
+        token_ids = self.tokenizer.encode(
+            completion_text, add_special_tokens=False
+        )
+        response_length = len(token_ids)
+
+        penalty = 0.0
+        if response_length > self.L_max:
+            penalty = -1.0
+        elif self.L_cache > 0 and response_length > (self.L_max - self.L_cache):
+            # This is the linear ramp part: L_max - L_cache < |y| <= L_max
+            # R_length(y) = (L_max - L_cache - |y|) / L_cache
+            # This formula results in 0 when |y| = L_max - L_cache
+            # and -1 when |y| = L_max
+            penalty = (self.L_max - self.L_cache - response_length) / float(
+                self.L_cache
+            )
+
+        return penalty
+
+
 def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-    """Transform multiple rewards to single reward for a group of samples"""
+    """
+    Transform multiple rewards to single reward for a group of samples.
+    The paper states: "This penalty is added to the original rule-based correctness reward"
+    """
     accuracy_rewards = reward_dict['accuracy_reward']  # [group_size]
 
-    return accuracy_rewards
+    if 'length_penalty_reward' in reward_dict:
+        length_penalties = reward_dict['length_penalty_reward']  # [group_size]
+        # Ensure both are on the same device if they are tensors
+        if isinstance(accuracy_rewards, torch.Tensor) and isinstance(
+            length_penalties, torch.Tensor
+        ):
+            length_penalties = length_penalties.to(accuracy_rewards.device)
 
-
-def prepare_explore_processor_config(
-    tokenizer: PreTrainedTokenizer,
-    grpo_config: ExtendedGRPOConfig,
-    xml_format: bool = False,
-) -> Dict:
-    """Creates the exploration logits processor needed config"""
-
-    replace_source_tokens = (
-        [tokenizer.encode('</think>')[0]]
-        if xml_format
-        else [tokenizer.eos_token_id]
-    )
-
-    replace_target_tokens = [
-        tokenizer.encode(f" {kwd}")[0]
-        for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
-    ]
-    random_start_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
-
-    group_temperature = torch.linspace(
-        grpo_config.min_temperature,
-        grpo_config.max_temperature,
-        steps=grpo_config.group_size,
-    )
-
-    group_top_p = torch.linspace(
-        grpo_config.min_top_p,
-        grpo_config.max_top_p,
-        steps=grpo_config.group_size,
-    )
-
-    return {
-        'group_temperature': group_temperature,
-        'group_top_p': group_top_p,
-        'random_start_steps': grpo_config.random_start_steps,
-        'random_start_top_k': grpo_config.random_start_top_k,
-        'random_start_skip_n': random_start_skip_n,
-        'replace_source_tokens': replace_source_tokens,
-        'replace_target_tokens': replace_target_tokens,
-        'replace_top_k': grpo_config.replace_top_k,
-        'replace_max_count': grpo_config.replace_max_count,
-        'replace_prob': grpo_config.replace_prob,
-    }
+        final_reward = accuracy_rewards + length_penalties
+        # print(f"Accuracy: {accuracy_rewards.item()}, Length Penalty: {length_penalties.item()}, Final: {final_reward.item()}") # For debugging
+        return final_reward
+    else:
+        # print(f"Accuracy: {accuracy_rewards.item()}, No Length Penalty, Final: {accuracy_rewards.item()}") # For debugging
+        return accuracy_rewards
 
 
 def main():
-    """Starts RL GRPO training loop."""
+    """Starts RL DAPO GRPO training loop."""
     if not torch.cuda.is_available():
         raise RuntimeError('This script requires supports CUDA.')
 
@@ -192,7 +237,7 @@ def main():
     model_config = job_config['model']
     model_name = model_config['pretrained_model']
     deepspeed_config = job_config['deepspeed']
-    grpo_config = ExtendedGRPOConfig(**job_config['grpo'])
+    dapo_config = DAPOConfig(**job_config['dapo_grpo'])
 
     set_seed(seed)
 
@@ -202,28 +247,30 @@ def main():
     world_size = int(os.environ['WORLD_SIZE'])
     bf16_enabled = deepspeed_config.get('bf16', {}).get('enabled')
     torch_dtype = torch.bfloat16 if bf16_enabled else torch.float16
-
     deepspeed_config['train_micro_batch_size_per_gpu'] = (
-        grpo_config.train_micro_batch_size
+        dapo_config.train_micro_batch_size
     )
-    deepspeed_config['train_batch_size'] = grpo_config.train_batch_size
+    deepspeed_config['train_batch_size'] = dapo_config.train_batch_size
 
+    # Load and pre-processing dataset
     train_dataset, eval_dataset = load_multiple_datasets(
         datasets_config['names']
     )
-
     if max_train_samples is not None and max_train_samples < len(train_dataset):
         train_dataset = train_dataset.shuffle().select(range(max_train_samples))
-
     if max_test_samples is not None and max_test_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
+    train_dataset = train_dataset.map(prepare_initial_chat_messages)
+    eval_dataset = eval_dataset.map(prepare_initial_chat_messages)
+
+    # Create models
     policy_model, tokenizer = build_policy_model_and_tokenizer(
         model_config, torch_dtype
     )
 
-    train_dataset = train_dataset.map(prepare_initial_chat_messages)
-    eval_dataset = eval_dataset.map(prepare_initial_chat_messages)
+    # Use our own template for base model training
+    apply_custom_chat_template(tokenizer)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
@@ -233,7 +280,7 @@ def main():
 
     # Create reference model and optionally use deepspeed sharding
     ref_model = None
-    if grpo_config.kl_loss_coef > 0:
+    if dapo_config.kl_loss_coef > 0:
         ref_model, _ = build_policy_model_and_tokenizer(
             model_config, torch_dtype
         )
@@ -257,39 +304,45 @@ def main():
 
     # Create envs
     env_args = {
-        'reward_functions': [AccuracyRewardFunction()],
+        'reward_functions': [
+            AccuracyRewardFunction(),
+            LengthPenaltyRewardFunction(
+                tokenizer=tokenizer,
+                L_max=dapo_config.length_max,
+                L_cache=dapo_config.length_cache,
+            ),
+        ],
         'reward_transform_fn': reward_transform_fn,
         'tokenizer': tokenizer,
         'rank': local_rank,
         'world_size': world_size,
     }
 
-    explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
     inference_client = None
+    env_cls = HfMDPEnv
+    if args.use_infer_server:
+        inference_client = SGLangClient(
+            host=args.infer_host,
+            port=args.infer_port,
+            cohost_mode=args.infer_cohost_mode,
+        )
+        env_cls = SglMDPEnv
 
-    inference_client = SGLangClient(
-        host=args.infer_host,
-        port=args.infer_port,
-        cohost_mode=args.infer_cohost_mode,
-    )
-
-    train_env = ExploreSglMDPEnv(
+    train_env = env_cls(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
-        group_size=grpo_config.group_size,
+        group_size=dapo_config.group_size,
         **env_args,
-        **explore_env_args,
     )
-
-    eval_env = SglMDPEnv(
+    eval_env = env_cls(
         dataset=eval_dataset,
-        batch_size=grpo_config.eval_batch_size,
+        batch_size=dapo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
         **env_args,
     )
 
-    trainer = ExtendedGRPOTrainer(
-        config=grpo_config,
+    trainer = DAPOTrainer(
+        config=dapo_config,
         tokenizer=tokenizer,
         policy_engine=policy_engine,
         log_config=log_config,

@@ -4,10 +4,12 @@ This project provides a light-weight, research-friendly framework to fine-tune L
 
 ## Key Features
 
-- **Customizable Environments**: Easily generate samples for various tasks.
+- **Customizable Environments**: Support for various tasks (tools, multi-turn).
 - **Efficient Inference**: Support for fast SGLang inference and native HuggingFace transformer model generation.
 - **Scalable Training**: Uses DeepSpeed for optimized model training.
 - **Clean Architecture**: Clearly separates low-level operations from algorithmic logic.
+
+The goal is to make small-scale RL for LLM fine-tuning accessible to everyone: bring your own dataset, reward function, then start run experiments.
 
 > [!IMPORTANT]
 > Currently only tested on single-node setups with a tiny size LLM. Need support/volunteers to help with testing and improvements.
@@ -15,10 +17,11 @@ This project provides a light-weight, research-friendly framework to fine-tune L
 
 ## Supported RL Algorithms
 
-| Algorithm | Key Features |
-|-----------|--------------|
-| **Proximal Policy Optimization (PPO)** | - SGLang for high-performance inference<br>- DeepSpeed for training<br>- Value Model bootstrapping |
-| **Group Relative Policy Optimization (GRPO)** | - SGLang for high-performance inference<br>- DeepSpeed for training |
+| Algorithm | Paper | Key Features |
+|-----------|--------------|--------------|
+| **Proximal Policy Optimization (PPO)** | - https://arxiv.org/abs/1707.06347 <br>- https://arxiv.org/abs/2203.02155 | - SGLang for high-performance inference <br>- DeepSpeed for training <br>- Value Model bootstrapping |
+| **Group Relative Policy Optimization (GRPO)** | - https://arxiv.org/abs/2402.03300 | - SGLang for high-performance inference <br>- DeepSpeed for training |
+| **Decoupled Clip and Dynamic sAmpling Policy Optimization (DAPO)** | - https://arxiv.org/abs/2503.14476 | - SGLang for high-performance inference <br>- DeepSpeed for training <br>- Based on GRPO |
 
 
 ## Framework Overview

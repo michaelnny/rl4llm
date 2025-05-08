@@ -58,7 +58,7 @@ PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 
 
 
 
-## Example 3:  PPO Fine-Tuning on GSM8K with Two-Stage Training with SGLang inference on a single server
+## Example 3:  PPO Fine-Tuning on GSM8K Training with SGLang inference on a single server
 
 **Stage 1: Bootstrap Value Model**
 
@@ -91,7 +91,7 @@ PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 
 
 **Stage 2: PPO Training**
 
-Begin PPO training using the value model checkpoint from Stage 1.
+Adapt the checkpoint files path inside the yaml config file for the value model. Then begin PPO training using the value model checkpoint from Stage 1.
 
 **Step 1**: Start inference server:
 ```bash

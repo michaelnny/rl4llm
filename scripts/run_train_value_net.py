@@ -81,6 +81,8 @@ def prepare_initial_chat_messages(item: Dict) -> Dict:
 
 
 class AccuracyRewardFunction(BaseRewardFunction):
+    """Implements the accuracy reward for math problems"""
+
     def __init__(self, name='accuracy_reward'):
         super().__init__(name)
 
@@ -89,7 +91,7 @@ class AccuracyRewardFunction(BaseRewardFunction):
         messages: List[ChatMessage],
         ground_truth: Union[str | float | int],
         **kwargs: Dict[str, Any],
-    ) -> List[float]:
+    ) -> float:
         """Implements the reward function.
 
         Args:
@@ -98,7 +100,7 @@ class AccuracyRewardFunction(BaseRewardFunction):
             **kwargs (Dict[str, Any]): Any additional data.
 
         Returns:
-            List[float]: A list of scalar rewards.
+            float: A scalar rewards.
         """
 
         # get last completion

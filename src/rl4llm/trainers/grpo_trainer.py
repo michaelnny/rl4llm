@@ -19,25 +19,11 @@ from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 class GRPOConfig(BaseRLConfig):
     """GRPO config instance for RL LLM"""
 
-    token_level_loss: bool = Field(
-        False,
-        description='Token-Level Policy Gradient Loss, from DAPO paper: https://arxiv.org/abs/2503.14476',
-    )
-    skip_group_same_rewards: bool = Field(
-        False,
-        description='Filter out group samples with the rewards equal to 1 and 0 for training, similar to DAPO paper: https://arxiv.org/abs/2503.14476',
-    )
-    clip_eps_high: float = Field(
+    clip_eps: float = Field(
         0.2,
         ge=0.0,
         le=1.0,
-        description='PPO policy loss clip epsilon higher bound',
-    )
-    clip_eps_low: float = Field(
-        0.2,
-        ge=0.0,
-        le=1.0,
-        description='PPO policy loss clip epsilon lower bound',
+        description='PPO policy loss clip epsilon higher/lower bound',
     )
     num_updates: int = Field(
         1,
@@ -106,10 +92,6 @@ class GRPOTrainer(BaseRLTrainer):
 
     GRPO paper:
     https://arxiv.org/abs/2402.03300
-
-    DAPO paper:
-    https://arxiv.org/abs/2503.14476
-
     """
 
     def __init__(
@@ -152,15 +134,7 @@ class GRPOTrainer(BaseRLTrainer):
 
     def initialize_trainer(self):
         """Initialize GRPO specific settings"""
-        # avoid adding group of samples with almost identical outcomes
-        _dummy_rewards = torch.tensor(
-            [0] * self.config.group_size, dtype=torch.float32
-        )
-        _idx = math.ceil(self.config.group_size * 0.05)
-        _dummy_rewards[:_idx] = 1.0
-        self.group_reward_std_threshold = torch.std(
-            _dummy_rewards, unbiased=False
-        )
+        pass
 
     def save_checkpoint(self, tag: str) -> None:
         """Save trained model in HF format"""
@@ -228,9 +202,9 @@ class GRPOTrainer(BaseRLTrainer):
         advantages = experience_batch.advantages.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
-        # advantages = advantages.float()
-        # behavior_logprobs = behavior_logprobs.float()
-        # pi_logits = pi_logits.float()
+        advantages = advantages.float()
+        behavior_logprobs = behavior_logprobs.float()
+        pi_logits = pi_logits.float()
 
         assert pi_logits.dtype == behavior_logprobs.dtype == advantages.dtype
 
@@ -241,7 +215,7 @@ class GRPOTrainer(BaseRLTrainer):
         pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
         ratio = torch.exp(pi_logprobs - behavior_logprobs)
         clipped_ratio = ratio.clamp(
-            1 - self.config.clip_eps_low, 1 + self.config.clip_eps_high
+            1 - self.config.clip_eps, 1 + self.config.clip_eps
         )
         pg_losses1 = ratio * advantages.detach()
         pg_losses2 = clipped_ratio * advantages.detach()
@@ -260,11 +234,8 @@ class GRPOTrainer(BaseRLTrainer):
                 torch.lt(pg_losses2, pg_losses1), loss_mask, dim=1
             ).mean()
 
-        if self.config.token_level_loss:
-            pg_loss = self.masked_sum(pg_losses, loss_mask) / loss_mask.sum()
-        else:
-            # First average over the sequence length, then average over the batch
-            pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
+        # First average over the sequence length, then average over the batch
+        pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
 
         # Compute entropy for the policy
         entropies = self.compute_entropy_from_logits(
@@ -435,23 +406,6 @@ class GRPOTrainer(BaseRLTrainer):
             return False
         if len(episodes) < self.config.group_size:
             return False
-
-        if self.config.skip_group_same_rewards:
-            # Discard samples with rewards of low std, as they leads to zero advantages -> zero gradients
-            terminal_rewards = torch.concat(
-                [torch.tensor([ep.terminal_reward]) for ep in episodes]
-            ).to(self.torch_dtype)
-            if (
-                torch.std(terminal_rewards, unbiased=False)
-                <= self.group_reward_std_threshold
-            ):
-                self.logger.debug(
-                    f"Skipping group samples with rewards of low std, minimum group reward std: {self.group_reward_std_threshold:.4f}"
-                )
-                self.logger.log_scalar(
-                    'other/skipped_samples', len(terminal_rewards)
-                )
-                return False
 
         return True
 
@@ -632,17 +586,17 @@ class GRPOTrainer(BaseRLTrainer):
             [item.advantages for item in batch],
             batch_first=True,
             padding_value=0.0,
-        ).to(self.torch_dtype)
+        ).float()
         batch_pi_logprobs = pad_sequence(
             [item.pi_logprobs for item in batch],
             batch_first=True,
             padding_value=0.0,
-        ).to(self.torch_dtype)
+        ).float()
         batch_ref_logprobs = pad_sequence(
             [item.ref_logprobs for item in batch],
             batch_first=True,
             padding_value=0.0,
-        ).to(self.torch_dtype)
+        ).float()
 
         return TransitionData(
             states=batch_states,
