@@ -181,8 +181,9 @@ class DAPOTrainer(GRPOTrainer):
             self.logger.debug(
                 f"Skipping group samples with identical rewards: {identical_value_str}"
             )
+            # tips: using metric name ends with '_count' will automatically sums over
             self.logger.log_scalar(
-                'other/skipped_samples', terminal_rewards.numel()
+                'other/skipped_samples_count', terminal_rewards.numel()
             )
             return False
 

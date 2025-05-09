@@ -175,7 +175,9 @@ class PPOTrainer(BaseRLTrainer):
         self.dist_ops.barrier()
         self.logger.info('Checkpoint saved.')
 
-    def build_train_loader(self, experience: List[EpisodeData]) -> DataLoader:
+    def create_training_dataloader(
+        self, experience: List[EpisodeData]
+    ) -> DataLoader:
         """Creates a train loader using the collected experiences.
 
         Args:
@@ -217,7 +219,7 @@ class PPOTrainer(BaseRLTrainer):
 
         return data_loader
 
-    def train_step(self, train_dataloader: DataLoader):
+    def update_models(self, train_dataloader: DataLoader):
         """Performs the policy and value models update using collected rollout."""
 
         self._configure_model(self.value_engine, 'cpu', 'offload')
@@ -229,46 +231,8 @@ class PPOTrainer(BaseRLTrainer):
         self._configure_model(self.value_engine, self.device, 'reload')
         self._train_value_step(train_dataloader)
 
-    # @torch.inference_mode()
-    # def evaluate_step(self):
-    #     """Run the policy on evaluation dataset"""
-
-    #     if self.eval_env is None:
-    #         return
-
-    #     local_rollout_size = (
-    #         self.config.eval_rollout_size
-    #         // self.config.eval_batch_size
-    #         // self.dist_ops.world_size
-    #     )
-
-    #     # Use greedy sampling
-    #     if self.is_inference_engine_enabled():
-    #         eval_sampling_params = {
-    #             'max_new_tokens': self.config.max_completion_tokens,
-    #             'temperature': 0.0,
-    #         }
-    #     else:
-    #         eval_sampling_params = {
-    #             'max_new_tokens': self.config.max_completion_tokens,
-    #             'temperature': None,
-    #             'top_p': None,
-    #             'top_k': None,
-    #             'repetition_penalty': None,
-    #             'do_sample': False,
-    #         }
-
-    #     with self.unwrapped_model_for_generation() as policy_model:
-    #         for _ in range(local_rollout_size):
-    #             outputs = self.eval_env.rollout(
-    #                 policy_model, eval_sampling_params
-    #             )
-    #             self.log_batch_episodes(
-    #                 self._eval_phase, outputs, self.global_step
-    #             )
-
     @torch.inference_mode()
-    def generate_experience(self) -> List[EpisodeData]:
+    def collect_training_experience(self) -> List[EpisodeData]:
         """Generates samples using the current policy."""
 
         if self.is_inference_engine_enabled():
@@ -305,11 +269,8 @@ class PPOTrainer(BaseRLTrainer):
                 if outputs:
                     collected_episodes.extend(outputs)
                     local_count += len(outputs)
-                    self.log_batch_episodes(
-                        self._train_phase, outputs, self.global_step
-                    )
                     step_count += 1
-                    # Log progress every 50 valid steps or at completion
+                    # Log progress every 50 valid steps
                     if (
                         step_count % 50 == 0
                         or local_count >= local_rollout_size
@@ -319,6 +280,9 @@ class PPOTrainer(BaseRLTrainer):
                             f"Progress: {progress:.2f}% ({local_count}/{local_rollout_size} episodes collected)"
                         )
 
+        self.log_episodes(
+            self._train_phase, collected_episodes, self.global_step
+        )
         return collected_episodes
 
     @torch.no_grad()

@@ -25,7 +25,7 @@ model:
   model_max_length: 4000
 
 dapo_grpo:
-  max_steps: 200
+  max_steps: 100
   train_rollout_size: 512
   num_updates: 1
   train_micro_batch_size: 4
@@ -34,11 +34,11 @@ dapo_grpo:
   # DAPO improvements
   clip_eps_high: 0.28                   # PPO-style policy clip higher bound
   clip_eps_low: 0.2                     # PPO-style policy clip lower bound
-  length_max: 1024                      # Maximum completion length for length penalty reward
-  length_cache: 128                     # Maximum completion length cache buffer for length penalty reward
+  length_max: 950                      # Maximum completion length for length penalty reward
+  length_cache: 100                     # Maximum completion length cache buffer for length penalty reward
   normalize_advantages: false
   kl_loss_coef: 0.0
-  entropy_loss_coef: 0.001
+  entropy_loss_coef: 0.0
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout

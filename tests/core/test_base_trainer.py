@@ -115,16 +115,16 @@ def trainer_base(
         def initialize_trainer(self):
             pass
 
-        def generate_experience(self):
+        def collect_training_experience(self):
             return ['exp']
 
-        def build_train_loader(self, experience):
+        def create_training_dataloader(self, experience):
             return ['batch']
 
         def evaluate_step(self):
             pass
 
-        def train_step(self, train_dataloader):
+        def update_models(self, train_dataloader):
             pass
 
         def can_offload_state(self, model):
@@ -179,13 +179,13 @@ def mock_model():
     return model
 
 
-def test_log_batch_episodes_invalid_phase(trainer_base):
+def test_episodes_invalid_phase(trainer_base):
     """Raises error on invalid log phase."""
     with pytest.raises(ValueError):
-        trainer_base.log_batch_episodes('invalid_phase', [], 0)
+        trainer_base.log_episodes('invalid_phase', [], 0)
 
 
-def test_log_batch_episodes_valid(trainer_base):
+def test_episodes_valid(trainer_base):
     """Logs sample and scalar for valid training episode."""
 
     episode = EpisodeData(
@@ -202,7 +202,7 @@ def test_log_batch_episodes_valid(trainer_base):
         reward_dict={'reward1': 1.5},
         ground_truth='123',
     )
-    trainer_base.log_batch_episodes(TRAIN_PHASE, [episode], 1)
+    trainer_base.log_episodes(TRAIN_PHASE, [episode], 1)
     trainer_base.logger.log_sample.assert_called()
     trainer_base.logger.log_scalar.assert_called()
 
@@ -348,15 +348,15 @@ def test_prepare_for_training(trainer_base, mock_model):
     trainer_base.clean_up.assert_called_once()
 
 
-def test_sync_reference_model_no_ref_model(trainer_base):
+def test_synchronize_reference_model_no_ref_model(trainer_base):
     """Tests that sync does nothing if reference_model is None."""
     trainer_base.reference_model = None
-    trainer_base.sync_reference_model()
+    trainer_base.synchronize_reference_model()
 
     assert trainer_base.ref_update_count == 0
 
 
-def test_sync_reference_model_standard_pytorch(trainer_base):
+def test_synchronize_reference_model_standard_pytorch(trainer_base):
     """Tests syncing to a standard PyTorch reference model."""
     mock_ref_model = MagicMock()
     # Configure .to() to return the mock itself
@@ -365,7 +365,7 @@ def test_sync_reference_model_standard_pytorch(trainer_base):
     trainer_base.reference_model = mock_ref_model
     initial_count = trainer_base.ref_update_count
 
-    trainer_base.sync_reference_model()
+    trainer_base.synchronize_reference_model()
 
     # The policy_engine is likely a DeepSpeedEngine in the fixture,
     # so the unwrapped model is policy_engine.module
@@ -380,7 +380,7 @@ def test_sync_reference_model_standard_pytorch(trainer_base):
     trainer_base.dist_ops.barrier.assert_called()
 
 
-def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
+def test_synchronize_reference_model_deepspeed_no_zero3(trainer_base, mocker):
     """Tests syncing to a DeepSpeedEngine reference model without Zero-3."""
     # Use spec for isinstance check to potentially work without patching isinstance
     mock_ref_model = mocker.MagicMock(spec=DeepSpeedEngine)
@@ -395,7 +395,7 @@ def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
 
     initial_count = trainer_base.ref_update_count
 
-    trainer_base.sync_reference_model()
+    trainer_base.synchronize_reference_model()
 
     expected_state_dict = trainer_base.policy_engine.module.state_dict()
 
@@ -411,7 +411,7 @@ def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
 
 
 @patch('deepspeed.zero.GatheredParameters', autospec=True)
-def test_sync_reference_model_deepspeed_zero3_master(
+def test_synchronize_reference_model_deepspeed_zero3_master(
     mock_gathered_params, trainer_base, mocker
 ):
     """Tests syncing to a DeepSpeedEngine reference model with Zero-3 on master."""
@@ -432,7 +432,7 @@ def test_sync_reference_model_deepspeed_zero3_master(
 
     initial_count = trainer_base.ref_update_count
 
-    trainer_base.sync_reference_model()
+    trainer_base.synchronize_reference_model()
 
     expected_state_dict = trainer_base.policy_engine.module.state_dict()
 
@@ -450,7 +450,7 @@ def test_sync_reference_model_deepspeed_zero3_master(
     trainer_base.dist_ops.barrier.assert_called()
 
 
-def test_sync_policy_model_inference_disabled(trainer_base, mocker):
+def test_synchronize_policy_model_inference_disabled(trainer_base, mocker):
     """Tests that sync does nothing if inference engine is disabled."""
     mocker.patch(
         'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
@@ -458,14 +458,16 @@ def test_sync_policy_model_inference_disabled(trainer_base, mocker):
     )
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
-    trainer_base.sync_policy_model()
+    trainer_base.synchronize_policy_model()
 
     trainer_base.save_weights_hf_pretrained.assert_not_called()
     trainer_base.inference_client.update_weights_from_file.assert_not_called()
 
 
 @patch('tempfile.TemporaryDirectory')
-def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
+def test_synchronize_policy_model_success_master(
+    mock_tempdir, trainer_base, mocker
+):
     """Tests successful policy sync on the master rank."""
     mocker.patch(
         'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
@@ -477,7 +479,7 @@ def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
     trainer_base.dist_ops.is_master = True
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
-    trainer_base.sync_policy_model()
+    trainer_base.synchronize_policy_model()
 
     trainer_base.save_weights_hf_pretrained.assert_called_once_with(
         trainer_base.policy_engine, '/fake/temp/path'
@@ -490,7 +492,7 @@ def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
 
 
 @patch('tempfile.TemporaryDirectory')
-def test_sync_policy_model_success_non_master(
+def test_synchronize_policy_model_success_non_master(
     mock_tempdir, trainer_base, mocker
 ):
     """Tests successful policy sync on a non-master rank."""
@@ -503,7 +505,7 @@ def test_sync_policy_model_success_non_master(
     trainer_base.dist_ops.is_master = False  # Set to non-master
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
-    trainer_base.sync_policy_model()
+    trainer_base.synchronize_policy_model()
 
     trainer_base.save_weights_hf_pretrained.assert_called_once_with(
         trainer_base.policy_engine, '/fake/temp/path'

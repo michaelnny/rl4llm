@@ -31,14 +31,10 @@ grpo:
   train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
-  # DAPO improvements
-  clip_eps_high: 0.2                   # PPO-style policy clip higher bound
-  clip_eps_low: 0.2                     # PPO-style policy clip lower bound
-  token_level_loss: false                # sums and then average over the entire batch instead of sequence    
-  skip_group_same_rewards: false          # skip group samples with identical rewards for training
+  clip_eps: 0.2                         # PPO-style policy clip higher bound
   normalize_advantages: false
   kl_loss_coef: 0.0
-  entropy_loss_coef: 0.01
+  entropy_loss_coef: 0.0
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout

@@ -233,21 +233,21 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         pass
 
     @abstractmethod
-    def generate_experience(self) -> List[Any]:
+    def collect_training_experience(self) -> List[EpisodeData]:
         """
-        Collects experience (trajectories, rollouts) from the environment.
+        Collects experience (EpisodeData) from the training environment.
         """
         pass
 
     @abstractmethod
-    def build_train_loader(self, experience: List[Any]) -> DataLoader:
+    def create_training_dataloader(self, experience: List[Any]) -> DataLoader:
         """
         Converts collected experience into training samples.
         """
         pass
 
     @abstractmethod
-    def train_step(self, train_dataloader: DataLoader) -> None:
+    def update_models(self, train_dataloader: DataLoader) -> None:
         """
         Performs a training step using a DataLoader.
         """
@@ -257,14 +257,6 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
     def save_checkpoint(self, tag: str) -> None:
         """Saves model checkpoint"""
         pass
-
-    # @abstractmethod
-    # @torch.inference_mode()
-    # def evaluate_step(self) -> None:
-    #     """
-    #     Runs evaluation on current policy.
-    #     """
-    #     pass
 
     @torch.inference_mode()
     def evaluate_step(self):
@@ -295,14 +287,15 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 'do_sample': False,
             }
 
+        eval_episodes = []
         with self.unwrapped_model_for_generation() as policy_model:
             for _ in range(local_rollout_size):
                 outputs = self.eval_env.rollout(
                     policy_model, eval_sampling_params
                 )
-                self.log_batch_episodes(
-                    self._eval_phase, outputs, self.global_step
-                )
+                eval_episodes.extend(outputs)
+
+        self.log_episodes(self._eval_phase, eval_episodes, self.global_step)
 
     @contextmanager
     def unwrapped_model_for_generation(
@@ -319,7 +312,7 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
         self.clean_up()
 
     def post_step(self):
-        """Post ops after a global step is done"""
+        """Post operations after a training iteration is done"""
 
         self.logger.aggregate_and_log(self.global_step)
         self.global_step += 1
@@ -427,7 +420,7 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                 f"Failed to release inference engine memory, error: {str(e)}"
             )
 
-    def sync_reference_model(self):
+    def synchronize_reference_model(self):
         """Copies current policy weights to reference model."""
         if not self.reference_model:
             return
@@ -467,7 +460,7 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
         self.logger.info('Reference model sync process finished.')
 
-    def sync_policy_model(self) -> None:
+    def synchronize_policy_model(self) -> None:
         """Update policy model weights with the inference engine."""
 
         if not self.is_inference_engine_enabled():
@@ -557,23 +550,29 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             and self.inference_client.is_cohost_mode()
         )
 
-    def log_batch_episodes(
+    def log_episodes(
         self,
         phase: str,
         samples: List[EpisodeData],
         step: int,
+        reward_key: Optional[str] = 'accuracy_reward',
+        max_value: Optional[float] = 1.0,
     ) -> None:
         """
-        Logs batch samples and token statistics.
+        Logs samples and statistics on iteration ends.
         """
         if phase not in self._log_phases:
             raise ValueError(
                 f"Invalid phase: {phase}, expected one of {self._log_phases}"
             )
+        if not reward_key:
+            raise ValueError(f"Invalid reward key: {reward_key}")
+        if not samples:
+            return
 
         metric_key = f"objective/{phase}"
         token_metric_key = f"tokens/{phase}"
-
+        correct_count = 0
         for ep in samples:
             # Save data to external file
             data_to_log = {
@@ -588,9 +587,14 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             }
             self.logger.log_sample(phase, data_to_log, step)
 
+            if reward_key in ep.reward_dict:
+                if ep.reward_dict[reward_key] == max_value:
+                    correct_count += 1
+
             # Logging metrics
             for k, v in ep.reward_dict.items():
                 self.logger.log_scalar(f"{metric_key}/{k}", v)
+
             self.logger.log_scalar(
                 f"{token_metric_key}/completion_length",
                 ep.completion_length,
@@ -598,6 +602,9 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             self.logger.log_scalar(
                 f"{token_metric_key}/prompt_length", ep.prompt_length
             )
+
+        accuracy_rate = correct_count / len(samples)
+        self.logger.log_scalar(f"{metric_key}/accuracy_rate", accuracy_rate)
 
     def train(self, job_config: Dict):
         """
@@ -620,42 +627,46 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
 
         if self.config.eval_interval > 0 and self.eval_env:
             self.logger.info('Running initial evaluation before training...')
-            with self.logger.timer('evaluate_step'):
+            with self.logger.timer('evaluation_step'):
                 self._prepare_for_generation()
                 self.evaluate_step()
                 self.clean_up()
             self.dist_ops.barrier()
 
         while self.global_step < self.config.max_steps:
-            with self.logger.timer('global_step'):
-                self.logger.info(
-                    f'Step {self.global_step}: Running rollout on training environment...'
-                )
-                with self.logger.timer('generate_experience'):
-                    self._prepare_for_generation()
-                    local_experience = self.generate_experience()
-                    self.clean_up()
-                self.dist_ops.barrier()
-
-                self.logger.info(
-                    'Preprocessing collected experience for training...'
-                )
-                with self.logger.timer('pre_processing'):
-                    self._prepare_for_pre_processing()
-                    train_dataloader = self.build_train_loader(local_experience)
-                    self.clean_up()
-                self.dist_ops.barrier()
-
-                self.logger.info('Training model...')
+            with self.logger.timer('training_iteration'):
+                # Unified timer for the core training phase (experience generation, preprocessing, model update)
                 with self.logger.timer('train_step'):
-                    self._prepare_for_training()
-                    self.train_step(train_dataloader)
-                    self.clean_up()
-                self.dist_ops.barrier()
+                    self.logger.info(
+                        f'Step {self.global_step}: Running rollout on training environment...'
+                    )
+                    with self.logger.timer('train_step/experience_generation'):
+                        self._prepare_for_generation()
+                        local_experience = self.collect_training_experience()
+                        self.clean_up()
+                    self.dist_ops.barrier()
+
+                    self.logger.info(
+                        'Preprocessing collected experience for training...'
+                    )
+                    with self.logger.timer('train_step/data_preprocessing'):
+                        self._prepare_for_pre_processing()
+                        train_dataloader = self.create_training_dataloader(
+                            local_experience
+                        )
+                        self.clean_up()
+                    self.dist_ops.barrier()
+
+                    self.logger.info('Updating models...')
+                    with self.logger.timer('train_step/model_update'):
+                        self._prepare_for_training()
+                        self.update_models(train_dataloader)
+                        self.clean_up()
+                    self.dist_ops.barrier()
 
                 self.logger.info('Synchronizing policy model...')
-                with self.logger.timer('sync_policy_model'):
-                    self.sync_policy_model()
+                with self.logger.timer('sync/policy_model'):
+                    self.synchronize_policy_model()
                 self.dist_ops.barrier()
 
                 if (
@@ -666,8 +677,8 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     == 0
                 ):
                     self.logger.info('Synchronizing reference model...')
-                    with self.logger.timer('sync_reference_model'):
-                        self.sync_reference_model()
+                    with self.logger.timer('sync/reference_model'):
+                        self.synchronize_reference_model()
                     self.dist_ops.barrier()
 
                 if (
@@ -676,7 +687,7 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     == 0
                 ):
                     self.logger.info('Saving checkpoint ...')
-                    with self.logger.timer('checkpoint'):
+                    with self.logger.timer('checkpointing'):
                         self.save_checkpoint(self.global_step + 1)
 
                 if (
@@ -685,7 +696,7 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     and (self.global_step + 1) % self.config.eval_interval == 0
                 ):
                     self.logger.info('Running evaluation ...')
-                    with self.logger.timer('evaluate_step'):
+                    with self.logger.timer('evaluation_step'):
                         self._prepare_for_generation()
                         self.evaluate_step()
                         self.clean_up()
@@ -694,7 +705,7 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             del local_experience, train_dataloader
             self.clean_up()
 
-            self.post_step()
+            self.post_step()  # important to aggregate and log metrics
 
         self.logger.info('Training loop complete. Finalizing...')
         self.on_exit()

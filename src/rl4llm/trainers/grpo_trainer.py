@@ -145,7 +145,7 @@ class GRPOTrainer(BaseRLTrainer):
         self.dist_ops.barrier()
         self.logger.info('Checkpoint saved.')
 
-    def build_train_loader(
+    def create_training_dataloader(
         self, experience: List[List[EpisodeData]]
     ) -> DataLoader:
         """Creates a train loader using the collected experiences.
@@ -273,7 +273,7 @@ class GRPOTrainer(BaseRLTrainer):
 
         return loss
 
-    def train_step(self, train_dataloader: DataLoader):
+    def update_models(self, train_dataloader: DataLoader):
         """Performs the policy update using collected rollout."""
 
         for _ in range(self.config.num_updates):
@@ -304,46 +304,8 @@ class GRPOTrainer(BaseRLTrainer):
                         self.policy_engine.get_lr()[0],
                     )
 
-    # @torch.inference_mode()
-    # def evaluate_step(self):
-    #     """Run the policy on evaluation dataset"""
-
-    #     if self.eval_env is None:
-    #         return
-
-    #     local_rollout_size = (
-    #         self.config.eval_rollout_size
-    #         // self.config.eval_batch_size
-    #         // self.dist_ops.world_size
-    #     )
-
-    #     # Use greedy sampling
-    #     if self.is_inference_engine_enabled():
-    #         eval_sampling_params = {
-    #             'max_new_tokens': self.config.max_completion_tokens,
-    #             'temperature': 0.0,
-    #         }
-    #     else:
-    #         eval_sampling_params = {
-    #             'max_new_tokens': self.config.max_completion_tokens,
-    #             'temperature': None,
-    #             'top_p': None,
-    #             'top_k': None,
-    #             'repetition_penalty': None,
-    #             'do_sample': False,
-    #         }
-
-    #     with self.unwrapped_model_for_generation() as policy_model:
-    #         for _ in range(local_rollout_size):
-    #             outputs = self.eval_env.rollout(
-    #                 policy_model, eval_sampling_params
-    #             )
-    #             self.log_batch_episodes(
-    #                 self._eval_phase, outputs, self.global_step
-    #             )
-
     @torch.inference_mode()
-    def generate_experience(self) -> List[EpisodeData]:
+    def collect_training_experience(self) -> List[EpisodeData]:
         """Generates samples using the current policy."""
 
         if self.is_inference_engine_enabled():
@@ -380,15 +342,12 @@ class GRPOTrainer(BaseRLTrainer):
 
                 if self._check_group_episodes(outputs):
                     # IMPORTANT: do not flatten the episodes yet
-                    # as we need to normalize the rewards on group level
+                    # as we need to normalize the rewards on group level in GRPO
                     collected_episodes.extend([outputs])
                     local_count += len(outputs)
                     step_count += 1
-                    self.log_batch_episodes(
-                        self._train_phase, outputs, self.global_step
-                    )
 
-                    # Log progress every 50 valid steps or at completion
+                    # Log progress every 50 valid steps
                     if (
                         step_count % 50 == 0
                         or local_count >= local_rollout_size
@@ -397,6 +356,12 @@ class GRPOTrainer(BaseRLTrainer):
                         self.logger.info(
                             f"Progress: {progress:.2f}% ({local_count}/{local_rollout_size} episodes collected)"
                         )
+
+        # Logging expect a list of episodes
+        _flatted = []
+        for eps in collected_episodes:
+            _flatted.extend(eps)
+        self.log_episodes(self._train_phase, _flatted, self.global_step)
 
         return collected_episodes
 

@@ -36,7 +36,7 @@ grpo:
   clip_eps_min: 0.15                     
   normalize_advantages: false
   kl_loss_coef: 0.0
-  entropy_loss_coef: 0.001
+  entropy_loss_coef: 0.0
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout
@@ -48,14 +48,14 @@ grpo:
   top_k: -1                             # -1 to disable
 
   # evaluation
-  eval_rollout_size: 512    
+  eval_rollout_size: 1024    
   eval_batch_size: 64
   eval_interval: 20                     # every N global steps
 
   # others
   checkpoint_interval: 100              # every N global steps
 
-  filter_low_reward_std: true          # filter out group samples with near identical rewards
+  filter_low_reward_std: false          # filter out group samples with near identical rewards
 
   # control rate of explore
   explore_eps_max: 0.9                 # exploration epsilon decay

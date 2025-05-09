@@ -145,7 +145,7 @@ class ExploreGRPOTrainer(GRPOTrainer):
         self._decay_clip_epsilon()
 
     @torch.inference_mode()
-    def generate_experience(self) -> List[EpisodeData]:
+    def collect_training_experience(self) -> List[EpisodeData]:
         """Generates samples using the current policy."""
 
         if self.is_inference_engine_enabled():
@@ -192,9 +192,11 @@ class ExploreGRPOTrainer(GRPOTrainer):
                     collected_episodes.extend([outputs])
                     local_count += len(outputs)
 
-                    self.log_batch_episodes(
-                        self._train_phase, outputs, self.global_step
-                    )
+        # Logging expect a list of episodes
+        _flatted = []
+        for eps in collected_episodes:
+            _flatted.extend(eps)
+        self.log_episodes(self._train_phase, _flatted, self.global_step)
 
         return collected_episodes
 

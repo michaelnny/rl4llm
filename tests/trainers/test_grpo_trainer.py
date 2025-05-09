@@ -436,7 +436,7 @@ def test_compute_loss_with_advantage_norm(
 
 
 @patch('rl4llm.trainers.grpo_trainer.DataLoader')  # Mock DataLoader
-def test_build_train_loader(
+def test_create_training_dataloader(
     mock_dataloader_cls: MagicMock,
     grpo_trainer: GRPOTrainer,
     sample_group_episodes: List[EpisodeData],
@@ -475,7 +475,7 @@ def test_build_train_loader(
     ) as mock_convert:
         # Provide a list containing one group
         experience = [sample_group_episodes]
-        dataloader = grpo_trainer.build_train_loader(experience)
+        dataloader = grpo_trainer.create_training_dataloader(experience)
 
         mock_convert.assert_called_once_with(sample_group_episodes)
         mock_dataloader_cls.assert_called_once()
@@ -496,7 +496,7 @@ def test_build_train_loader(
         )  # It returns the mocked instance
 
 
-def test_build_train_loader_empty_experience(grpo_trainer: GRPOTrainer):
+def test_create_training_dataloader_empty_experience(grpo_trainer: GRPOTrainer):
     """Tests that building a loader from empty experience raises ValueError."""
     # Mock conversion to return empty list
     with patch.object(
@@ -504,7 +504,7 @@ def test_build_train_loader_empty_experience(grpo_trainer: GRPOTrainer):
     ):
         # Mock _check_group_episodes to allow processing empty groups initially
         with pytest.raises(ValueError, match='No samples for training'):
-            grpo_trainer.build_train_loader([[]])  # Empty group list
+            grpo_trainer.create_training_dataloader([[]])  # Empty group list
 
 
 @patch(
