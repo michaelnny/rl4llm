@@ -583,6 +583,7 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
                     msg.model_dump() for msg in ep.chat_history
                 ],  # make it compatible for json dump
                 'terminal_reward': ep.terminal_reward,
+                'env_steps': ep.env_steps,
                 **ep.reward_dict,
             }
             self.logger.log_sample(phase, data_to_log, step)
@@ -595,6 +596,17 @@ class BaseRLTrainer(ABC, TrainingMixin, DeepSpeedUtilsMixin):
             for k, v in ep.reward_dict.items():
                 self.logger.log_scalar(f"{metric_key}/{k}", v)
 
+            num_tool_calls = sum(
+                [1 if msg.role == 'tool' else 0 for msg in ep.chat_history]
+            )
+            self.logger.log_scalar(
+                f"{metric_key}/env_steps",
+                ep.env_steps,
+            )
+            self.logger.log_scalar(
+                f"{metric_key}/tool_calls",
+                num_tool_calls,
+            )
             self.logger.log_scalar(
                 f"{token_metric_key}/completion_length",
                 ep.completion_length,

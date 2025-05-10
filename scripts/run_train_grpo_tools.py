@@ -127,14 +127,20 @@ class ToolUsageRewardFunction(BaseRewardFunction):
     def __init__(
         self,
         name: str = 'tool_usage_reward',
-        cost_per_tool_call: float = -0.05,
-        execution_error_penalty: float = -0.2,
-        successful_code_execution_bonus: float = 0.1,
+        cost_per_tool_call: float = 0.0,
+        tool_call_error_penalty: float = -0.1,
+        tool_call_success_bonus: float = 0.25,
     ):
+        # Ensure error penalty is negative, cost is small (can be 0 or slightly neg/pos), success is positive
+        if not (tool_call_error_penalty < 0):
+            raise ValueError('tool_call_error_penalty should be negative.')
+        if not (tool_call_success_bonus > 0):
+            raise ValueError('tool_call_success_bonus should be positive.')
+
         super().__init__(name)
         self.cost_per_tool_call = cost_per_tool_call
-        self.execution_error_penalty = execution_error_penalty
-        self.successful_code_execution_bonus = successful_code_execution_bonus
+        self.tool_call_error_penalty = tool_call_error_penalty
+        self.tool_call_success_bonus = tool_call_success_bonus
 
         # Simplified regex: looks for the standard "Error: " prefix.
         # Adding '^' ensures it checks the beginning of the string.
@@ -162,9 +168,9 @@ class ToolUsageRewardFunction(BaseRewardFunction):
 
                 # 2. Check for any execution error
                 if self._is_execution_error(msg.content):
-                    episode_tool_reward += self.execution_error_penalty
+                    episode_tool_reward += self.tool_call_error_penalty
                 else:
-                    episode_tool_reward += self.successful_code_execution_bonus
+                    episode_tool_reward += self.tool_call_success_bonus
 
         return episode_tool_reward
 
@@ -215,6 +221,16 @@ def main():
     model_name = model_config['pretrained_model']
     deepspeed_config = job_config['deepspeed']
     grpo_config = GRPOConfig(**job_config['grpo'])
+
+    env_tool_config = job_config['env_tool_config']
+    env_max_steps = env_tool_config.get('env_max_steps', 5)
+    cost_per_tool_call = env_tool_config.get('cost_per_tool_call', -0.05)
+    tool_call_error_penalty = env_tool_config.get(
+        'tool_call_error_penalty', -0.2
+    )
+    tool_call_success_bonus = env_tool_config.get(
+        'tool_call_success_bonus', 0.1
+    )
 
     set_seed(seed)
 
@@ -280,13 +296,17 @@ def main():
     env_args = {
         'reward_functions': [
             AccuracyRewardFunction(),
-            ToolUsageRewardFunction(),
+            ToolUsageRewardFunction(
+                cost_per_tool_call=cost_per_tool_call,
+                tool_call_error_penalty=tool_call_error_penalty,
+                tool_call_success_bonus=tool_call_success_bonus,
+            ),
         ],
         'reward_transform_fn': reward_transform_fn,
         'tokenizer': tokenizer,
         'rank': local_rank,
         'world_size': world_size,
-        'max_steps': 3,
+        'max_steps': env_max_steps,
     }
 
     inference_client = SGLangClient(

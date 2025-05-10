@@ -197,6 +197,7 @@ def test_episodes_valid(trainer_base):
             ChatMessage(role='user', content='Test'),
             ChatMessage(role='assistant', content='Response here'),
         ],
+        env_steps=1,
         prompt_length=1,
         completion_length=2,
         reward_dict={'reward1': 1.5},

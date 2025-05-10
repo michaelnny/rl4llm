@@ -7,16 +7,17 @@ bitsandbytes==0.45.4
 flash_attn==2.7.4.post1
 datasets==3.5.0
 deepspeed==0.16.7
-transformers==4.50.3
+transformers==4.51.3
 triton==3.2.0
 torch==2.5.1
 
-# # SGLang inference
-# sglang==0.4.5.post3
-# sgl-kernel==0.0.9
-# flashinfer-python==0.2.3
+# SGLang inference
+sglang==0.4.6.post3
+sgl-kernel==0.1.2
+flashinfer-python==0.2.5
+torch-memory-saver==0.0.5
 
-# uUtils
+# Utils
 pyarrow==19.0.1
 pydantic==2.11.2
 packaging==24.2

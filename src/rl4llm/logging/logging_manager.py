@@ -27,9 +27,11 @@ from rl4llm.logging.handlers import (
 
 
 def setup_logger(
-    rank: int = 0, log_level: int = logging.INFO
+    rank: int = 0,
+    log_level: Optional[int] = logging.INFO,
+    logger_name: Optional[str] = LOGGER_NAME,
 ) -> logging.Logger:
-    logger = logging.getLogger(LOGGER_NAME)
+    logger = logging.getLogger(logger_name)
     # Prevent messages from bubbling to the root logger
     logger.propagate = False
 
@@ -37,9 +39,15 @@ def setup_logger(
     logger.handlers.clear()
 
     handler = logging.StreamHandler()
+
+    # format: [05-11 15:30:00] [R0 INFO my_module.py:15] This is an info message.
+    # log_format = f"[%(asctime)s] [R{rank} %(levelname)s %(filename)s:%(lineno)d] %(message)s"
+
+    # format: [2025-05-11 15:30:00] [Rank0 INFO] This is an info message.
+    log_format = f"[%(asctime)s] [Rank{rank} %(levelname)s] %(message)s"
     formatter = logging.Formatter(
-        f"[rank {rank}] - %(asctime)s - %(levelname)s - %(message)s",
-        datefmt='%Y-%m-%d %H:%M:%S',
+        log_format,
+        datefmt='%y-%m-%d %H:%M:%S',  # '%m-%d %H:%M:%S' for Shortened date-time format
     )
     handler.setFormatter(formatter)
     logger.addHandler(handler)

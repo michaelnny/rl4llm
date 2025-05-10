@@ -4,12 +4,12 @@ This project provides a light-weight, research-friendly framework to fine-tune L
 
 ## Key Features
 
-- **Customizable Environments**: Support for various tasks (tools, multi-turn).
+- **Customizable Environments**: Support for various tasks (tool-use, multi-turn).
 - **Efficient Inference**: Support for fast SGLang inference and native HuggingFace transformer model generation.
 - **Scalable Training**: Uses DeepSpeed for optimized model training.
 - **Clean Architecture**: Clearly separates low-level operations from algorithmic logic.
 
-The goal is to make small-scale RL for LLM fine-tuning accessible to everyone: bring your own dataset, reward function, then start run experiments.
+The goal is to make small-scale RL for LLM fine-tuning accessible to everyone: bring your own dataset, define reward function, then start run experiments.
 
 > [!IMPORTANT]
 > Currently only tested on single-node setups with a tiny size LLM. Need support/volunteers to help with testing and improvements.
@@ -133,7 +133,7 @@ train_env = SglMDPEnv(
 
 ### Creating Custom Environments
 
-It's very easy to build a custom environment, for example, multi-step scenarios or custom sampling with logits processors. All we need to do is extend the `BaseMDPEnv` class and implement the `rollout` logic.
+It's very easy to build a custom environment, for example, multi-step scenarios or custom sampling with logits processors. All we need to do is extend the `BaseMDPEnv` class and implement the `_run_interaction_loop` logic.
 
 ```python
 
@@ -153,12 +153,13 @@ class MyCustomEnv(BaseMDPEnv):
 ```
 
 > [!TIP]
-> Checking the examples at `rl4llm.envs.explore_env.py` for a comprehensive example of custom environment using custom logits processor with SGLang inference engine.
+> Checking the examples at `rl4llm.envs.sgl_explore_env.py` for example of custom environment using custom logits processor with SGLang inference engine.
+> Checking the examples at `rl4llm.envs.sgl_tool_env.py` for example of custom environment with basic tool-use with SGLang inference engine.
 
 
 ## Fast Generation with SGLang
 
-Launch an efficient inference server to accelerate sample generation. You can either run the SGLang engine on the same server, or on separate servers. We have a simplified FastAPI server adapted from the original SGLang HTTP server located at `rl4llm.inference.sgl_http_server`, which you can launch with the custom script `rl4llm.inference.launch_sgl_server`.
+Launch an efficient inference server to speedup sample generation. You can either run the SGLang engine on the same server, or on separate servers. We have a simplified FastAPI server adapted from the original SGLang HTTP server located at `rl4llm.inference.sgl_http_server`, which you can launch with the custom script `rl4llm.inference.launch_sgl_server`.
 
 > [!NOTE]
 > If running SGLang inference and deepspeed training on the same server with co-hosting mode, make sure use the `--enable-memory-saver`, this requires install the `pip install torch-memory-saver`.
@@ -174,13 +175,13 @@ Track performance easily using the built-in logging manager. It supports:
 - Basic resource monitoring (CPU/GPU)
 - Logging samples to files and metrics to Tensorboard
 
-More example of the logging manager can be found at the `BaseTrainer.train` and `BaseTrainer.log_batch_episodes`.
+More example of the logging manager can be found at the `BaseTrainer.train` and `BaseTrainer.log_episodes`.
 
 
 ## Know Issues
 
 - When running SGLang with `--enable-memory-saver`, sometimes the inference server will hangs when we try to release/resume the memory. The most likely cause is due to CUDA OOM, try reduce the memory fraction or using more powerful GPU.
-
+- Logging with wandb is not fully tested, may not work out of the box.
 
 ## License
 

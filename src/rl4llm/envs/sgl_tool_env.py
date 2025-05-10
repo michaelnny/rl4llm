@@ -14,7 +14,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from rl4llm.constants import LOGGER_NAME
 from rl4llm.core.base_env import (
     BaseMDPEnv,
     ChatMessage,
@@ -29,12 +28,10 @@ from .secure_code_executor import (
     execute_python_code_securely,
 )
 
-logger = logging.getLogger(LOGGER_NAME)
-
 
 # --- Code Execution Tool ---
 def execute_python_code(code_string: str) -> str:
-    """Runs python code in non-secure way"""
+    """Runs python code in a non-secure way"""
     output_buffer = io.StringIO()
     error_buffer = io.StringIO()
     global_vars = {}
@@ -47,19 +44,34 @@ def execute_python_code(code_string: str) -> str:
             compiled_code = compile(code_string, '<string>', 'exec')
             exec(compiled_code, global_vars, local_vars)
         stdout = output_buffer.getvalue().strip()
-        stderr = error_buffer.getvalue().strip()
+        stderr = (
+            error_buffer.getvalue().strip()
+        )  # This is stderr from the *executed code*
         result_parts = []
         if stdout:
             result_parts.append(f"Output:\n{stdout}")
         if stderr:
-            result_parts.append(f"Errors:\n{stderr}")
-        if not stdout and not stderr:
+
+            result_parts.append(
+                f"Errors from executed code's stderr:\n{stderr}"
+            )
+
+        if (
+            not result_parts and not stderr
+        ):  # if no stdout and no explicit stderr messages
             result_parts.append(
                 'Code executed successfully with no explicit print output.'
             )
         return '\n'.join(result_parts)
+
     except Exception:
-        return f"Execution Failed:\n{traceback.format_exc()}"
+        full_traceback = traceback.format_exc()
+        lines = full_traceback.strip().split('\n')
+        # Take the last 2 lines (or fewer if the traceback is shorter)
+        # Typically, the last line is the error message itself (e.g., "ZeroDivisionError: division by zero")
+        # And the second to last line is the line of code causing the error (e.g., "File \"<string>\", line 1, in <module>")
+        short_traceback = '\n'.join(lines[-2:])
+        return f"Execution Failed:\n{short_traceback}"
     finally:
         output_buffer.close()
         error_buffer.close()
@@ -155,7 +167,7 @@ class SglToolMDPEnv(BaseMDPEnv):
 
         # For now, let's assume no specific files are pre-populated for this example,
         # but the LLM is told to expect them if the task implies it.
-        logger.debug('Created execution workspace: {workspace_path}')
+        self.logger.debug('Created execution workspace: {workspace_path}')
         return workspace_path
 
     def _cleanup_execution_workspace(self, workspace_path: str):
@@ -167,13 +179,13 @@ class SglToolMDPEnv(BaseMDPEnv):
         ):  # Safety check
             try:
                 shutil.rmtree(workspace_path)
-                logger.debug(f"Cleaned up workspace: {workspace_path}")
+                self.logger.debug(f"Cleaned up workspace: {workspace_path}")
             except Exception as e:
-                logger.error(
+                self.logger.error(
                     f"Failed to cleanup workspace {workspace_path}: {e}"
                 )
         else:
-            logger.warning(
+            self.logger.warning(
                 f"Skipped cleanup for invalid workspace path: {workspace_path}"
             )
 
@@ -212,7 +224,7 @@ class SglToolMDPEnv(BaseMDPEnv):
 
             if not json_to_parse:
                 error_detail = 'Payload was empty.'
-                logger.warning('Empty tool call payload found.')
+                self.logger.warning('Empty tool call payload found.')
                 parsed_tool_attempts.append(
                     {
                         'error': 'EmptyPayload',
@@ -226,14 +238,14 @@ class SglToolMDPEnv(BaseMDPEnv):
                 tool_call_data = json.loads(json_to_parse)
             except json.JSONDecodeError as e:
                 error_detail = f"JSONDecodeError: {e}."
-                logger.warning(
+                self.logger.warning(
                     f"Failed to parse tool call JSON: '{json_to_parse}'. Error: {e}"
                 )
                 parsed_tool_attempts.append(
                     {
                         'error': 'JSONDecodeError',
                         'raw_payload': json_to_parse,
-                        'message': f"{malformed_call_error_prefix}{error_detail} Attempted payload: '{json_to_parse[:100]}'",
+                        'message': f"{malformed_call_error_prefix}{error_detail}'",
                     }
                 )
                 continue
@@ -245,7 +257,7 @@ class SglToolMDPEnv(BaseMDPEnv):
                 or not isinstance(tool_call_data['arguments'], dict)
             ):
                 error_detail = 'Malformed structure (missing name/arguments or arguments not a dict).'
-                logger.warning(
+                self.logger.warning(
                     f"Malformed tool call JSON structure after parsing: '{json_to_parse}' resulted in: {tool_call_data}"
                 )
                 parsed_tool_attempts.append(
@@ -253,7 +265,7 @@ class SglToolMDPEnv(BaseMDPEnv):
                         'error': 'MalformedStructure',
                         'raw_payload': json_to_parse,
                         'parsed_data': tool_call_data,  # Could be useful for debugging
-                        'message': f"{malformed_call_error_prefix}{error_detail} Parsed: {str(tool_call_data)[:100]}",
+                        'message': f"{malformed_call_error_prefix}{error_detail}",
                     }
                 )
                 continue
@@ -275,7 +287,7 @@ class SglToolMDPEnv(BaseMDPEnv):
                 return f"{tool_error_prefix}'code' string argument missing or invalid for code_execution_tool."
 
             try:
-                logger.debug(
+                self.logger.debug(
                     f"Executing code tool with code:\n{code_to_execute[:200]}..."
                 )
                 result_str = execute_python_code(
@@ -295,7 +307,7 @@ class SglToolMDPEnv(BaseMDPEnv):
                 # If execute_python_code might return other non-prefixed errors, add checks here.
 
             except Exception as e:
-                logger.error(
+                self.logger.error(
                     f"Exception during code execution call: {e}", exc_info=True
                 )
                 return (
@@ -305,7 +317,7 @@ class SglToolMDPEnv(BaseMDPEnv):
             # If we reach here, result_str is assumed to be successful output
             return result_str
 
-        logger.warning(f"Attempted to call unknown tool: {tool_name}")
+        self.logger.warning(f"Attempted to call unknown tool: {tool_name}")
         return f"{tool_error_prefix}Unknown tool '{tool_name}'."
 
     @torch.inference_mode()
@@ -381,7 +393,7 @@ class SglToolMDPEnv(BaseMDPEnv):
                 elif isinstance(llm_output_obj, str):
                     llm_response_text = llm_output_obj.strip()
                 else:
-                    logger.error(
+                    self.logger.error(
                         f"Unexpected LLM output format: {llm_output_obj}"
                     )
                     llm_response_text = '<error receiving LLM response>'
@@ -405,7 +417,7 @@ class SglToolMDPEnv(BaseMDPEnv):
                         if 'error' in tool_attempt_info:
                             # This was a malformed/invalid tool call attempt
                             tool_response_content = tool_attempt_info['message']
-                            logger.warning(
+                            self.logger.warning(
                                 f"Handling malformed tool call: {tool_response_content}"
                             )
                         else:

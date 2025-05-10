@@ -40,7 +40,10 @@ def mock_tokenizer():
         return tokenizer.word_map[word]
 
     def _mock_apply_chat_template_v2(
-        messages, tokenize=True, add_generation_prompt=False
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        tools=None,
     ):
         tokens = []
         full_text = ''

@@ -74,15 +74,11 @@ def parse_args():
     return args
 
 
-SYSTEM_PROMPT = """Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}."""
-
-
 def prepare_initial_chat_messages(item: Dict) -> Dict:
     """Build chat-style messages for initial state"""
     messages = [
         # {"role": "system", "content": SYSTEM_PROMPT.strip()},
         {'role': 'user', 'content': item['question'].strip()},
-        {'role': 'assistant', 'content': "Let's think step by step"},
     ]
     return {'messages': messages}
 
@@ -227,7 +223,13 @@ def main():
             ref_model.eval()
 
     # Create envs
-    env_reward_functions = [AccuracyRewardFunction()]
+    env_args = {
+        'reward_functions': [AccuracyRewardFunction()],
+        'reward_transform_fn': reward_transform_fn,
+        'tokenizer': tokenizer,
+        'rank': local_rank,
+        'world_size': world_size,
+    }
     inference_client = None
     env_cls = HfMDPEnv
     if args.use_infer_server:
@@ -242,19 +244,13 @@ def main():
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
         group_size=ppo_config.group_size,
-        tokenizer=tokenizer,
-        reward_functions=env_reward_functions,
-        rank=local_rank,
-        world_size=world_size,
+        **env_args,
     )
     eval_env = env_cls(
         dataset=eval_dataset,
         batch_size=ppo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
-        tokenizer=tokenizer,
-        reward_functions=env_reward_functions,
-        rank=local_rank,
-        world_size=world_size,
+        **env_args,
     )
 
     trainer = PPOTrainer(

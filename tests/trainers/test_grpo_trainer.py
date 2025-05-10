@@ -146,6 +146,7 @@ def sample_episode_data(
         chat_history=[],
         reward_dict={'reward1': 1.5},
         ground_truth='123',
+        env_steps=1,
         prompt_length=len(prompt_tokens),
         completion_length=len(completion_tokens),
     )

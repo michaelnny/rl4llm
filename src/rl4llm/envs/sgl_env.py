@@ -43,9 +43,6 @@ class SglMDPEnv(BaseMDPEnv):
         Returns:
             EnvState: The final state after one generation step, with updated SampleStates.
         """
-        logger.debug(
-            'Running single-step interaction loop with SampleState design.'
-        )
 
         # 1. Prepare inputs for the LLM from the list of SampleStates
         # Convert message histories to prompt strings

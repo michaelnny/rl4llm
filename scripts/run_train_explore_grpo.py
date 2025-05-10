@@ -226,7 +226,8 @@ def main():
     )
 
     # Optional, use custom template for training with base model
-    apply_custom_chat_template(tokenizer)
+    if not model_name.lower().endswith('instruct'):
+        apply_custom_chat_template(tokenizer)
 
     train_dataset = train_dataset.map(prepare_initial_chat_messages)
     eval_dataset = eval_dataset.map(prepare_initial_chat_messages)

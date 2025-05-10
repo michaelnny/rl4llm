@@ -270,7 +270,8 @@ def main():
     )
 
     # Optional, use custom template for training with base model
-    apply_custom_chat_template(tokenizer)
+    if not model_name.lower().endswith('instruct'):
+        apply_custom_chat_template(tokenizer)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,

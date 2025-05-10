@@ -9,12 +9,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from rl4llm.constants import LOGGER_NAME
 from rl4llm.core.base_env import BaseMDPEnv, ChatMessage
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.envs.sgl_env import EnvState
 from rl4llm.generation.sgl_explore_procesor import SglExploreLogitProcessor
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(LOGGER_NAME)
 
 
 # --- Using SGLang inference client ---
@@ -82,9 +83,6 @@ class ExploreSglMDPEnv(BaseMDPEnv):
         Returns:
             EnvState: The final state after one generation step, with updated SampleStates.
         """
-        logger.debug(
-            f"Rank {self.rank}: Running single-step interaction loop with SampleState design."
-        )
 
         # 1. Prepare inputs for the LLM from the list of SampleStates
         # Convert message histories to prompt strings

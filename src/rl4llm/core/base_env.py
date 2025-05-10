@@ -24,11 +24,8 @@ from pydantic import BaseModel, Field, constr, field_validator, model_validator
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer
 
-from rl4llm.constants import LOGGER_NAME
+from rl4llm.logging.logging_manager import setup_logger
 from rl4llm.utils.dataset_utils import shard_dataset
-
-logger = logging.getLogger(LOGGER_NAME)
-
 
 RewardTransform: TypeAlias = Optional[
     Callable[[Dict[str, List[float]]], torch.Tensor]
@@ -68,6 +65,9 @@ class EpisodeData(BaseModel):
     reward_dict: Dict[str, float] = Field(..., description='Individual rewards')
     chat_history: List[ChatMessage] = Field(
         ..., description='Full chat history'
+    )
+    env_steps: int = Field(
+        ..., description='Number of turns as in LLM generation'
     )
     prompt_length: int = Field(..., description='Initial prompt token size')
     completion_length: int = Field(
@@ -273,7 +273,10 @@ class BaseMDPEnv(ABC):
         self.sharded_dataset = shard_dataset(
             dataset, self.world_size, self.rank
         )
-        logger.info(
+
+        self.logger = setup_logger(rank=self.rank, logger_name='RL_MDP_ENV')
+
+        self.logger.info(
             f"Env - Rank {self.rank} has {len(self.sharded_dataset)} samples"
         )
 
@@ -298,7 +301,7 @@ class BaseMDPEnv(ABC):
         """Configures the tokenizer."""
         self.tokenizer.padding_side = 'left'
         if self.tokenizer.pad_token is None:
-            logger.warning('Tokenizer missing pad token; using eos_token.')
+            self.logger.warning('Tokenizer missing pad token; using eos_token.')
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         if self.tokenizer.pad_token_id is None:
@@ -332,7 +335,7 @@ class BaseMDPEnv(ABC):
         try:
             return next(self.dataset_iterator)
         except StopIteration:
-            logger.info(
+            self.logger.info(
                 f"Rank {self.rank}: Dataset exhausted. Resetting DataLoader."
             )
             self.epoch += 1
@@ -340,7 +343,9 @@ class BaseMDPEnv(ABC):
             try:
                 return next(self.dataset_iterator)
             except StopIteration:
-                logger.error(f"Rank {self.rank}: DataLoader empty after reset.")
+                self.logger.error(
+                    f"Rank {self.rank}: DataLoader empty after reset."
+                )
                 return None
 
     def _reset(self):
@@ -348,7 +353,7 @@ class BaseMDPEnv(ABC):
         try:
             raw_batch = self._get_next_batch()
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 f"Rank {self.rank}: Error getting batch", exc_info=True
             )
             raise e
@@ -357,7 +362,7 @@ class BaseMDPEnv(ABC):
         try:
             return self._prepare_initial_state(raw_batch)
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 f"Rank {self.rank}: Error preparing initial state from batch",
                 exc_info=True,
             )
@@ -367,7 +372,7 @@ class BaseMDPEnv(ABC):
         """Prepares EnvState containing a list of SampleState objects."""
         num_samples = len(raw_batch['ground_truth'])
         if num_samples == 0:
-            logger.warning(f"Rank {self.rank}: Empty batch received.")
+            self.logger.warning(f"Rank {self.rank}: Empty batch received.")
             return self._reset()  # Or handle appropriately
 
         sample_states = []
@@ -398,13 +403,13 @@ class BaseMDPEnv(ABC):
                     sample_states.append(sample_state)
 
             except Exception as e:
-                logger.error(
+                self.logger.error(
                     f"Failed to parse messages or create SampleState for raw sample {i}: {raw_batch['messages'][i]}. Error: {e}"
                 )
                 continue  # Or raise an exception ???
 
         if not sample_states:
-            logger.error(
+            self.logger.error(
                 f"Rank {self.rank}: No valid SampleStates created from the batch."
             )
             return None  # Or raise an exception ???
@@ -473,7 +478,7 @@ class BaseMDPEnv(ABC):
 
         num_samples = len(env_state.sample_states)
         if batch_terminal_rewards_tensor.size(0) != num_samples:
-            logger.error(
+            self.logger.error(
                 f"Mismatch between number of sample states ({num_samples}) "
                 f"and number of terminal rewards ({batch_terminal_rewards_tensor.size(0)}). "
                 'Skipping episode conversion for this batch.'
@@ -608,6 +613,7 @@ class BaseMDPEnv(ABC):
                     reward_dict=reward_dict,
                     ground_truth=sample_state.ground_truth,
                     chat_history=sample_state.messages,
+                    env_steps=sample_state.current_step,
                     prompt_length=prompt_token_len,
                     completion_length=completion_len,
                 )
@@ -647,7 +653,7 @@ class BaseMDPEnv(ABC):
                         merged_messages[-1] = ChatMessage(
                             role='assistant', content=merged_content
                         )
-                        logger.debug(
+                        self.logger.debug(
                             f"Merged assistant turn: '{last_merged_obj.content}' + '{current_msg_obj.content}' -> '{merged_content}'"
                         )
                     else:
@@ -727,7 +733,7 @@ class BaseMDPEnv(ABC):
         # 1. Get initial state for the batch
         initial_state = self._reset()
         if initial_state is None:
-            logger.warning(
+            self.logger.warning(
                 f"Rank {self.rank}: Reset returned None, likely end of dataset."
             )
             return []
@@ -749,7 +755,7 @@ class BaseMDPEnv(ABC):
                     f"Rank {self.rank}: Error during _run_interaction_loop: expect all messages ends with assistant's turn"
                 )
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 f"Rank {self.rank}: Error during _run_interaction_loop: {e}",
                 exc_info=True,
             )
@@ -759,14 +765,14 @@ class BaseMDPEnv(ABC):
         try:
             episodes = self._convert_to_episodes(final_state)
         except Exception as e:
-            logger.error(
+            self.logger.error(
                 f"Rank {self.rank}: Error during _convert_to_episodes: {e}",
                 exc_info=True,
             )
             # Decide how to handle: return empty, partial, or raise?
             return []
 
-        logger.debug(
+        self.logger.debug(
             f"Rank {self.rank}: Rollout generated {len(episodes)} episodes."
         )
         return episodes

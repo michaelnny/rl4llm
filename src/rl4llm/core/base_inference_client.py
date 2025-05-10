@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 
 class InferenceClientError(Exception):
     """Custom exception for Inference client errors."""
@@ -57,7 +59,7 @@ class InferenceClient(ABC):
         self._release_called = False
         self._resume_called = False
 
-        self.logger = logging.getLogger(__name__)
+        self.logger = logger
 
         self.session = requests.Session()
         if self.api_key:

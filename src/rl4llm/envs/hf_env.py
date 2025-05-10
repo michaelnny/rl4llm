@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from transformers import LogitsProcessorList, PreTrainedModel
 
+from rl4llm.constants import LOGGER_NAME
 from rl4llm.core.base_env import (
     BaseMDPEnv,
     ChatMessage,
@@ -14,7 +15,7 @@ from rl4llm.core.base_env import (
     SampleState,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(LOGGER_NAME)
 
 
 class HfMDPEnv(BaseMDPEnv):
@@ -46,9 +47,6 @@ class HfMDPEnv(BaseMDPEnv):
         Returns:
             EnvState: The final state after generation, with updated SampleStates.
         """
-        logger.debug(
-            f"Rank {self.rank}: Running default single-step interaction loop."
-        )
 
         # 1. Prepare inputs for the LLM
         # Convert initial messages to token IDs with padding

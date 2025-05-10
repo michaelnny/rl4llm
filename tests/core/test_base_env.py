@@ -66,6 +66,7 @@ def mock_tokenizer():
         tokenize=True,
         add_generation_prompt=False,
         continue_final_message=False,
+        tools=None,
     ):
         if tokenize:
             output_tokens = []
@@ -210,6 +211,9 @@ def mock_dataset(sample_raw_data):
 
 # Minimal concrete subclass for testing BaseMDPEnv methods
 class MockMDPEnv(BaseMDPEnv):
+
+    logger = MagicMock()
+
     def _run_interaction_loop(
         self,
         env_state: EnvState,
@@ -299,6 +303,7 @@ def test_episode_data_creation():
         ground_truth='test',
         reward_dict={'r1': 1.0},
         chat_history=[ChatMessage(role='user', content='hi')],
+        env_steps=1,
         prompt_length=1,
         completion_length=1,
     )
@@ -316,6 +321,7 @@ def test_episode_data_shape_mismatch():
             ground_truth='test',
             reward_dict={'r1': 1.0},
             chat_history=[ChatMessage(role='user', content='hi')],
+            env_steps=1,
             prompt_length=1,
             completion_length=1,
         )
@@ -443,6 +449,7 @@ def test_base_mdp_env_init_tokenizer_setup(mock_dataset, mock_reward_function):
         group_size=1,
         max_steps=1,
     )
+
     assert env.tokenizer.pad_token == '<eos>'  # Falls back to eos
     assert env.pad_token_id == 1  # Falls back to eos_token_id
 
@@ -737,12 +744,14 @@ def test_convert_to_batch_prompts(base_mdp_env, mock_tokenizer):
     mock_tokenizer.apply_chat_template.assert_any_call(
         expected_msg_1,
         tokenize=False,
+        tools=None,
         add_generation_prompt=True,
         continue_final_message=False,
     )
     mock_tokenizer.apply_chat_template.assert_any_call(
         expected_msg_2,
         tokenize=False,
+        tools=None,
         add_generation_prompt=False,
         continue_final_message=True,
     )
