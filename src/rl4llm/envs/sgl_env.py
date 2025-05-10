@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
+from rl4llm.constants import LOGGER_NAME
 from rl4llm.core.base_env import (
     BaseMDPEnv,
     ChatMessage,
@@ -14,7 +15,7 @@ from rl4llm.core.base_env import (
 )
 from rl4llm.core.base_inference_client import InferenceClient
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(LOGGER_NAME)
 
 
 class SglMDPEnv(BaseMDPEnv):
@@ -43,7 +44,7 @@ class SglMDPEnv(BaseMDPEnv):
             EnvState: The final state after one generation step, with updated SampleStates.
         """
         logger.debug(
-            f"Rank {self.rank}: Running single-step interaction loop with SampleState design."
+            'Running single-step interaction loop with SampleState design.'
         )
 
         # 1. Prepare inputs for the LLM from the list of SampleStates

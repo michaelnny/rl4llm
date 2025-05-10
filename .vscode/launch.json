@@ -29,6 +29,30 @@
             },
         },
         {
+            "name": "Debug GRPO with tools Training",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "deepspeed.launcher.runner", // Use deepspeed launcher as module
+            "args": [
+                "--num_gpus=1",
+                "scripts/run_train_grpo_tools.py",
+                "--config-file",
+                "./configs/grpo_tools_config.yaml",
+                "--infer-host",
+                "localhost",
+                "--infer-port",
+                "30000",
+                "--use-infer-server",
+                "--infer-cohost-mode",
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceRoot}:${workspaceRoot}/src",
+                "NCCL_P2P_DISABLE": "1"
+            },
+        },
+        {
             "name": "Debug DAPO Training",
             "type": "debugpy",
             "request": "launch",

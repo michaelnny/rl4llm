@@ -38,8 +38,6 @@ RewardTransform: TypeAlias = Optional[
 class ChatMessage(BaseModel):
     role: str = Field(..., description='Role of the chat turn')
     content: str = Field(..., description='Chat content')
-    # tool_calls: Optional[List[Dict]] = None
-    # tool_call_id: Optional[str] = None
 
     @model_validator(mode='after')
     def check_role(cls, model_instance):
@@ -204,6 +202,7 @@ class BaseMDPEnv(ABC):
         batch_size: int,
         group_size: int,
         max_steps: int = 1,
+        tool_schemas: List[Dict] = None,
         rank: Optional[int] = 0,
         world_size: Optional[int] = 1,
         seed: Optional[int] = 42,
@@ -261,6 +260,7 @@ class BaseMDPEnv(ABC):
         self.batch_size = batch_size
         self.group_size = group_size
         self.max_steps = max_steps  # Store max interaction steps
+        self.tool_schemas = tool_schemas  # Tools schema for passing to the LLM
         self.rank = rank
         self.world_size = world_size
         self.seed = seed + rank
@@ -308,7 +308,9 @@ class BaseMDPEnv(ABC):
         # Ensure chat template exists
         try:
             _ = self.tokenizer.apply_chat_template(
-                [{'role': 'user', 'content': 'test'}], tokenize=False
+                [{'role': 'user', 'content': 'test'}],
+                tools=self.tool_schemas,
+                tokenize=False,
             )
         except Exception as e:
             raise ValueError(
@@ -492,12 +494,14 @@ class BaseMDPEnv(ABC):
                     raise RuntimeError('Sample resulted in messages length < 2')
 
                 messages_as_dicts = [
-                    msg.model_dump() for msg in sample_state.messages
+                    {'role': msg.role, 'content': msg.content}
+                    for msg in sample_state.messages
                 ]
                 # We use 'continue_final_message' to skip add EOS to the last turn
                 # in some cases the chat template will add other tokens after the EOS token
                 formatted_chat_history = self.tokenizer.apply_chat_template(
                     messages_as_dicts,
+                    tools=self.tool_schemas,
                     tokenize=False,
                     add_generation_prompt=False,
                     continue_final_message=True,
@@ -522,6 +526,7 @@ class BaseMDPEnv(ABC):
                 for msg_idx, msg in enumerate(messages_as_dicts):
                     prefix_msg = self.tokenizer.apply_chat_template(
                         messages_as_dicts[: msg_idx + 1],
+                        tools=self.tool_schemas,
                         tokenize=False,
                         add_generation_prompt=False,
                     )
@@ -670,6 +675,7 @@ class BaseMDPEnv(ABC):
 
             prompt = self.tokenizer.apply_chat_template(
                 messages_as_dicts,
+                tools=self.tool_schemas,
                 tokenize=False,
                 add_generation_prompt=not continue_gen,
                 continue_final_message=continue_gen,

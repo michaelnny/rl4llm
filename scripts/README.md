@@ -26,8 +26,36 @@ PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 
     --infer-cohost-mode
 ```
 
+## Example 2: GRPO Fine-Tuning with tool-use SGLang inference on a single server
 
-## Example 2: Extend GRPO Fine-Tuning with SGLang inference
+**Step 1**: Launch the SGLang inference server with `--enable-memory-saver`
+
+```bash
+PYTHONPATH=src python -m rl4llm.inference.launch_sgl_server \
+    --model-path Qwen/Qwen2.5-0.5B-Instruct \
+    --host localhost \
+    --port 30000 \
+    --tp 1 \
+    --chunked-prefill-size 8192 \
+    --mem-fraction-static 0.5 \
+    --enable-memory-saver
+```
+
+
+**Step 2**: Launch the training script and set the inference server arguments
+
+```bash
+PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 NCCL_P2P_DISABLE=1 deepspeed --num_gpus=1 scripts/run_train_grpo_tools.py \
+    --config-file ./configs/grpo_tools_config.yaml \
+    --use-infer-server \
+    --infer-host localhost \
+    --infer-port 30000 \
+    --infer-cohost-mode
+```
+
+
+
+## Example 3: Extend GRPO Fine-Tuning with SGLang inference
 
 **Step 1**: Launch the SGLang inference server with `--enable-memory-saver`
 
