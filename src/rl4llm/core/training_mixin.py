@@ -602,7 +602,7 @@ class TrainingMixin:
 
         for i in range(batch_size):
             # Process single sample
-            sample_logits = logits[i, ...].float()
+            sample_logits = logits[i, ...]  # logits[i, ...].float()
             sample_logprobs_all = torch.log_softmax(sample_logits, dim=-1)
             sample_actions = actions[i, ...].unsqueeze(1)
             sample_logprob = torch.gather(
@@ -657,7 +657,7 @@ class TrainingMixin:
 
         for i in range(batch_size):
             # grab a single [seq_len, vocab_size] slice
-            sample_logits = logits[i].float()
+            sample_logits = logits[i]  # logits[i].float()
             # log‑softmax → [L, V]
             logp = torch.nn.functional.log_softmax(sample_logits, dim=-1)
             # p = exp(logp) → [L, V]

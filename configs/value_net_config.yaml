@@ -24,16 +24,15 @@ value_model:
   model_max_length: 4000
 
 value_net_config:
-  train_rollout_size: 8192
+  train_rollout_size: 4096
   num_epochs: 2
   train_micro_batch_size: 8
   train_batch_size: 128
   gamma: 1.0                            # discount
 
   # for sample generation
-  max_prompt_tokens: 512                # skip sample question that's too long
   group_size: 8                         # for each sample we generate a group of answers
-  max_completion_tokens: 1000
+  max_completion_tokens: 2048
   temperature: 0.9                      
   repetition_penalty: 1.0
   top_p: 0.95

@@ -34,13 +34,13 @@ class MetricHandler(BaseHandler):
         'sum': lambda x: np.sum(x) if is_valid_array(x) else 0.0,
         'last': lambda x: x[-1] if is_valid_array(x) else np.nan,
         'p25': lambda x: (
-            np.percentile(x.astype(float), 50) if is_valid_array(x) else np.nan
+            np.percentile(x.astype(float), 25) if is_valid_array(x) else np.nan
         ),
         'p50': lambda x: (
             np.percentile(x.astype(float), 50) if is_valid_array(x) else np.nan
         ),
         'p75': lambda x: (
-            np.percentile(x.astype(float), 90) if is_valid_array(x) else np.nan
+            np.percentile(x.astype(float), 75) if is_valid_array(x) else np.nan
         ),
         'p90': lambda x: (
             np.percentile(x.astype(float), 90) if is_valid_array(x) else np.nan
@@ -49,16 +49,18 @@ class MetricHandler(BaseHandler):
             np.percentile(x.astype(float), 99) if is_valid_array(x) else np.nan
         ),
         'count': lambda x: len(x) if isinstance(x, np.ndarray) else 0,
-        'accuracy_rate': lambda x: (
-            (np.sum(x == np.max(x)) / x.size) if is_valid_array(x) else np.nan
-        ),
+        # 'accuracy_rate': lambda x: (
+        #     (np.sum(x == np.max(x)) / x.size) if is_valid_array(x) else np.nan
+        # ),
     }
 
     BASE_DEFAULT_METRICS_AGGREGATION_CONFIG = {
         # Non-regex keywords
-        'prompt_length': ['mean', 'std'],
-        'completion_length': ['mean', 'std', 'p75', 'p90'],
-        'accuracy_reward': ['mean', 'var', 'accuracy_rate'],
+        'prompt_length': ['mean'],
+        'completion_length': ['mean', 'p90'],
+        'env_steps': ['mean', 'p90'],
+        'tool_calls': ['mean', 'p90'],
+        'accuracy_reward': ['mean'],
         'loss': ['mean'],
         'learning_rate': ['last'],
         'lr': ['last'],
@@ -81,7 +83,7 @@ class MetricHandler(BaseHandler):
         r'.*_total$': ['sum'],
         r'.*_update$': ['last'],
         r'^time/.*$': ['sum'],
-        r'^resource/.*$': ['mean', 'min', 'max'],
+        r'^resource/.*$': ['mean', 'max'],
         # Default
         'default': ['mean'],
     }
@@ -336,31 +338,8 @@ class MetricHandler(BaseHandler):
                             computed_value = aggregator_func(values_array)
                             log_key = key
 
-                            # create a cleaner final key like '.../accuracy_rate'.
-                            if method_name == 'accuracy_rate' and key.endswith(
-                                '_reward'
-                            ):
-                                # Find the part before the reward name (e.g., "objective/train/")
-                                base_key_part = (
-                                    key.rsplit('/', 1)[0] + '/'
-                                    if '/' in key
-                                    else ''
-                                )
-                                # Construct the new key (e.g., "objective/train/accuracy_rate")
-                                # Assumes the part before _reward is the descriptive name
-                                reward_name = key.rsplit('/', 1)[-1]
-                                metric_name_base = reward_name[
-                                    : -len('_reward')
-                                ]
-                                log_key = (
-                                    f"{base_key_part}{metric_name_base}_rate"
-                                )
-                                self._logger.debug(
-                                    f"Applying specific naming rule for '{method_name}' on key '{key}', resulting in '{log_key}'."
-                                )
-
                             # Avoid appending if only one method is used OR if it's the default 'mean' for simplicity.
-                            elif (
+                            if (
                                 len(aggregation_methods) > 1
                                 and log_key == key
                                 and not key.startswith('time/')

@@ -1,8 +1,8 @@
-# RL GRPO config
+# RL GRPO with basic tool-use config
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_qwen2.5_1.5b_math"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_grpo_tools_qwen2.5_1.5b_inst_math"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -18,11 +18,18 @@ dataset:
   # max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B"
+  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
   model_max_length: 4000
+
+env_tool_config:
+  # Tool env configs
+  env_max_steps: 3
+  cost_per_tool_call: 0.0
+  tool_call_error_penalty: -0.1
+  tool_call_success_bonus: 0.5
 
 grpo:
   max_steps: 100
@@ -38,8 +45,8 @@ grpo:
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout
-  group_size: 8                        # for each sample we generate a group of answers
-  max_completion_tokens: 1500
+  group_size: 16                        # for each sample we generate a group of answers
+  max_completion_tokens: 700
   temperature: 0.9                      
   repetition_penalty: 1.0
   top_p: 0.95

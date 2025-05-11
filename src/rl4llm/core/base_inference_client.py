@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 
 class InferenceClientError(Exception):
     """Custom exception for Inference client errors."""
@@ -57,7 +59,7 @@ class InferenceClient(ABC):
         self._release_called = False
         self._resume_called = False
 
-        self.logger = logging.getLogger(__name__)
+        self.logger = logger
 
         self.session = requests.Session()
         if self.api_key:
@@ -191,6 +193,15 @@ class InferenceClient(ABC):
     @abstractmethod
     def health(self) -> bool:
         """Checks the health status of remote inference server"""
+        pass
+
+    @abstractmethod
+    def chat_completion(
+        self,
+        messages: Optional[Union[str, List[str]]] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Calls the remote inference server for chat completion"""
         pass
 
     @abstractmethod

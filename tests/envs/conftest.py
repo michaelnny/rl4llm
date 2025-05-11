@@ -1,120 +1,160 @@
 import random
-from typing import Any, Dict, List
-from unittest.mock import Mock
+from typing import Any, Dict, List, Union
+from unittest.mock import MagicMock, patch
 
-import datasets
 import pytest
 import torch
+from datasets import Dataset
+from transformers import PreTrainedTokenizer
 
 from rl4llm.core.base_env import (
+    BaseMDPEnv,
     BaseRewardFunction,
+    ChatMessage,
     EnvState,
+    EpisodeData,
+    SampleState,
 )
 
-
-class DummyTokenizer:
-    """A dummy tokenizer for testing."""
-
-    def __init__(
-        self,
-        pad_token='<pad>',
-        eos_token='<eos>',
-        pad_token_id=0,
-        eos_token_id=1,
-    ):
-        self.pad_token = pad_token
-        self.eos_token = eos_token
-        self.pad_token_id = pad_token_id
-        self.eos_token_id = eos_token_id
-        self.padding_side = 'right'
-
-    def __call__(
-        self, texts, truncation=False, max_length=None, padding=False, **kwargs
-    ):
-        if isinstance(texts, list):
-            input_ids = []
-            attention_mask = []
-            for text in texts:
-                # Create dummy tokens based on each word's length
-                tokens = [len(word) + 1 for word in text.split()]
-                if truncation and max_length is not None:
-                    tokens = tokens[:max_length]
-                input_ids.append(tokens)
-                attention_mask.append([1] * len(tokens))
-            return {'input_ids': input_ids, 'attention_mask': attention_mask}
-        else:
-            tokens = [len(word) + 1 for word in texts.split()]
-            if truncation and max_length is not None:
-                tokens = tokens[:max_length]
-            return {'input_ids': tokens, 'attention_mask': [1] * len(tokens)}
-
-    def pad(
-        self,
-        encoded_inputs,
-        padding,
-        padding_side,
-        return_tensors,
-        return_attention_mask,
-        **kwargs,
-    ):
-        sequences = encoded_inputs['input_ids']
-        max_len = max(len(seq) for seq in sequences)
-        padded = []
-        attention_masks = []
-        for seq in sequences:
-            pad_length = max_len - len(seq)
-            if padding_side == 'left':
-                padded_seq = [self.pad_token_id] * pad_length + seq
-                mask = [0] * pad_length + [1] * len(seq)
-            else:
-                padded_seq = seq + [self.pad_token_id] * pad_length
-                mask = [1] * len(seq) + [0] * pad_length
-            padded.append(padded_seq)
-            attention_masks.append(mask)
-        return {
-            'input_ids': torch.tensor(padded, dtype=torch.long),
-            'attention_mask': torch.tensor(attention_masks, dtype=torch.long),
-        }
-
-    def batch_decode(
-        self,
-        sequences,
-        skip_special_tokens,
-        clean_up_tokenization_spaces,
-        **kwargs,
-    ):
-
-        texts = []
-        for seq in sequences:
-            words = [
-                str(token)
-                for token in seq
-                if not (
-                    skip_special_tokens
-                    and token in [self.pad_token_id, self.eos_token_id]
-                )
-            ]
-            texts.append(' '.join(words))
-        return texts
-
-
-class DummyRewardFunction(BaseRewardFunction):
-    """A dummy reward function that always returns 1.0 for testing."""
-
-    def __init__(self, name='mock_reward_function'):
-        super().__init__(name)
-
-    def __call__(self, completions, ground_truths):
-        return [1.0 for _ in completions]
+# --- Fixtures ---
 
 
 @pytest.fixture
 def mock_tokenizer():
-    """Create a mock tokenizer."""
-    return DummyTokenizer()
+    """Provides a mock PreTrainedTokenizer."""
+    tokenizer = MagicMock(spec=PreTrainedTokenizer)
+    tokenizer.padding_side = 'left'
+    tokenizer.pad_token = '<pad>'
+    tokenizer.eos_token = '<eos>'
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 1
+
+    # Store the word map globally within the mock instance for consistency
+    tokenizer.word_map = {}
+    tokenizer.next_word_id = 100
+
+    def _get_word_id(word):
+        if word not in tokenizer.word_map:
+            tokenizer.word_map[word] = tokenizer.next_word_id
+            tokenizer.next_word_id += 1
+        return tokenizer.word_map[word]
+
+    def _mock_apply_chat_template_v2(
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        tools=None,
+    ):
+        tokens = []
+        full_text = ''
+        role_map = {'user': 10, 'assistant': 11, 'system': 12, 'tool': 13}
+        # Reset map for each call to simulate fresh tokenization *if needed*
+        # For these tests, let's keep the map persistent across calls within a single test setup
+        # unless explicitly reset by the test.
+
+        for i, msg in enumerate(messages):
+            # Use .get() for safer dictionary access if msg is a dict
+            role = msg.get('role') if isinstance(msg, dict) else msg.role
+            content = (
+                msg.get('content') if isinstance(msg, dict) else msg.content
+            )
+
+            role_token = role_map.get(role, 99)
+            tokens.append(role_token)
+            full_text += f"{role}: {content}\n"
+            content_tokens = []
+            if content:  # Handle potential None content
+                for word in content.split():
+                    content_tokens.append(_get_word_id(word))
+            tokens.extend(content_tokens)
+            tokens.append(tokenizer.eos_token_id)  # Add EOS after each message
+
+        if add_generation_prompt:
+            tokens.append(role_map['assistant'])
+            full_text += 'assistant:\n'
+
+        if tokenize:
+            return tokens
+        else:
+            return full_text
+
+    def _mock_encode_v2(text, add_special_tokens=False):
+        tokens = []
+        if text:  # Handle potential None text
+            for word in text.split():
+                tokens.append(_get_word_id(word))
+        return tokens
+
+    tokenizer.apply_chat_template = MagicMock(
+        side_effect=_mock_apply_chat_template_v2
+    )
+    tokenizer.encode = MagicMock(side_effect=_mock_encode_v2)
+
+    # Needed for _setup_tokenizer check
+    tokenizer.chat_template = 'mock_template'  # Indicate a template exists
+
+    return tokenizer
 
 
 @pytest.fixture
 def mock_reward_function():
-    """Create a mock reward function."""
-    return DummyRewardFunction()
+    """Provides a simple mock BaseRewardFunction."""
+
+    class MockReward(BaseRewardFunction):
+        def __init__(self, name='mock_reward', reward_value=1.0):
+            super().__init__(name)
+            self.reward_value = reward_value
+
+        def __call__(
+            self,
+            batch_messages: List[List[ChatMessage]],
+            batch_ground_truths: List[Union[str, float, int]],
+            **kwargs: Any,
+        ) -> List[float]:
+            return [self.reward_value] * len(batch_messages)
+
+    return MockReward()
+
+
+@pytest.fixture
+def mock_reward_function_alt():
+    """Provides a second mock BaseRewardFunction with a different value."""
+
+    class MockRewardAlt(BaseRewardFunction):
+        def __init__(self, name='mock_reward_alt', reward_value=0.5):
+            super().__init__(name)
+            self.reward_value = reward_value
+
+        def __call__(
+            self,
+            batch_messages: List[List[ChatMessage]],
+            batch_ground_truths: List[Union[str, float, int]],
+            **kwargs: Any,
+        ) -> List[float]:
+            return [self.reward_value] * len(batch_messages)
+
+    return MockRewardAlt()
+
+
+@pytest.fixture
+def sample_raw_data():
+    """Provides sample raw data mimicking dataset rows."""
+    return [
+        {
+            'messages': [{'role': 'user', 'content': 'Hello there'}],
+            'ground_truth': 'General Kenobi',
+        },
+        {
+            'messages': [
+                {'role': 'user', 'content': 'Explain RLHF'},
+                {'role': 'system', 'content': 'Be concise'},
+            ],
+            'ground_truth': 'Reinforcement Learning from Human Feedback',
+        },
+    ]
+
+
+@pytest.fixture
+def mock_dataset(sample_raw_data):
+    """Provides a mock datasets.Dataset."""
+    return Dataset.from_list(sample_raw_data)

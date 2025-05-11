@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Union
 import deepspeed
 import torch
 
-from rl4llm.core.base_env import BaseRewardFunction
+from rl4llm.core.base_env import BaseRewardFunction, ChatMessage
 from rl4llm.data import load_multiple_datasets
 from rl4llm.envs import HfMDPEnv, SglMDPEnv
 from rl4llm.graders.math_grader import math_problem_grader
@@ -70,81 +70,66 @@ def parse_args():
     return args
 
 
-PROMPT_TEMPLATE = """
-Question: {question}
+def apply_custom_chat_template(tokenizer):
+    """This could be useful for training on base-model or for special use cases (like with special pre-filling for generation)"""
+    # Define a Jinja2 chat template string
 
-Answer: Let's think step by step.
-"""
+    jinja_chat_template = (
+        '{% for message in messages %}'
+        "{% if message.role == 'user' %}"
+        'Question: {{ message.content }}\n\n'
+        "Answer: Let's think step by step.\n"
+        "{% elif message.role == 'assistant' %}"
+        '{{ message.content }}'
+        "{% elif message.role == 'system' %}"
+        '{{ message.content }}\n\n'
+        '{% endif %}'
+        '{% endfor %}'
+    )
 
-
-# PROMPT_TEMPLATE = """
-# Please first think about the reasoning process step by step, and conclude by providing your final answer within LaTeX-formatted box: \\boxed{{}}.
-
-# Question: {question}
-
-# Answer: Let's think step by step.
-# """
-
-
-# PROMPT_TEMPLATE = """<|im_start|>system
-# You are a helpful assistant.<|im_end|>
-# <|im_start|>user
-# Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
-
-# Question:
-# {question}<|im_end|>
-# <|im_start|>assistant
-# """
+    tokenizer.chat_template = jinja_chat_template
 
 
-def apply_prompt_template(item: Dict) -> Dict:
-    """Apply the prompt template for sample, assume the template has a 'question' place holder"""
-    question = item['question']
-
-    prompt = PROMPT_TEMPLATE.format(question=question)
-
-    return {'prompt': prompt.strip()}
+def prepare_initial_chat_messages(item: Dict) -> Dict:
+    """Build chat-style messages for initial state"""
+    messages = [
+        {'role': 'user', 'content': item['question'].strip()},
+    ]
+    return {'messages': messages}
 
 
 class AccuracyRewardFunction(BaseRewardFunction):
+    """Implements the accuracy reward for math problems"""
 
     def __init__(self, name='accuracy_reward'):
         super().__init__(name)
 
     def __call__(
         self,
-        completions: List[str],
-        ground_truths: List[Union[str | float | int]],
+        messages: List[ChatMessage],
+        ground_truth: Union[str | float | int],
         **kwargs: Dict[str, Any],
-    ) -> List[float]:
+    ) -> float:
         """Implements the reward function.
 
         Args:
-            completions (List[str]): LLM generated completion texts.
-            ground_truths (List[Union[str | float | int]]): Ground truth for the problem.
+            messages (List[ChatMessage]]: Full chat history for the sample.
+            ground_truth (Union[str | float | int]): Ground truth for the problem.
             **kwargs (Dict[str, Any]): Any additional data.
 
         Returns:
-            List[float]: A list of scalar rewards.
+            float: A scalar rewards.
         """
-        if isinstance(ground_truths, str):
-            ground_truths = [ground_truths]
-        if len(ground_truths) == 1:
-            ground_truths = [ground_truths] * len(completions)
-        if len(completions) != len(ground_truths):
-            raise ValueError(
-                'Completion and ground truth have mismatch elements'
-            )
 
-        return [
-            math_problem_grader(
-                full_answer=answer,
-                ground_truth=truth,
-                min_score=-1.0,
-                max_score=1.0,
-            )
-            for answer, truth in zip(completions, ground_truths)
-        ]
+        # get last completion
+        completion = messages[-1].content
+
+        return math_problem_grader(
+            full_answer=completion,
+            ground_truth=ground_truth,
+            min_score=-1.0,
+            max_score=1.0,
+        )
 
 
 def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -196,13 +181,17 @@ def main():
     if max_test_samples is not None and max_test_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
-    train_dataset = train_dataset.map(apply_prompt_template)
-    eval_dataset = eval_dataset.map(apply_prompt_template)
+    train_dataset = train_dataset.map(prepare_initial_chat_messages)
+    eval_dataset = eval_dataset.map(prepare_initial_chat_messages)
 
     # Create models
     policy_model, tokenizer = build_policy_model_and_tokenizer(
         model_config, torch_dtype
     )
+
+    # Optional, use custom template for training with base model
+    if not model_name.lower().endswith('instruct'):
+        apply_custom_chat_template(tokenizer)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,

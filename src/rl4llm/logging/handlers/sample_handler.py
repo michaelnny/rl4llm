@@ -327,7 +327,7 @@ class SampleHandler(BaseHandler):
             )
         except Exception as e:
             self._logger.error(
-                f"Failed to log sample file [Phase: {phase}, Rank: {self.rank}"
+                f"Failed to log sample file [Phase: {phase}, Rank: {self.rank}], error: {e}"
             )
 
     def flush(self) -> None:

@@ -7,7 +7,7 @@ import torch
 from deepspeed import DeepSpeedEngine
 
 from rl4llm.constants import TRAIN_PHASE
-from rl4llm.core.base_env import EpisodeData, EpisodeMetadata
+from rl4llm.core.base_env import ChatMessage, EpisodeData
 from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 
 
@@ -68,21 +68,16 @@ def sample_episode_data() -> EpisodeData:
     loss_mask = torch.zeros_like(actions, dtype=torch.bool)
     loss_mask[len(prompt_tokens) - 1 :] = True
 
-    meta = EpisodeMetadata(
-        prompt=prompt,
-        completion=completion,
-        prompt_length=len(prompt_tokens),
-        completion_length=len(completion_tokens),
-        reward_dict={'reward1': 1.5},
-        ground_truth='123',
-    )
-
     return EpisodeData(
         states=states,
         actions=actions,
         loss_mask=loss_mask,
         terminal_reward=1.5,
-        metadata=meta,
+        chat_history=[],
+        reward_dict={'reward1': 1.5},
+        ground_truth='123',
+        prompt_length=len(prompt_tokens),
+        completion_length=len(completion_tokens),
     )
 
 
@@ -120,16 +115,16 @@ def trainer_base(
         def initialize_trainer(self):
             pass
 
-        def generate_experience(self):
+        def collect_training_experience(self):
             return ['exp']
 
-        def build_train_loader(self, experience):
+        def create_training_dataloader(self, experience):
             return ['batch']
 
         def evaluate_step(self):
             pass
 
-        def train_step(self, train_dataloader):
+        def update_models(self, train_dataloader):
             pass
 
         def can_offload_state(self, model):
@@ -184,32 +179,31 @@ def mock_model():
     return model
 
 
-def test_log_batch_episodes_invalid_phase(trainer_base):
+def test_episodes_invalid_phase(trainer_base):
     """Raises error on invalid log phase."""
     with pytest.raises(ValueError):
-        trainer_base.log_batch_episodes('invalid_phase', [], 0)
+        trainer_base.log_episodes('invalid_phase', [], 0)
 
 
-def test_log_batch_episodes_valid(trainer_base):
+def test_episodes_valid(trainer_base):
     """Logs sample and scalar for valid training episode."""
-
-    meta = EpisodeMetadata(
-        prompt='a',
-        completion='b',
-        prompt_length=1,
-        completion_length=2,
-        reward_dict={'reward1': 1.5},
-        ground_truth='123',
-    )
 
     episode = EpisodeData(
         states=torch.tensor([1]),
         actions=torch.tensor([1]),
         loss_mask=torch.tensor([1]),
         terminal_reward=torch.tensor([1]),
-        metadata=meta,
+        chat_history=[
+            ChatMessage(role='user', content='Test'),
+            ChatMessage(role='assistant', content='Response here'),
+        ],
+        env_steps=1,
+        prompt_length=1,
+        completion_length=2,
+        reward_dict={'reward1': 1.5},
+        ground_truth='123',
     )
-    trainer_base.log_batch_episodes(TRAIN_PHASE, [episode], 1)
+    trainer_base.log_episodes(TRAIN_PHASE, [episode], 1)
     trainer_base.logger.log_sample.assert_called()
     trainer_base.logger.log_scalar.assert_called()
 
@@ -355,15 +349,15 @@ def test_prepare_for_training(trainer_base, mock_model):
     trainer_base.clean_up.assert_called_once()
 
 
-def test_sync_reference_model_no_ref_model(trainer_base):
+def test_synchronize_reference_model_no_ref_model(trainer_base):
     """Tests that sync does nothing if reference_model is None."""
     trainer_base.reference_model = None
-    trainer_base.sync_reference_model()
+    trainer_base.synchronize_reference_model()
 
     assert trainer_base.ref_update_count == 0
 
 
-def test_sync_reference_model_standard_pytorch(trainer_base):
+def test_synchronize_reference_model_standard_pytorch(trainer_base):
     """Tests syncing to a standard PyTorch reference model."""
     mock_ref_model = MagicMock()
     # Configure .to() to return the mock itself
@@ -372,7 +366,7 @@ def test_sync_reference_model_standard_pytorch(trainer_base):
     trainer_base.reference_model = mock_ref_model
     initial_count = trainer_base.ref_update_count
 
-    trainer_base.sync_reference_model()
+    trainer_base.synchronize_reference_model()
 
     # The policy_engine is likely a DeepSpeedEngine in the fixture,
     # so the unwrapped model is policy_engine.module
@@ -387,7 +381,7 @@ def test_sync_reference_model_standard_pytorch(trainer_base):
     trainer_base.dist_ops.barrier.assert_called()
 
 
-def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
+def test_synchronize_reference_model_deepspeed_no_zero3(trainer_base, mocker):
     """Tests syncing to a DeepSpeedEngine reference model without Zero-3."""
     # Use spec for isinstance check to potentially work without patching isinstance
     mock_ref_model = mocker.MagicMock(spec=DeepSpeedEngine)
@@ -402,7 +396,7 @@ def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
 
     initial_count = trainer_base.ref_update_count
 
-    trainer_base.sync_reference_model()
+    trainer_base.synchronize_reference_model()
 
     expected_state_dict = trainer_base.policy_engine.module.state_dict()
 
@@ -418,7 +412,7 @@ def test_sync_reference_model_deepspeed_no_zero3(trainer_base, mocker):
 
 
 @patch('deepspeed.zero.GatheredParameters', autospec=True)
-def test_sync_reference_model_deepspeed_zero3_master(
+def test_synchronize_reference_model_deepspeed_zero3_master(
     mock_gathered_params, trainer_base, mocker
 ):
     """Tests syncing to a DeepSpeedEngine reference model with Zero-3 on master."""
@@ -439,7 +433,7 @@ def test_sync_reference_model_deepspeed_zero3_master(
 
     initial_count = trainer_base.ref_update_count
 
-    trainer_base.sync_reference_model()
+    trainer_base.synchronize_reference_model()
 
     expected_state_dict = trainer_base.policy_engine.module.state_dict()
 
@@ -457,7 +451,7 @@ def test_sync_reference_model_deepspeed_zero3_master(
     trainer_base.dist_ops.barrier.assert_called()
 
 
-def test_sync_policy_model_inference_disabled(trainer_base, mocker):
+def test_synchronize_policy_model_inference_disabled(trainer_base, mocker):
     """Tests that sync does nothing if inference engine is disabled."""
     mocker.patch(
         'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
@@ -465,14 +459,16 @@ def test_sync_policy_model_inference_disabled(trainer_base, mocker):
     )
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
-    trainer_base.sync_policy_model()
+    trainer_base.synchronize_policy_model()
 
     trainer_base.save_weights_hf_pretrained.assert_not_called()
     trainer_base.inference_client.update_weights_from_file.assert_not_called()
 
 
 @patch('tempfile.TemporaryDirectory')
-def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
+def test_synchronize_policy_model_success_master(
+    mock_tempdir, trainer_base, mocker
+):
     """Tests successful policy sync on the master rank."""
     mocker.patch(
         'rl4llm.core.base_trainer.BaseRLTrainer.is_inference_engine_enabled',
@@ -484,7 +480,7 @@ def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
     trainer_base.dist_ops.is_master = True
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
-    trainer_base.sync_policy_model()
+    trainer_base.synchronize_policy_model()
 
     trainer_base.save_weights_hf_pretrained.assert_called_once_with(
         trainer_base.policy_engine, '/fake/temp/path'
@@ -497,7 +493,7 @@ def test_sync_policy_model_success_master(mock_tempdir, trainer_base, mocker):
 
 
 @patch('tempfile.TemporaryDirectory')
-def test_sync_policy_model_success_non_master(
+def test_synchronize_policy_model_success_non_master(
     mock_tempdir, trainer_base, mocker
 ):
     """Tests successful policy sync on a non-master rank."""
@@ -510,7 +506,7 @@ def test_sync_policy_model_success_non_master(
     trainer_base.dist_ops.is_master = False  # Set to non-master
     trainer_base.save_weights_hf_pretrained = MagicMock()
 
-    trainer_base.sync_policy_model()
+    trainer_base.synchronize_policy_model()
 
     trainer_base.save_weights_hf_pretrained.assert_called_once_with(
         trainer_base.policy_engine, '/fake/temp/path'
@@ -519,62 +515,3 @@ def test_sync_policy_model_success_non_master(
     trainer_base.inference_client.resume_memory.assert_not_called()
     trainer_base.inference_client.update_weights_from_file.assert_not_called()
     trainer_base.dist_ops.barrier.assert_called()
-
-
-# def test_transform_batch_rewards_single_reward(
-#     trainer_base, sample_group_episodes
-# ):
-#     """Tests reward transformation when only one reward function is present."""
-#     # Ensure only one reward function is mocked
-#     trainer_base.train_env.reward_functions = {'reward1': Mock()}
-#     trainer_base.reward_transform_fn = None  # Should not be needed
-
-#     rewards = trainer_base.transform_batch_rewards(sample_group_episodes)
-#     expected = torch.tensor(
-#         [1.5, 2.0, 1.0, 2.5], dtype=trainer_base.torch_dtype
-#     )
-#     assert torch.equal(rewards, expected)
-
-
-# def test_transform_batch_rewards_multiple_rewards(
-#     trainer_base,
-#     sample_group_episodes,
-#     mock_reward_transform_fn,
-# ):
-#     """Tests reward transformation with multiple reward functions using the transform function."""
-#     # Add a second reward
-#     for ep in sample_group_episodes:
-#         ep.reward_dict['reward2'] = 0.5
-#     trainer_base.train_env.reward_functions = {
-#         'reward1': Mock(),
-#         'reward2': Mock(),
-#     }
-#     trainer_base.reward_transform_fn = mock_reward_transform_fn
-
-#     rewards = trainer_base.transform_batch_rewards(sample_group_episodes)
-
-#     # Check that the transform function was called correctly
-#     mock_reward_transform_fn.assert_called_once()
-#     call_args = mock_reward_transform_fn.call_args[0][0]
-#     assert 'reward1' in call_args
-#     assert 'reward2' in call_args
-#     assert torch.equal(
-#         call_args['reward1'],
-#         torch.tensor([1.5, 2.0, 1.0, 2.5], dtype=trainer_base.torch_dtype),
-#     )
-#     assert torch.equal(
-#         call_args['reward2'],
-#         torch.tensor([0.5, 0.5, 0.5, 0.5], dtype=trainer_base.torch_dtype),
-#     )
-
-#     # Check the output (based on the mock's side effect: sum)
-#     expected = torch.tensor(
-#         [2.0, 2.5, 1.5, 3.0], dtype=trainer_base.torch_dtype
-#     )
-#     assert torch.equal(rewards, expected)
-
-
-# def test_transform_batch_rewards_empty_list(trainer_base):
-#     """Tests that transforming rewards on an empty list raises ValueError."""
-#     with pytest.raises(ValueError, match='Episodes list cannot be empty'):
-#         trainer_base.transform_batch_rewards([])

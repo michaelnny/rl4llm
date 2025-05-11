@@ -11,7 +11,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from rl4llm.core.base_env import BaseEnv, EpisodeData
+from rl4llm.core.base_env import BaseMDPEnv, EpisodeData
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 
@@ -96,7 +96,7 @@ class ValueNetTrainer(BaseRLTrainer):
         tokenizer: PreTrainedTokenizer,
         value_engine: DeepSpeedEngine,
         log_config: Dict[str, Any],
-        train_env: BaseEnv,
+        train_env: BaseMDPEnv,
         inference_client: InferenceClient,
         seed: Optional[int] = 175,
     ):
@@ -150,30 +150,32 @@ class ValueNetTrainer(BaseRLTrainer):
         self.dist_ops.synchronize()
 
         self.logger.info('Running rollout on training environment...')
-        with self.logger.timer('generate_experience'):
+        with self.logger.timer('collect_training_experience'):
             self._prepare_for_generation()
-            local_experience = self.generate_experience()
+            local_experience = self.collect_training_experience()
             self.clean_up()
         self.dist_ops.barrier()
 
         self.logger.info('Preprocessing collected experience for training...')
         with self.logger.timer('pre_processing'):
             self._prepare_for_pre_processing()
-            train_dataloader = self.build_train_loader(local_experience)
+            train_dataloader = self.create_training_dataloader(local_experience)
             self.clean_up()
         self.dist_ops.barrier()
 
         self.logger.info('Starting model training step...')
         with self.logger.timer('train_epochs'):
             self._prepare_for_training()
-            self.train_step(train_dataloader)
+            self.update_models(train_dataloader)
             self.clean_up()
         self.dist_ops.barrier()
 
         self.logger.info('Training loop complete. Finalizing...')
         self.on_exit()
 
-    def build_train_loader(self, experience: List[EpisodeData]) -> DataLoader:
+    def create_training_dataloader(
+        self, experience: List[EpisodeData]
+    ) -> DataLoader:
         """Creates a train loader using the collected experiences.
 
         Args:
@@ -234,6 +236,9 @@ class ValueNetTrainer(BaseRLTrainer):
         returns = experience_batch.returns.to(self.device)
         loss_mask = experience_batch.loss_mask.to(self.device)
 
+        pred_values = pred_values.float()
+        returns = returns.float()
+
         # Value loss
         losses = 0.5 * torch.square(returns - pred_values)
         loss = self.masked_mean(losses, loss_mask, dim=1).mean()
@@ -254,7 +259,7 @@ class ValueNetTrainer(BaseRLTrainer):
 
         return loss
 
-    def train_step(self, train_dataloader: DataLoader):
+    def update_models(self, train_dataloader: DataLoader):
         """Performs the value model update using collected rollout."""
 
         self._configure_model(self.policy_engine, 'cpu', 'offload')
@@ -299,7 +304,7 @@ class ValueNetTrainer(BaseRLTrainer):
         pass
 
     @torch.inference_mode()
-    def generate_experience(self) -> List[EpisodeData]:
+    def collect_training_experience(self) -> List[EpisodeData]:
         """Generates samples using the current policy."""
 
         if self.is_inference_engine_enabled():
@@ -336,9 +341,6 @@ class ValueNetTrainer(BaseRLTrainer):
                 if outputs:
                     collected_episodes.extend(outputs)
                     local_count += len(outputs)
-                    self.log_batch_episodes(
-                        self._train_phase, outputs, self.global_step
-                    )
                     step_count += 1
                     # Log progress every 50 valid steps or at completion
                     if (
@@ -349,6 +351,10 @@ class ValueNetTrainer(BaseRLTrainer):
                         self.logger.info(
                             f"Progress: {progress:.2f}% ({local_count}/{local_rollout_size} episodes collected)"
                         )
+
+        self.log_episodes(
+            self._train_phase, collected_episodes, self.global_step
+        )
 
         return collected_episodes
 
@@ -406,7 +412,6 @@ class ValueNetTrainer(BaseRLTrainer):
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""
         eos_token_id = self.tokenizer.eos_token_id
-        torch_dtype = self.torch_dtype
 
         # Pad states and actions (long tensors)
         batch_states = pad_sequence(
@@ -422,15 +427,11 @@ class ValueNetTrainer(BaseRLTrainer):
             padding_value=0,
         ).bool()
 
-        batch_returns = (
-            pad_sequence(
-                [item.returns for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
+        batch_returns = pad_sequence(
+            [item.returns for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
 
         return TransitionData(
             states=batch_states,

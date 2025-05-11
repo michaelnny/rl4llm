@@ -65,7 +65,41 @@ class SGLangClient(InferenceClient):
             payload['text'] = prompts
 
         result = self._request('POST', '/generate', json_data=payload)
-        # _request ensures result is a dict if no exception was raised
+        return result
+
+    def chat_completion(
+        self,
+        messages: Optional[Union[str, List[str]]],
+        sampling_params: Optional[Dict[str, Any]] = None,
+        # Add other potential GenerateReqInput fields here if needed
+        **kwargs: Any,  # Allow passthrough for future/uncommon params
+    ) -> Dict[str, Any]:
+        """
+        Sends a non-streaming chat-completion request to the SGLang server.
+
+        Args:
+            messages: Input chat messages.
+            sampling_params: Dictionary of sampling parameters (e.g., temperature, max_new_tokens).
+            **kwargs: Additional parameters allowed by GenerateReqInput.
+
+        Returns:
+            A dictionary containing the complete generation result.
+
+        Raises:
+            InferenceClientError: If the request fails or the server returns an error.
+            ValueError: If incorrect input arguments are provided.
+        """
+        if messages is None or len(messages) == 0:
+            raise ValueError("Provide valid 'messages'.")
+
+        payload = {
+            'messages': messages,
+            'stream': False,
+            **sampling_params,
+            **kwargs,
+        }
+
+        result = self._request('POST', '/v1/chat/completion', json_data=payload)
         return result
 
     def release_memory(self) -> None:
@@ -159,7 +193,6 @@ class SGLangClient(InferenceClient):
 
 # --- Example Usage ---
 if __name__ == '__main__':
-
     import torch
     from transformers import AutoModelForCausalLM
 

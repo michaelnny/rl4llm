@@ -11,7 +11,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from rl4llm.core.base_env import BaseEnv, EpisodeData
+from rl4llm.core.base_env import BaseMDPEnv, EpisodeData
 from rl4llm.core.base_inference_client import InferenceClient
 from rl4llm.core.base_trainer import BaseRLConfig, BaseRLTrainer
 
@@ -105,7 +105,14 @@ class TransitionData(BaseModel):
 
 
 class PPOTrainer(BaseRLTrainer):
-    """PPO trainer for LLM"""
+    """PPO trainer for LLM
+
+    PPO Paper:
+    https://arxiv.org/abs/1707.06347
+
+    InstructGPT Paper:
+    https://arxiv.org/abs/2203.02155
+    """
 
     def __init__(
         self,
@@ -114,8 +121,8 @@ class PPOTrainer(BaseRLTrainer):
         policy_engine: DeepSpeedEngine,
         value_engine: DeepSpeedEngine,
         log_config: Dict[str, Any],
-        train_env: BaseEnv,
-        eval_env: Optional[BaseEnv] = None,
+        train_env: BaseMDPEnv,
+        eval_env: Optional[BaseMDPEnv] = None,
         ref_model: Optional[Union[PreTrainedModel, DeepSpeedEngine]] = None,
         inference_client: Optional[InferenceClient] = None,
         seed: Optional[int] = 175,
@@ -168,7 +175,9 @@ class PPOTrainer(BaseRLTrainer):
         self.dist_ops.barrier()
         self.logger.info('Checkpoint saved.')
 
-    def build_train_loader(self, experience: List[EpisodeData]) -> DataLoader:
+    def create_training_dataloader(
+        self, experience: List[EpisodeData]
+    ) -> DataLoader:
         """Creates a train loader using the collected experiences.
 
         Args:
@@ -210,147 +219,7 @@ class PPOTrainer(BaseRLTrainer):
 
         return data_loader
 
-    def compute_policy_loss(
-        self,
-        pi_logits: torch.Tensor,
-        experience_batch: TransitionData,
-    ) -> torch.Tensor:
-        """Compute policy loss for a single training batch
-
-        Args:
-            pi_logits (torch.Tensor): Raw logits of actions computed using
-                current policy model, shape [batch_size, seq_len]
-            experience_batch (TransitionData): A batch of samples collected
-                during generation
-        Returns:
-            torch.Tensor: The total loss tensor
-        """
-        behavior_logprobs = experience_batch.pi_logprobs.to(self.device)
-        actions = experience_batch.actions.to(self.device)
-        advantages = experience_batch.advantages.to(self.device)
-        loss_mask = experience_batch.loss_mask.to(self.device)
-
-        if self.config.normalize_advantages:
-            advantages = self.dist_masked_whiten(advantages, loss_mask, dim=1)
-
-        # PPO clipped surrogate PG loss
-        pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
-        ratio = torch.exp(pi_logprobs - behavior_logprobs)
-        clipped_ratio = ratio.clamp(
-            1 - self.config.clip_eps, 1 + self.config.clip_eps
-        )
-        pg_losses1 = ratio * advantages.detach()
-        pg_losses2 = clipped_ratio * advantages.detach()
-        pg_losses = -torch.min(pg_losses1, pg_losses2)
-
-        with torch.no_grad():
-            approxkl = (
-                0.5
-                * self.masked_mean(
-                    torch.square(pi_logprobs - behavior_logprobs),
-                    loss_mask,
-                    dim=1,
-                ).mean()
-            )
-            clipfrac = self.masked_mean(
-                torch.lt(pg_losses2, pg_losses1), loss_mask, dim=1
-            ).mean()
-
-        # First average over the sequence length, then average over the batch
-        pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
-
-        # Compute entropy for the policy
-        entropies = self.compute_entropy_from_logits(
-            logits=pi_logits, loss_mask=loss_mask
-        )
-        entropy = entropies.mean()
-        entropy_loss = -(self.config.entropy_loss_coef * entropy)
-
-        self.logger.log_scalar('train/pg_loss', pg_loss.detach().item())
-        self.logger.log_scalar(
-            'train/entropy_loss', entropy_loss.detach().item()
-        )
-        self.logger.log_scalar('policy/entropy', entropy.detach().item())
-        self.logger.log_scalar('policy/approxkl', approxkl.detach().item())
-        self.logger.log_scalar('policy/clipfrac', clipfrac.detach().item())
-
-        loss = pg_loss + entropy_loss
-
-        # Compute KL divergence if coefficient is positive
-        if self.config.kl_loss_coef > 0:
-            # We add the kl as auxiliary loss instead of mixing pre-token KL to the rewards
-            ref_logprobs = experience_batch.ref_logprobs.to(self.device)
-            # Compute the KL divergence between the model and the reference model
-            per_token_kl = (
-                torch.exp(ref_logprobs - pi_logprobs)
-                - (ref_logprobs - pi_logprobs)
-                - 1
-            )
-
-            kl = self.masked_mean(per_token_kl, loss_mask, dim=1).mean()
-            kl_loss = self.config.kl_loss_coef * kl
-
-            loss += kl_loss
-            self.logger.log_scalar('train/kl_loss', kl_loss.detach().item())
-            self.logger.log_scalar('objective/kl', kl.detach().item())
-
-        return loss
-
-    def compute_value_loss(
-        self,
-        pred_values: torch.Tensor,
-        experience_batch: TransitionData,
-    ) -> torch.Tensor:
-        """Compute value loss for a single training batch
-
-        Args:
-            pred_values (torch.Tensor): Predicted state values computed using
-                current value model, shape [batch_size, seq_len]
-            experience_batch (TransitionData): A batch of samples collected
-                during generation
-
-        Returns:
-            torch.Tensor: The total loss tensor
-        """
-        values = experience_batch.values.to(self.device)
-        returns = experience_batch.returns.to(self.device)
-        loss_mask = experience_batch.loss_mask.to(self.device)
-
-        # # Value loss using MC returns
-        # losses = 0.5 * torch.square(returns - pred_values)
-        # loss = self.masked_mean(losses, loss_mask, dim=1).mean()
-
-        # Compute clipped value loss
-        vpred_clipped = torch.clamp(
-            pred_values,
-            values - self.config.value_clip_eps,
-            values + self.config.value_clip_eps,
-        )
-        vf_losses1 = torch.square(pred_values - returns)
-        vf_losses2 = torch.square(vpred_clipped - returns)
-        losses = 0.5 * torch.max(vf_losses1, vf_losses2)
-        loss = self.masked_mean(losses, loss_mask, dim=1).mean()
-        with torch.no_grad():
-            clipfrac = self.masked_mean(
-                torch.gt(vf_losses2, vf_losses1), loss_mask, dim=1
-            ).mean()
-            pred_error = self.masked_mean(
-                torch.square(pred_values.detach() - returns.detach()),
-                loss_mask,
-                dim=1,
-            ).mean()
-            returns_var = self.masked_var(returns, loss_mask, dim=1).mean()
-            var_explained = (1 - pred_error / (returns_var + 1e-8)).item()
-
-        self.logger.log_scalar('train/vf_loss', loss.detach().item())
-        self.logger.log_scalar('value/error', pred_error.detach().item())
-        self.logger.log_scalar('value/clipfrac', clipfrac.detach().item())
-        self.logger.log_scalar('value/returns_var', returns_var.detach().item())
-        self.logger.log_scalar('value/var_explained', var_explained)
-
-        return loss
-
-    def train_step(self, train_dataloader: DataLoader):
+    def update_models(self, train_dataloader: DataLoader):
         """Performs the policy and value models update using collected rollout."""
 
         self._configure_model(self.value_engine, 'cpu', 'offload')
@@ -363,45 +232,7 @@ class PPOTrainer(BaseRLTrainer):
         self._train_value_step(train_dataloader)
 
     @torch.inference_mode()
-    def evaluate_step(self):
-        """Run the policy on evaluation dataset"""
-
-        if self.eval_env is None:
-            return
-
-        local_rollout_size = (
-            self.config.eval_rollout_size
-            // self.config.eval_batch_size
-            // self.dist_ops.world_size
-        )
-
-        # Use greedy sampling
-        if self.is_inference_engine_enabled():
-            eval_sampling_params = {
-                'max_new_tokens': self.config.max_completion_tokens,
-                'temperature': 0.0,
-            }
-        else:
-            eval_sampling_params = {
-                'max_new_tokens': self.config.max_completion_tokens,
-                'temperature': None,
-                'top_p': None,
-                'top_k': None,
-                'repetition_penalty': None,
-                'do_sample': False,
-            }
-
-        with self.unwrapped_model_for_generation() as policy_model:
-            for _ in range(local_rollout_size):
-                outputs = self.eval_env.rollout(
-                    policy_model, eval_sampling_params
-                )
-                self.log_batch_episodes(
-                    self._eval_phase, outputs, self.global_step
-                )
-
-    @torch.inference_mode()
-    def generate_experience(self) -> List[EpisodeData]:
+    def collect_training_experience(self) -> List[EpisodeData]:
         """Generates samples using the current policy."""
 
         if self.is_inference_engine_enabled():
@@ -438,11 +269,8 @@ class PPOTrainer(BaseRLTrainer):
                 if outputs:
                     collected_episodes.extend(outputs)
                     local_count += len(outputs)
-                    self.log_batch_episodes(
-                        self._train_phase, outputs, self.global_step
-                    )
                     step_count += 1
-                    # Log progress every 50 valid steps or at completion
+                    # Log progress every 50 valid steps
                     if (
                         step_count % 50 == 0
                         or local_count >= local_rollout_size
@@ -452,6 +280,9 @@ class PPOTrainer(BaseRLTrainer):
                             f"Progress: {progress:.2f}% ({local_count}/{local_rollout_size} episodes collected)"
                         )
 
+        self.log_episodes(
+            self._train_phase, collected_episodes, self.global_step
+        )
         return collected_episodes
 
     @torch.no_grad()
@@ -607,7 +438,7 @@ class PPOTrainer(BaseRLTrainer):
                     input_ids=input_ids, attention_mask=attention_mask
                 ).logits
 
-                loss = self.compute_policy_loss(pi_logits, micro_batch)
+                loss = self._compute_policy_loss(pi_logits, micro_batch)
 
                 del (micro_batch, input_ids, attention_mask, pi_logits)
                 self.clean_up()
@@ -637,7 +468,7 @@ class PPOTrainer(BaseRLTrainer):
                     input_ids=input_ids, attention_mask=attention_mask
                 ).values
 
-                loss = self.compute_value_loss(pred_values, micro_batch)
+                loss = self._compute_value_loss(pred_values, micro_batch)
 
                 del (micro_batch, input_ids, attention_mask, pred_values)
                 self.clean_up()
@@ -655,10 +486,157 @@ class PPOTrainer(BaseRLTrainer):
                         self.value_engine.get_lr()[0],
                     )
 
+    def _compute_policy_loss(
+        self,
+        pi_logits: torch.Tensor,
+        experience_batch: TransitionData,
+    ) -> torch.Tensor:
+        """Compute policy loss for a single training batch
+
+        Args:
+            pi_logits (torch.Tensor): Raw logits of actions computed using
+                current policy model, shape [batch_size, seq_len]
+            experience_batch (TransitionData): A batch of samples collected
+                during generation
+        Returns:
+            torch.Tensor: The total loss tensor
+        """
+        behavior_logprobs = experience_batch.pi_logprobs.to(self.device)
+        actions = experience_batch.actions.to(self.device)
+        advantages = experience_batch.advantages.to(self.device)
+        loss_mask = experience_batch.loss_mask.to(self.device)
+
+        advantages = advantages.float()
+        behavior_logprobs = behavior_logprobs.float()
+        pi_logits = pi_logits.float()
+
+        if self.config.normalize_advantages:
+            advantages = self.dist_masked_whiten(advantages, loss_mask, dim=1)
+
+        # PPO clipped surrogate PG loss
+        pi_logprobs = self.compute_logprobs_from_logits(pi_logits, actions)
+        ratio = torch.exp(pi_logprobs - behavior_logprobs)
+        clipped_ratio = ratio.clamp(
+            1 - self.config.clip_eps, 1 + self.config.clip_eps
+        )
+        pg_losses1 = ratio * advantages.detach()
+        pg_losses2 = clipped_ratio * advantages.detach()
+        pg_losses = -torch.min(pg_losses1, pg_losses2)
+
+        with torch.no_grad():
+            approxkl = (
+                0.5
+                * self.masked_mean(
+                    torch.square(pi_logprobs - behavior_logprobs),
+                    loss_mask,
+                    dim=1,
+                ).mean()
+            )
+            clipfrac = self.masked_mean(
+                torch.lt(pg_losses2, pg_losses1), loss_mask, dim=1
+            ).mean()
+
+        # First average over the sequence length, then average over the batch
+        pg_loss = self.masked_mean(pg_losses, loss_mask, dim=1).mean()
+
+        # Compute entropy for the policy
+        entropies = self.compute_entropy_from_logits(
+            logits=pi_logits, loss_mask=loss_mask
+        )
+        entropy = entropies.mean()
+        entropy_loss = -(self.config.entropy_loss_coef * entropy)
+
+        self.logger.log_scalar('train/pg_loss', pg_loss.detach().item())
+        self.logger.log_scalar(
+            'train/entropy_loss', entropy_loss.detach().item()
+        )
+        self.logger.log_scalar('policy/entropy', entropy.detach().item())
+        self.logger.log_scalar('policy/approxkl', approxkl.detach().item())
+        self.logger.log_scalar('policy/clipfrac', clipfrac.detach().item())
+
+        loss = pg_loss + entropy_loss
+
+        # Compute KL divergence if coefficient is positive
+        if self.config.kl_loss_coef > 0:
+            # We add the kl as auxiliary loss instead of mixing pre-token KL to the rewards
+            ref_logprobs = experience_batch.ref_logprobs.to(self.device)
+            # Compute the KL divergence between the model and the reference model
+            per_token_kl = (
+                torch.exp(ref_logprobs - pi_logprobs)
+                - (ref_logprobs - pi_logprobs)
+                - 1
+            )
+
+            kl = self.masked_mean(per_token_kl, loss_mask, dim=1).mean()
+            kl_loss = self.config.kl_loss_coef * kl
+
+            loss += kl_loss
+            self.logger.log_scalar('train/kl_loss', kl_loss.detach().item())
+            self.logger.log_scalar('objective/kl', kl.detach().item())
+
+        return loss
+
+    def _compute_value_loss(
+        self,
+        pred_values: torch.Tensor,
+        experience_batch: TransitionData,
+    ) -> torch.Tensor:
+        """Compute value loss for a single training batch
+
+        Args:
+            pred_values (torch.Tensor): Predicted state values computed using
+                current value model, shape [batch_size, seq_len]
+            experience_batch (TransitionData): A batch of samples collected
+                during generation
+
+        Returns:
+            torch.Tensor: The total loss tensor
+        """
+        values = experience_batch.values.to(self.device)
+        returns = experience_batch.returns.to(self.device)
+        loss_mask = experience_batch.loss_mask.to(self.device)
+
+        values = values.float()
+        returns = returns.float()
+        pred_values = pred_values.float()
+
+        # # Value loss using MC returns
+        # losses = 0.5 * torch.square(returns - pred_values)
+        # loss = self.masked_mean(losses, loss_mask, dim=1).mean()
+
+        # Compute clipped value loss
+        vpred_clipped = torch.clamp(
+            pred_values,
+            values - self.config.value_clip_eps,
+            values + self.config.value_clip_eps,
+        )
+        vf_losses1 = torch.square(pred_values - returns)
+        vf_losses2 = torch.square(vpred_clipped - returns)
+        losses = 0.5 * torch.max(vf_losses1, vf_losses2)
+        loss = self.masked_mean(losses, loss_mask, dim=1).mean()
+        with torch.no_grad():
+            clipfrac = self.masked_mean(
+                torch.gt(vf_losses2, vf_losses1), loss_mask, dim=1
+            ).mean()
+            pred_error = self.masked_mean(
+                torch.square(pred_values.detach() - returns.detach()),
+                loss_mask,
+                dim=1,
+            ).mean()
+            returns_var = self.masked_var(returns, loss_mask, dim=1).mean()
+            var_explained = (1 - pred_error / (returns_var + 1e-8)).item()
+
+        self.logger.log_scalar('train/vf_loss', loss.detach().item())
+        self.logger.log_scalar('value/error', pred_error.detach().item())
+        self.logger.log_scalar('value/clipfrac', clipfrac.detach().item())
+        self.logger.log_scalar('value/returns_var', returns_var.detach().item())
+        self.logger.log_scalar('value/var_explained', var_explained)
+
+        return loss
+
     def _train_collate_fn(self, batch: List[TransitionData]) -> TransitionData:
         """Collate function for DataLoader during training"""
         pad_token_id = self.tokenizer.pad_token_id
-        torch_dtype = self.torch_dtype
 
         # Pad states and actions (long tensors)
         batch_states = pad_sequence(
@@ -680,51 +658,31 @@ class PPOTrainer(BaseRLTrainer):
         ).bool()
 
         # Pad values, return, advantages, pi_logprobs, and ref_logprobs (float tensors)
-        batch_values = (
-            pad_sequence(
-                [item.values for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
-        batch_returns = (
-            pad_sequence(
-                [item.returns for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
-        batch_advantages = (
-            pad_sequence(
-                [item.advantages for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
-        batch_pi_logprobs = (
-            pad_sequence(
-                [item.pi_logprobs for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
-        batch_ref_logprobs = (
-            pad_sequence(
-                [item.ref_logprobs for item in batch],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            .float()
-            .to(torch_dtype)
-        )
+        batch_values = pad_sequence(
+            [item.values for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
+        batch_returns = pad_sequence(
+            [item.returns for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
+        batch_advantages = pad_sequence(
+            [item.advantages for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
+        batch_pi_logprobs = pad_sequence(
+            [item.pi_logprobs for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
+        batch_ref_logprobs = pad_sequence(
+            [item.ref_logprobs for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ).float()
 
         return TransitionData(
             states=batch_states,

@@ -1,8 +1,8 @@
-# RL extended GRPO config
+# RL DAPO config using GRPO as base trainer
 seed: 117
 
 logging:
-  output_dir: "./runs/test_extended_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_dapo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -24,26 +24,28 @@ model:
   flash_attention: true
   model_max_length: 4000
 
-grpo:
-  max_steps: 500
+dapo_grpo:
+  max_steps: 100
   train_rollout_size: 512
   num_updates: 1
   train_micro_batch_size: 4
   train_batch_size: 128
   gamma: 1.0                            # discount
-  clip_eps: 0.2                         # PPO-style policy clip parameter
-  group_reward_zero_mean: false         # group reward is normalized to have a zero mean without standard deviation scaling
+  # DAPO improvements
+  clip_eps_high: 0.28                   # PPO-style policy clip higher bound
+  clip_eps_low: 0.2                     # PPO-style policy clip lower bound
+  length_max: 950                      # Maximum completion length for length penalty reward
+  length_cache: 100                     # Maximum completion length cache buffer for length penalty reward
   normalize_advantages: false
   kl_loss_coef: 0.0
   entropy_loss_coef: 0.0
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout
-  max_prompt_tokens: 512                # skip sample question that's too long
   group_size: 16                        # for each sample we generate a group of answers
   max_completion_tokens: 1024
-  temperature: 0.9                      # not used
-  repetition_penalty: 1.0               # not used
+  temperature: 0.9                      
+  repetition_penalty: 1.0
   top_p: 0.95
   top_k: -1                             # -1 to disable
 
@@ -54,29 +56,6 @@ grpo:
 
   # others
   checkpoint_interval: 100              # every N global steps
-
-  filter_low_reward_std: false          # filter out group samples with near identical rewards
-
-  # exploration generation
-  min_top_p: 0.8
-  max_top_p: 1.0
-  min_temperature: 0.5
-  max_temperature: 1.5
-
-  # control rate of explore
-  explore_init_epsilon: 0.99             # exploration epsilon decay
-  explore_min_epsilon: 0.0
-  explore_decay_steps: 200
-
-  # exploring start
-  explore_steps: 3                     # initial start steps to do random sampling
-  explore_top_k: 100                    # Top K tokens to random sample during initial start steps
-  explore_decay: 0.9
-  
-  # continue generation with token replacement
-  replace_check_top_k: 1
-  replace_prob: 0.5
-  replace_max_count: 2                 # max number of retry by adding the special token and continue generation
 
 
 deepspeed:
@@ -94,6 +73,7 @@ deepspeed:
       betas: [0.9, 0.999]
       eps: 1.0e-8
       weight_decay: 0.0
+      adam_w_mode: true
   # scheduler:
   #   type: "WarmupDecayLR"
   #   params:

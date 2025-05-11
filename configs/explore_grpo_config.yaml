@@ -1,8 +1,8 @@
-# RL GRPO config
+# RL explore GRPO config
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_qwen2.5_1.5b_math"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_explore_grpo_qwen2.5_0.5b_gsm8k"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -12,46 +12,65 @@ logging:
 
 dataset: 
   names:                                # List of math datasets to load
-    # - "gsm"
-    - "math"
+    - "gsm"
+    # - "math"
   # max_train_samples: 4096             # for a quick run
   # max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B"
+  pretrained_model: "Qwen/Qwen2.5-0.5B"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
   model_max_length: 4000
 
 grpo:
-  max_steps: 100
+  max_steps: 200
   train_rollout_size: 512
   num_updates: 1
-  train_micro_batch_size: 2
-  train_batch_size: 128
-  gamma: 1.0                            # discount
-  clip_eps: 0.2                         # PPO-style policy clip higher bound
+  train_micro_batch_size: 4
+  train_batch_size: 128                       
+  gamma_min: 0.998                      # discount bounds
+  gamma_max: 0.9998                     
+  clip_eps_max: 0.3                     # PPO-style policy clip eps bounds
+  clip_eps_min: 0.15                     
   normalize_advantages: false
   kl_loss_coef: 0.0
   entropy_loss_coef: 0.0
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout
-  group_size: 8                        # for each sample we generate a group of answers
-  max_completion_tokens: 1500
-  temperature: 0.9                      
-  repetition_penalty: 1.0
-  top_p: 0.95
+  group_size: 16                        # for each sample we generate a group of answers
+  max_completion_tokens: 1024
+  temperature: 0.9                      # not used
+  repetition_penalty: 1.0               # not used
+  top_p: 0.95                           # not used
   top_k: -1                             # -1 to disable
 
   # evaluation
-  eval_rollout_size: 512    
+  eval_rollout_size: 1024    
   eval_batch_size: 64
   eval_interval: 20                     # every N global steps
 
   # others
   checkpoint_interval: 100              # every N global steps
+
+  filter_low_reward_std: false          # filter out group samples with near identical rewards
+
+  # control rate of explore
+  explore_eps_max: 0.9                 # exploration epsilon decay
+  explore_eps_min: 0.0
+  explore_percentage: 0.5              # percentage of total training steps
+
+  # group sampling params
+  min_top_p: 0.8
+  max_top_p: 1.0
+  min_temperature: 0.6
+  max_temperature: 1.2
+
+  # exploring start
+  random_start_steps: 5                # initial start steps to do random sampling
+  random_start_top_k: 16               # Top K tokens to random sample during initial start steps
 
 
 deepspeed:
@@ -69,7 +88,6 @@ deepspeed:
       betas: [0.9, 0.999]
       eps: 1.0e-8
       weight_decay: 0.0
-      adam_w_mode: true
   # scheduler:
   #   type: "WarmupDecayLR"
   #   params:

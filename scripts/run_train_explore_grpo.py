@@ -1,4 +1,4 @@
-"""Script to run RL extended GRPO fine-tuning."""
+"""Script to run RL explore GRPO fine-tuning."""
 
 import argparse
 import os
@@ -9,31 +9,26 @@ import deepspeed
 import torch
 from transformers import PreTrainedTokenizer
 
-from rl4llm.core.base_env import BaseRewardFunction
+from rl4llm.core.base_env import BaseRewardFunction, ChatMessage
 from rl4llm.core.distributed import DistributedOps
 from rl4llm.data import load_multiple_datasets
-from rl4llm.envs import (
-    ExploreHfMDPEnv,
-    ExploreSglMDPEnv,
-    HfMDPEnv,
-    SglMDPEnv,
-)
+from rl4llm.envs import ExploreSglMDPEnv, SglMDPEnv
 from rl4llm.graders.math_grader import math_problem_grader
 from rl4llm.inference.sgl_client import SGLangClient
-from rl4llm.trainers.extended_grpo_trainer import (
-    ExtendedGRPOConfig,
-    ExtendedGRPOTrainer,
+from rl4llm.trainers.explore_grpo_trainer import (
+    ExploreGRPOConfig,
+    ExploreGRPOTrainer,
 )
 from rl4llm.utils import load_yaml_config_file, set_seed
 from rl4llm.utils.model_utils import build_policy_model_and_tokenizer
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='RL extended GRPO fine-tuning')
+    parser = argparse.ArgumentParser(description='RL explore GRPO fine-tuning')
     parser.add_argument(
         '--config-file',
         type=str,
-        default='./configs/extended_grpo_config.yaml',
+        default='./configs/explore_grpo_config.yaml',
         # required=True,
         help='Path to the yaml file contains all the essential configuration',
     )
@@ -81,76 +76,66 @@ def parse_args():
     return args
 
 
-PROMPT_TEMPLATE = """
-Question: {question}
+def apply_custom_chat_template(tokenizer):
+    """This could be useful for training on base-model or for special use cases (like with special pre-filling for generation)"""
+    # Define a Jinja2 chat template string
 
-Answer: Let's think step by step.
-"""
+    jinja_chat_template = (
+        '{% for message in messages %}'
+        "{% if message.role == 'user' %}"
+        'Question: {{ message.content }}\n\n'
+        "Answer: Let's think step by step.\n"
+        "{% elif message.role == 'assistant' %}"
+        '{{ message.content }}'
+        "{% elif message.role == 'system' %}"
+        '{{ message.content }}\n\n'
+        '{% endif %}'
+        '{% endfor %}'
+    )
 
-
-# PROMPT_TEMPLATE = """
-# Please first think about the reasoning process step by step, and conclude by providing your final answer within LaTeX-formatted box: \\boxed{{}}.
-
-# Question: {question}
-
-# Answer: Let's think step by step.
-# """
-
-
-# PROMPT_TEMPLATE = """<|im_start|>system
-# You are a helpful assistant.<|im_end|>
-# <|im_start|>user
-# Please first think about the reasoning process step by step, and put your final answer within \\boxed{{}}.
-
-# Question:
-# {question}<|im_end|>
-# <|im_start|>assistant
-# """
+    tokenizer.chat_template = jinja_chat_template
 
 
-def apply_prompt_template(item: Dict) -> Dict:
-    """Apply the prompt template for sample, assume the template has a 'question' place holder"""
-    question = item['question']
-
-    prompt = PROMPT_TEMPLATE.format(question=question)
-
-    return {'prompt': prompt.strip()}
+def prepare_initial_chat_messages(item: Dict) -> Dict:
+    """Build chat-style messages for initial state"""
+    messages = [
+        {'role': 'user', 'content': item['question'].strip()},
+    ]
+    return {'messages': messages}
 
 
 class AccuracyRewardFunction(BaseRewardFunction):
+    """Implements the accuracy reward for math problems"""
 
     def __init__(self, name='accuracy_reward'):
         super().__init__(name)
 
     def __call__(
         self,
-        completions: List[str],
-        ground_truths: List[Union[str | float | int]],
+        messages: List[ChatMessage],
+        ground_truth: Union[str | float | int],
         **kwargs: Dict[str, Any],
-    ) -> List[float]:
+    ) -> float:
         """Implements the reward function.
 
         Args:
-            completions (List[str]): LLM generated completion texts.
-            ground_truths (List[Union[str | float | int]]): Ground truth for the problem.
+            messages (List[ChatMessage]]: Full chat history for the sample.
+            ground_truth (Union[str | float | int]): Ground truth for the problem.
             **kwargs (Dict[str, Any]): Any additional data.
 
         Returns:
-            List[float]: A list of scalar rewards.
+            float: A scalar rewards.
         """
-        if isinstance(ground_truths, str):
-            ground_truths = [ground_truths]
-        if len(ground_truths) == 1:
-            ground_truths = [ground_truths] * len(completions)
-        if len(completions) != len(ground_truths):
-            raise ValueError(
-                'Completion and ground truth have mismatch elements'
-            )
 
-        return [
-            math_problem_grader(full_answer=answer, ground_truth=truth)
-            for answer, truth in zip(completions, ground_truths)
-        ]
+        # get last completion
+        completion = messages[-1].content
+
+        return math_problem_grader(
+            full_answer=completion,
+            ground_truth=ground_truth,
+            min_score=-1.0,
+            max_score=1.0,
+        )
 
 
 def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -162,22 +147,12 @@ def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
 
 def prepare_explore_processor_config(
     tokenizer: PreTrainedTokenizer,
-    grpo_config: ExtendedGRPOConfig,
+    grpo_config: ExploreGRPOConfig,
     xml_format: bool = False,
 ) -> Dict:
     """Creates the exploration logits processor needed config"""
 
-    replace_source_tokens = (
-        [tokenizer.encode('</think>')[0]]
-        if xml_format
-        else [tokenizer.eos_token_id]
-    )
-
-    replace_target_tokens = [
-        tokenizer.encode(f' {kwd}')[0]
-        for kwd in ['Wait', 'But', 'Hmm', 'Actually', 'However']
-    ]
-    explore_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
+    random_start_skip_n = len(tokenizer.encode('<think>')) if xml_format else 0
 
     group_temperature = torch.linspace(
         grpo_config.min_temperature,
@@ -194,15 +169,9 @@ def prepare_explore_processor_config(
     return {
         'group_temperature': group_temperature,
         'group_top_p': group_top_p,
-        'explore_steps': grpo_config.explore_steps,
-        'explore_top_k': grpo_config.explore_top_k,
-        'explore_skip_n': explore_skip_n,
-        'explore_decay': grpo_config.explore_decay,
-        'replace_source_tokens': replace_source_tokens,
-        'replace_target_tokens': replace_target_tokens,
-        'replace_check_top_k': grpo_config.replace_check_top_k,
-        'replace_max_count': grpo_config.replace_max_count,
-        'replace_prob': grpo_config.replace_prob,
+        'random_start_steps': grpo_config.random_start_steps,
+        'random_start_top_k': grpo_config.random_start_top_k,
+        'random_start_skip_n': random_start_skip_n,
     }
 
 
@@ -224,7 +193,7 @@ def main():
     model_config = job_config['model']
     model_name = model_config['pretrained_model']
     deepspeed_config = job_config['deepspeed']
-    grpo_config = ExtendedGRPOConfig(**job_config['grpo'])
+    grpo_config = ExploreGRPOConfig(**job_config['grpo'])
 
     set_seed(seed)
 
@@ -240,6 +209,7 @@ def main():
     )
     deepspeed_config['train_batch_size'] = grpo_config.train_batch_size
 
+    # Load and pre-processing dataset
     train_dataset, eval_dataset = load_multiple_datasets(
         datasets_config['names']
     )
@@ -250,12 +220,17 @@ def main():
     if max_test_samples is not None and max_test_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle().select(range(max_test_samples))
 
+    # Create models
     policy_model, tokenizer = build_policy_model_and_tokenizer(
         model_config, torch_dtype
     )
 
-    train_dataset = train_dataset.map(apply_prompt_template)
-    eval_dataset = eval_dataset.map(apply_prompt_template)
+    # Optional, use custom template for training with base model
+    if not model_name.lower().endswith('instruct'):
+        apply_custom_chat_template(tokenizer)
+
+    train_dataset = train_dataset.map(prepare_initial_chat_messages)
+    eval_dataset = eval_dataset.map(prepare_initial_chat_messages)
 
     policy_engine, *_ = deepspeed.initialize(
         model=policy_model,
@@ -299,18 +274,13 @@ def main():
     explore_env_args = prepare_explore_processor_config(tokenizer, grpo_config)
     inference_client = None
 
-    eval_env_cls = HfMDPEnv
-    train_env_cls = ExploreHfMDPEnv
-    if args.use_infer_server:
-        inference_client = SGLangClient(
-            host=args.infer_host,
-            port=args.infer_port,
-            cohost_mode=args.infer_cohost_mode,
-        )
-        eval_env_cls = SglMDPEnv
-        train_env_cls = ExploreSglMDPEnv
+    inference_client = SGLangClient(
+        host=args.infer_host,
+        port=args.infer_port,
+        cohost_mode=args.infer_cohost_mode,
+    )
 
-    train_env = train_env_cls(
+    train_env = ExploreSglMDPEnv(
         dataset=train_dataset,
         batch_size=1,  # always set batch size to 1 for training
         group_size=grpo_config.group_size,
@@ -318,14 +288,14 @@ def main():
         **explore_env_args,
     )
 
-    eval_env = eval_env_cls(
+    eval_env = SglMDPEnv(
         dataset=eval_dataset,
         batch_size=grpo_config.eval_batch_size,
         group_size=1,  # always set group size to 1 for evaluation
         **env_args,
     )
 
-    trainer = ExtendedGRPOTrainer(
+    trainer = ExploreGRPOTrainer(
         config=grpo_config,
         tokenizer=tokenizer,
         policy_engine=policy_engine,
