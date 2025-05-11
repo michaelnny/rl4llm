@@ -2,7 +2,7 @@
 seed: 117
 
 logging:
-  output_dir: "./runs/test_grpo_qwen2.5_1.5b_inst_math"  # where to save all artifacts (tensorboard events, samples, checkpoints)
+  output_dir: "./runs/test_grpo_qwen2.5_1.5b_math"  # where to save all artifacts (tensorboard events, samples, checkpoints)
   enable_tensorboard: true
   sample_buffer_size: 100               # how often to save samples to external files
   sample_file_format: 'jsonl'           # external file type, support 'jsonl', 'jsonl.gz', 'parquet'
@@ -18,7 +18,7 @@ dataset:
   # max_test_samples: 1024        
 
 model:
-  pretrained_model: "Qwen/Qwen2.5-1.5B-Instruct"
+  pretrained_model: "Qwen/Qwen2.5-1.5B"
   load_in_4bit: false
   gradient_checkpointing: true
   flash_attention: true
@@ -38,7 +38,7 @@ grpo:
   sync_reference_interval: 0            # every N global steps
 
   # for train rollout
-  group_size: 16                        # for each sample we generate a group of answers
+  group_size: 8                        # for each sample we generate a group of answers
   max_completion_tokens: 1500
   temperature: 0.9                      
   repetition_penalty: 1.0
