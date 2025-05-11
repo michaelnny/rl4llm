@@ -1,9 +1,9 @@
 """
 Base RL trainer for LLMs in distributed training setup.
 
-This module defines an abstract `BaseRLTrainer` class that provides the foundational
-infrastructure for reinforcement learning algorithms with LLM environments,
-including training loop, checkpointing, model sync, and logging.
+This module defines an abstract `BaseRLTrainer` class that provides the
+common features for reinforcement learning algorithms with LLM environments,
+including training loop, model sync, and logging.
 """
 
 import os
@@ -105,7 +105,6 @@ class BaseRLConfig(BaseModel):
     kl_loss_coef: float = Field(
         0.04, ge=0.0, le=1.0, description='KL penalty loss coefficient'
     )
-    # clip_grad_norm: Optional[float] = Field(0.0, ge=0.0, le=10.0, description='Clip L2 gradient norm')
 
     sync_reference_interval: int = Field(
         0,

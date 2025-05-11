@@ -1,209 +1,168 @@
-# Reinforcement Learning Framework for LLM Fine-Tuning
+# RL4LLM: A Research-Friendly RL Framework for LLM Fine-Tuning
 
-This project provides a light-weight, research-friendly framework to fine-tune Large Language Models (LLMs) using Reinforcement Learning (RL). It simplifies new algorithm research by managing low-level tasks, with clear component separation design, allowing researchers to focus on algorithm development.
+This framework provides a modular and extensible platform for fine-tuning Large Language Models (LLMs) using Reinforcement Learning (RL). It is designed to simplify RL research for LLMs by abstracting low-level details.
+
+> [!IMPORTANT]
+> Currently validated on single-node setups with smaller LLMs. Contributions for broader testing and feature enhancements are welcome.
 
 ## Key Features
 
-- **Customizable Environments**: Support for various tasks (tool-use, multi-turn).
-- **Efficient Inference**: Support for fast SGLang inference and native HuggingFace transformer model generation.
-- **Scalable Training**: Uses DeepSpeed for optimized model training.
-- **Clean Architecture**: Clearly separates low-level operations from algorithmic logic.
-
-The goal is to make small-scale RL for LLM fine-tuning accessible to everyone: bring your own dataset, define reward function, then start run experiments.
-
-> [!IMPORTANT]
-> Currently only tested on single-node setups with a tiny size LLM. Need support/volunteers to help with testing and improvements.
-
-
-## Supported RL Algorithms
-
-| Algorithm | Paper | Key Features |
-|-----------|--------------|--------------|
-| **Proximal Policy Optimization (PPO)** | - https://arxiv.org/abs/1707.06347 <br>- https://arxiv.org/abs/2203.02155 | - SGLang for high-performance inference <br>- DeepSpeed for training <br>- Value Model bootstrapping |
-| **Group Relative Policy Optimization (GRPO)** | - https://arxiv.org/abs/2402.03300 | - SGLang for high-performance inference <br>- DeepSpeed for training |
-| **Decoupled Clip and Dynamic sAmpling Policy Optimization (DAPO)** | - https://arxiv.org/abs/2503.14476 | - SGLang for high-performance inference <br>- DeepSpeed for training <br>- Based on GRPO |
-
+*   **Modular Design**: Clear separation of concerns, allowing researchers to focus on algorithmic innovations.
+*   **Customizable Environments**: Easily adapt or create new environments for diverse tasks (e.g., tool-use, multi-turn dialogue) by extending `BaseMDPEnv`.
+*   **Flexible Inference**: Supports efficient inference engines like SGLang and standard HuggingFace Transformers.
+*   **Optimized Training**: Integrates with DeepSpeed for efficient model training.
 
 ## Framework Overview
 
-The core of the framework was the modular components, especially the RL `Envs`, Inference Server/Client. This makes it possible to quickly adapt training on new tasks, and also makes it extremely easy to work with special inference engines like `SGLang`.
-
-Here’s a simple diagram:
+The system typically involves a training process that interacts with an inference server for generating environment rollouts. Model weights are synchronized between these components.
 
 ```
 ┌──────────────────────┐                           ┌────────────────────────────────────┐
-│ SGLang Inference     │                           │ DeepSpeed Training Server          │
-│ Server               │                           │                                    │
-│                      │                           │ ┌────────────┐      ┌────────────┐ │
-│                      │ <─────── Rollout ───────> │ │ Inference  │      │ Inference  │ │
-│                      │          Requests (HTTP)  │ │ Client     │      │ Client     │ │
+│ Inference Server     │                           │ DeepSpeed Training Server          │
+│ (e.g., SGLang)       │                           │                                    │
+│                      │ <─────── Rollout ───────> │ ┌────────────┐      ┌────────────┐ │
+│                      │          Requests         │ │ Inference  │      │ Inference  │ │
+│                      │                           │ │ Client     │      │ Client     │ │
 │                      │                           │ └────────────┘      └────────────┘ │
 │                      │                           │ ┌────────────┐      ┌────────────┐ │
 │                      │                           │ │ Env 0      │      │ Env 1      │ │
-│                      │                           │ │ (Dataset 0)│      │ (Dataset 1)│ │
 │                      │                           │ └────────────┘      └────────────┘ │
 │                      │                           │       │                   │        │
 │                      │                           │       ▼                   ▼        │
 │                      │                           │ ┌────────────┐      ┌────────────┐ │
 │                      │                           │ │ Rank 0     │      │ Rank 1     │ │
-│                      │                           │ │ (Master)   │      │            │ │
 │                      │                           │ └────────────┘      └────────────┘ │
 │                      │                           └────────────────────────────────────┘
 │                      │                                   │
-│                      │                                   │ Save Model
-│                      │                                   │ Weights
+│                      │                                   │ Save Model Weights
 │                      │                                   ▼
 │                      │                          ┌──────────────────────┐
 │                      │<───── Load Weights ──────│ Shared File System   │
-│                      │         Path             └──────────────────────┘
-└──────────────────────┘
+└──────────────────────┘                          └──────────────────────┘
 ```
-
 > [!TIP]
-> Check the example at `scripts` on how to use the `SGLangClient` that uses HTTP to call the inference server, and an `SglMDPEnv` that can handle sample generation.
+> The inference server and training can also be co-hosted on the same machine.
 
-> [!TIP]
-> Following the modular design, we can also run the SGLang inference server and deepspeed training on the single server as in `co-hosting mode`.
+## Supported RL Algorithms
 
+| Algorithm                                                    | Paper                                                                 | Key Features                                                                                              |
+| :----------------------------------------------------------- | :-------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------- |
+| **Proximal Policy Optimization (PPO)**                       | [Ouyang et al., 2022](https://arxiv.org/abs/2203.02155)              | SGLang inference, DeepSpeed training, Value Model bootstrapping.                                          |
+| **Group Relative Policy Optimization (GRPO)**                | [Shao et al., 2024](https://arxiv.org/abs/2402.03300)                   | SGLang inference, DeepSpeed training.                                                                     |
+| **Decoupled Clip and Dynamic sAmpling Policy Opt. (DAPO)** | [Yu et al., 2025](https://arxiv.org/abs/2503.14476) | SGLang inference, DeepSpeed training. Based on GRPO.|
 
-## Sample Generation Environments
+## Running Experiments
 
-We adapt the MDP environment concept from classic RL, where sample generation was handled inside the MDP environment. The idea is the MDP env will collect the rollout and return the episode samples in a unified data structure. This avoids cluttering the actual RL algorithm.
+The `scripts/` directory contains example scripts for running various RL algorithms and tasks. Each script typically involves:
+1.  Launching an inference server (e.g., SGLang).
+2.  Running the main training script with `deepspeed`, pointing to a configuration file.
 
-This is especially useful in the context of LLM as we often need to handle specific tasks (MATH, coding, tools); some are more complex and require special handling. This makes adapting RL to new tasks easy as we don't need to make any changes to the RL algorithm and training code. Instead, we only need to focus on building the environment.
+**For detailed instructions and specific examples, please refer to the `README.md` file within the `scripts/` directory.**
 
-### Dataset Structure
+## Customization
 
-Each environment expects a dataset with at least two fields:
-- `messages` (chat-style message)
-- `ground_truth` (correct answer used for rewards)
+The framework is designed for easy extension.
 
----
+### 1. Custom Reward Functions
 
-### Customizing Reward Functions
+Define task-specific rewards by subclassing `BaseRewardFunction`.
 
-You can easily define your own reward functions by subclassing the provided `BaseRewardFunction`.
+> [!IMPORTANT]
+> Reward functions are designed to compute a **terminal reward** once an episode (e.g., a full multi-turn dialogue or task completion) is finished.
 
-Example:
 
 ```python
+from typing import Any, Dict, List, Union
+from rl4llm.core.base_env import BaseRewardFunction, ChatMessage
 
-from rl4llm.core.base_env import ChatMessage, BaseRewardFunction
-
-class AccuracyRewardFunction(BaseRewardFunction):
-
-    def __init__(self, name='accuracy_reward'):
+class CustomReward(BaseRewardFunction):
+    def __init__(self, name: str = "custom_reward_name", **kwargs):
         super().__init__(name)
+        # Initialize any parameters specific to your reward
 
     def __call__(
         self,
         messages: List[ChatMessage],
-        ground_truth: Union[str | float | int],
+        ground_truth: Union[str, float, int],
         **kwargs: Dict[str, Any],
-    ) -> List[float]:
-
-        # get last completion
-        completion = messages[-1].content
-
-        return math_problem_grader(
-            full_answer=completion,
-            ground_truth=ground_truth,
-        )
-
+    ) -> float:
+        # Implement your reward logic here
+        # Example: Access the last model completion
+        # completion = messages[-1].content
+        # return score based on completion and ground_truth
+        return 0.0 # Placeholder
 ```
 
-For task using multiple rewards, consider use a `reward_transform_fn` to transformer them into a single signal. For example here's an very simple example of handling mixed rewards.
+If your task involves multiple distinct reward signals (e.g., accuracy and length), you can define multiple `BaseRewardFunction` instances. Then, a `reward_transform_fn` must be provided to the environment to combine these signals into a single scalar reward for the RL algorithm.
 
 ```python
-def reward_transform_fn(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-    """Transform multiple rewards to single reward for a batch of samples"""
-    accuracy_rewards = reward_dict['accuracy_reward']  # [batch_size]
-    format_reward = reward_dict['format_reward']  # [batch_size]
-
-    return 0.8 * accuracy_rewards + 0.2 * format_reward
-
-
-train_env = SglMDPEnv(
-    ...
-    reward_transform_fn=reward_transform_fn,
-)
+# Example reward_transform_fn
+def my_reward_transformer(reward_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+    # reward_dict contains outputs from all registered reward functions
+    # e.g., reward_dict = {'accuracy_reward': tensor([0.8]), 'length_reward': tensor([0.5])}
+    combined_reward = 0.7 * reward_dict['accuracy_reward'] + 0.3 * reward_dict['length_reward']
+    return combined_reward
 ```
 
----
+### 2. Custom Environments
 
-### Creating Custom Environments
-
-It's very easy to build a custom environment, for example, multi-step scenarios or custom sampling with logits processors. All we need to do is extend the `BaseMDPEnv` class and implement the `_run_interaction_loop` logic.
+Create new environments by subclassing `BaseMDPEnv` and implementing the `_run_interaction_loop` method. This method defines how the agent interacts with the LLM to generate trajectories.
 
 ```python
-
+from typing import Any, Dict, Optional
+import torch
 from rl4llm.core.base_env import BaseMDPEnv, EnvState
 
-class MyCustomEnv(BaseMDPEnv):
-
+class CustomEnv(BaseMDPEnv):
     @torch.inference_mode()
     def _run_interaction_loop(
         self,
-        env_state: EnvState,
-        llm: Any,
-        sampling_params: Dict[str, Any],
+        env_state: EnvState,       # Initial state of the environment batch
+        llm: Any,                  # LLM interface (e.g., inference client)
+        sampling_params: Dict[str, Any], # Parameters for LLM generation
         **kwargs: Optional[Dict[str, Any]],
     ) -> EnvState:
-        # Your own loop
+        # Implement your custom interaction logic here.
+        # This involves:
+        # 1. Preparing prompts from env_state.
+        # 2. Calling the llm to get completions.
+        # 3. Processing completions and updating env_state (e.g., adding new messages).
+        # 4. Determining if episodes are done.
+        return env_state # Return the updated environment state
 ```
+Refer to existing environments in `rl4llm/envs/` for practical examples (e.g., `SglToolMDPEnv` for tool use).
 
-> [!TIP]
-> Checking the examples at `rl4llm.envs.sgl_explore_env.py` for example of custom environment using custom logits processor with SGLang inference engine.
-> Checking the examples at `rl4llm.envs.sgl_tool_env.py` for example of custom environment with basic tool-use with SGLang inference engine.
+## SGLang Integration
 
+*   **Co-hosting**: For running SGLang and training on the same server, use the `--enable-memory-saver` flag with the SGLang server (requires `pip install torch-memory-saver`).
+*   **Weight Synchronization**: Model weights are typically synchronized via checkpoint files. Ensure a shared file system if the inference server and training run on different machines. The path is set in `log_config.output_dir`.
 
-## Fast Generation with SGLang
+## Logging
 
-Launch an efficient inference server to speedup sample generation. You can either run the SGLang engine on the same server, or on separate servers. We have a simplified FastAPI server adapted from the original SGLang HTTP server located at `rl4llm.inference.sgl_http_server`, which you can launch with the custom script `rl4llm.inference.launch_sgl_server`.
+The framework includes a logging manager for metrics (TensorBoard support), episode data, and basic resource monitoring. See `BaseTrainer` for usage.
 
-> [!NOTE]
-> If running SGLang inference and deepspeed training on the same server with co-hosting mode, make sure use the `--enable-memory-saver`, this requires install the `pip install torch-memory-saver`.
+## Known Issues
 
-> [!NOTE]
-> We use model checkpoint file to sync the weights between training instance and the SGLang inference engine. If you run inference engine and training in separate servers, make sure you have a shared file system between them. The weights saving path is defined at the `log_config.output_dir` when launching the trainer.
+*   SGLang with `--enable-memory-saver` might occasionally hang, possibly due to CUDA OOM. Consider reducing memory allocation or using GPUs with more VRAM.
+*   WandB logging is not fully tested.
 
+## Contributing
 
-## Centralized Logging & Monitoring
-
-Track performance easily using the built-in logging manager. It supports:
-- Metric aggregation (mean, max, min, etc.)
-- Basic resource monitoring (CPU/GPU)
-- Logging samples to files and metrics to Tensorboard
-
-More example of the logging manager can be found at the `BaseTrainer.train` and `BaseTrainer.log_episodes`.
-
-
-## Know Issues
-
-- When running SGLang with `--enable-memory-saver`, sometimes the inference server will hangs when we try to release/resume the memory. The most likely cause is due to CUDA OOM, try reduce the memory fraction or using more powerful GPU.
-- Logging with wandb is not fully tested, may not work out of the box.
+We welcome contributions. Please submit issues or pull requests.
 
 ## License
 
-This project is licensed under the MIT License, see the LICENSE file for details.
+This project is licensed under the MIT License. See the `LICENSE` file for details.
 
+## Citation
 
-## Contribute and Collaboration
-
-We are looking for contributions and collaboration to make the framework more robust, and also to expand it to support additional features and algorithms. Issue reports and PRs are welcome.
-
-
-## Citing our work
-
-If you reference or use our project in your research, please cite our work:
-
+If you use this framework in your research, please consider citing:
 
 ```bibtex
-@software{the_rl4llm_project,
-  title = {{RL 4 LLM}: A research friendly Reinforcement Learning Framework for LLM Fine-Tuning},
-  author = {Michael Hu},
+@software{rl4llm_project_2025,
+  author = {Michael Hu and Contributors},
+  title = {{RL4LLM}: A Research-Friendly Reinforcement Learning Framework for LLM Fine-Tuning},
   url = {https://github.com/michaelnny/rl4llm},
   version = {0.1.0},
-  year = {2025},
+  year = {2025}
 }
-```
