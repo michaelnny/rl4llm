@@ -6,27 +6,32 @@ readme = "README.md"
 authors = [{ name = "Michael Hu", email = "michaelnny@gmail.com" }]
 requires-python = ">=3.11"
 dependencies = [
-    "openai==1.59.*",
-    "datasets==3.2.0",
-    "mpi4py==4.*",
-    "deepspeed==0.16.1",
-    "pydantic==2.10.4",
-    "numpy==2.2.1",
+    "mpi4py==4.0.3",
+    "mpmath==1.3.0",
+    "huggingface-hub==0.30.1",
+    "accelerate==1.6.0",
+    "bitsandbytes==0.45.4",
+    "flash_attn==2.7.4.post1",
+    "datasets==3.5.0",
+    "deepspeed==0.16.7",
+    "transformers==4.51.3",
+    "triton==3.2.0",
+    "torch==2.5.1",
+    "sglang==0.4.6.post3",
+    "sgl-kernel==0.1.2",
+    "flashinfer-python==0.2.5",
+    "torch-memory-saver==0.0.5",
+    "pyarrow==19.0.1",
+    "pydantic==2.11.2",
+    "packaging==24.2",
+    "numpy==2.1.2",
     "pandas==2.2.3",
+    "psutil==7.0.0",
     "PyYAML==6.0.2",
-    "setuptools==75.5.0",
-    "tiktoken==0.8.0",
-    "torch==2.5.*",
+    "sympy==1.13.1",
+    "tensorboard==2.19.0",
     "tqdm==4.67.1",
-    "tensorboard==2.18.0",
-    "transformers==4.48.*",
-    "accelerate==1.2.0",
-    "flash-attn==2.7.*",
-    "bitsandbytes==0.45.*",
 ]
-
-[project.scripts]
-rl4llm = 'rl4llm.scripts.cli:main' # Single entry point
 
 [build-system]
 requires = ["setuptools>=45", "wheel", "setuptools_scm>=6.2"]
