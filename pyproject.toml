@@ -5,28 +5,7 @@ description = "RL for LLM"
 readme = "README.md"
 authors = [{ name = "Michael Hu", email = "michaelnny@gmail.com" }]
 requires-python = ">=3.11"
-dependencies = [
-    "openai==1.59.*",
-    "datasets==3.2.0",
-    "mpi4py==4.*",
-    "deepspeed==0.16.1",
-    "pydantic==2.10.4",
-    "numpy==2.2.1",
-    "pandas==2.2.3",
-    "PyYAML==6.0.2",
-    "setuptools==75.5.0",
-    "tiktoken==0.8.0",
-    "torch==2.5.*",
-    "tqdm==4.67.1",
-    "tensorboard==2.18.0",
-    "transformers==4.48.*",
-    "accelerate==1.2.0",
-    "flash-attn==2.7.*",
-    "bitsandbytes==0.45.*",
-]
 
-[project.scripts]
-rl4llm = 'rl4llm.scripts.cli:main' # Single entry point
 
 [build-system]
 requires = ["setuptools>=45", "wheel", "setuptools_scm>=6.2"]
